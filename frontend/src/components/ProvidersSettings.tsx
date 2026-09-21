@@ -1,0 +1,201 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Plus, Trash2, KeyRound } from "lucide-react";
+import { api } from "@/lib/api";
+import { HttpKeyBanner } from "@/components/HttpKeyBanner";
+
+interface Provider {
+  id: string;
+  name: string;
+  kind: string;
+  base_url?: string | null;
+  default_model?: string | null;
+  enabled: boolean;
+  active: boolean;
+  has_secret: boolean;
+}
+
+const KINDS = ["openai_compatible", "anthropic", "custom"];
+
+export function ProvidersSettings() {
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [insecure, setInsecure] = useState(false);
+  const [ack, setAck] = useState(false);
+  const [form, setForm] = useState({
+    name: "",
+    kind: "openai_compatible",
+    base_url: "",
+    default_model: "",
+    api_key: "",
+  });
+
+  useEffect(() => {
+    if (typeof window !== "undefined" && !window.isSecureContext) setInsecure(true);
+  }, []);
+
+  const { data: providers = [], isLoading } = useQuery({
+    queryKey: ["providers"],
+    queryFn: () => api.get<Provider[]>("/providers"),
+  });
+
+  const create = useMutation({
+    mutationFn: () =>
+      api.post<Provider>("/providers", {
+        name: form.name,
+        kind: form.kind,
+        base_url: form.base_url || null,
+        default_model: form.default_model || null,
+        api_key: form.api_key || null,
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["providers"] });
+      setOpen(false);
+      setForm({ name: "", kind: "openai_compatible", base_url: "", default_model: "", api_key: "" });
+    },
+  });
+
+  const remove = useMutation({
+    mutationFn: (id: string) => api.del(`/providers/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["providers"] }),
+  });
+
+  // Key entry blocked over plain HTTP until acknowledged (spec §4/§7.5).
+  const keyBlocked = insecure && !ack;
+
+  return (
+    <div>
+      <div className="mb-4 flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-semibold">Providers</h1>
+          <p className="text-sm text-neutral-500">
+            LLM connection profiles. Active profiles appear in the model picker.
+            All profiles are served through the LiteLLM proxy.
+          </p>
+        </div>
+        <button
+          onClick={() => setOpen((v) => !v)}
+          className="flex items-center gap-1.5 rounded-md bg-indigo-600 px-3 py-1.5 text-sm text-white hover:bg-indigo-500"
+        >
+          <Plus className="h-4 w-4" /> Add
+        </button>
+      </div>
+
+      <div className="mb-4">
+        <HttpKeyBanner />
+      </div>
+
+      {open && (
+        <div className="mb-5 space-y-3 rounded-lg border border-ink-700 bg-ink-900 p-4">
+          <div className="grid grid-cols-2 gap-3">
+            <input
+              className="rounded-md border border-ink-700 bg-ink-800 px-3 py-2 text-sm"
+              placeholder="Name (e.g. OpenAI)"
+              value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
+            />
+            <select
+              className="rounded-md border border-ink-700 bg-ink-800 px-3 py-2 text-sm"
+              value={form.kind}
+              onChange={(e) => setForm({ ...form, kind: e.target.value })}
+            >
+              {KINDS.map((k) => (
+                <option key={k} value={k}>
+                  {k}
+                </option>
+              ))}
+            </select>
+            <input
+              className="rounded-md border border-ink-700 bg-ink-800 px-3 py-2 text-sm"
+              placeholder="Base URL (for OpenAI-compatible / local)"
+              value={form.base_url}
+              onChange={(e) => setForm({ ...form, base_url: e.target.value })}
+            />
+            <input
+              className="rounded-md border border-ink-700 bg-ink-800 px-3 py-2 text-sm"
+              placeholder="Default model"
+              value={form.default_model}
+              onChange={(e) => setForm({ ...form, default_model: e.target.value })}
+            />
+          </div>
+
+          <div className="flex items-center gap-2">
+            <KeyRound className="h-4 w-4 text-neutral-500" />
+            <input
+              className="flex-1 rounded-md border border-ink-700 bg-ink-800 px-3 py-2 text-sm disabled:opacity-40"
+              placeholder={keyBlocked ? "Key entry blocked on plain HTTP" : "API key (stored encrypted)"}
+              type="password"
+              disabled={keyBlocked}
+              value={form.api_key}
+              onChange={(e) => setForm({ ...form, api_key: e.target.value })}
+            />
+          </div>
+          {insecure && (
+            <label className="flex items-center gap-2 text-xs text-amber-300">
+              <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} />
+              I understand keys sent over plain HTTP are not encrypted in transit.
+            </label>
+          )}
+
+          <div className="flex justify-end gap-2">
+            <button onClick={() => setOpen(false)} className="rounded-md px-3 py-1.5 text-sm text-neutral-400">
+              Cancel
+            </button>
+            <button
+              onClick={() => create.mutate()}
+              disabled={!form.name || create.isPending}
+              className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm text-white disabled:opacity-50"
+            >
+              {create.isPending ? "Saving…" : "Save profile"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {isLoading ? (
+        <p className="text-sm text-neutral-500">Loading…</p>
+      ) : providers.length === 0 ? (
+        <p className="rounded-lg border border-dashed border-ink-700 p-6 text-center text-sm text-neutral-500">
+          No providers yet. Add one to populate the model picker.
+        </p>
+      ) : (
+        <ul className="divide-y divide-ink-700 rounded-lg border border-ink-700">
+          {providers.map((p) => (
+            <li key={p.id} className="flex items-center gap-3 px-4 py-3">
+              <div className="flex-1">
+                <div className="flex items-center gap-2 text-sm">
+                  <span className="font-medium">{p.name}</span>
+                  <span className="rounded bg-ink-700 px-1.5 py-0.5 text-[10px] text-neutral-400">
+                    {p.kind}
+                  </span>
+                  {p.active && (
+                    <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[10px] text-emerald-300">
+                      active
+                    </span>
+                  )}
+                  {p.has_secret && (
+                    <span className="flex items-center gap-1 text-[10px] text-neutral-500">
+                      <KeyRound className="h-3 w-3" /> key set
+                    </span>
+                  )}
+                </div>
+                <div className="text-xs text-neutral-500">
+                  {p.base_url || "—"} · {p.default_model || "no default model"}
+                </div>
+              </div>
+              <button
+                onClick={() => remove.mutate(p.id)}
+                className="text-neutral-500 hover:text-red-400"
+                aria-label="Delete provider"
+              >
+                <Trash2 className="h-4 w-4" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}

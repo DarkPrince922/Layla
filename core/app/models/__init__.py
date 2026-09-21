@@ -1,0 +1,45 @@
+"""ORM models. Importing this package registers every table on ``Base.metadata``
+so Alembic autogeneration and metadata.create_all() see them all.
+"""
+from app.models.agent import AgentRun
+from app.models.audit import AuditLog
+from app.models.chat import Chat, Message
+from app.models.design import Design
+from app.models.mcp import IntelKey, McpServer
+from app.models.osint import OsintCase
+from app.models.persona import Persona
+from app.models.pentest import (
+    Engagement,
+    Evidence,
+    Finding,
+    Report,
+    Scope,
+    Server,
+    Venue,
+)
+from app.models.provider import Provider, ProviderKey
+from app.models.user import Project, User, Workspace
+
+__all__ = [
+    "AgentRun",
+    "AuditLog",
+    "Chat",
+    "Message",
+    "Design",
+    "IntelKey",
+    "McpServer",
+    "OsintCase",
+    "Persona",
+    "Engagement",
+    "Evidence",
+    "Finding",
+    "Report",
+    "Scope",
+    "Server",
+    "Venue",
+    "Provider",
+    "ProviderKey",
+    "Project",
+    "User",
+    "Workspace",
+]

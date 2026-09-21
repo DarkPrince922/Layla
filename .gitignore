@@ -1,0 +1,38 @@
+# --- Python / backend ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# --- Node / frontend ---
+node_modules/
+.next/
+out/
+dist/
+build/
+npm-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# --- Secrets / data (never commit) ---
+*.key
+*.pem
+secrets/
+data/
+pgdata/
+redisdata/
+
+# --- Editor / OS ---
+.DS_Store
+.idea/
+.vscode/
+*.swp

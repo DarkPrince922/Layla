@@ -1,0 +1,32 @@
+# =====================================================================
+# LiteLLM proxy config. Layla's backend talks ONLY to this proxy.
+# Provider profiles created in the UI (Settings -> Providers) are
+# rendered into a model_list like the examples below. Key rotation is
+# expressed as multiple entries sharing a model_name (LiteLLM router
+# picks a healthy key; circuit-breaking handled by Layla + router).
+# Real keys come from env, never hard-coded here.
+# =====================================================================
+
+model_list:
+  # --- example: an OpenAI-compatible endpoint (edit / add via UI) ---
+  # - model_name: gpt-4o
+  #   litellm_params:
+  #     model: openai/gpt-4o
+  #     api_base: https://api.openai.com/v1
+  #     api_key: os.environ/OPENAI_API_KEY
+  #
+  # --- example: local LM Studio / Ollama (OpenAI-compatible) ---
+  # - model_name: local-llama
+  #   litellm_params:
+  #     model: openai/local-model
+  #     api_base: http://host.docker.internal:1234/v1
+  #     api_key: "not-needed"
+
+router_settings:
+  routing_strategy: simple-shuffle
+  num_retries: 2
+  allowed_fails: 3          # circuit-breaker: cool a key down after N fails
+  cooldown_time: 60
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

@@ -1,0 +1,23 @@
+# =====================================================================
+# Layla reverse proxy.
+# dev:  http://localhost  (plain HTTP; the app shows a key-entry banner)
+# prod: set LAYLA_PUBLIC_HOST to a real domain -> Caddy gets auto-HTTPS
+#       via Let's Encrypt. HTTPS is mandatory in prod (spec §7.6).
+# =====================================================================
+
+{$LAYLA_PUBLIC_HOST:localhost} {
+	encode gzip
+
+	# API + WebSocket -> backend core
+	handle /api/* {
+		reverse_proxy layla-core:8000
+	}
+	handle /ws/* {
+		reverse_proxy layla-core:8000
+	}
+
+	# Everything else -> Next.js frontend
+	handle {
+		reverse_proxy layla-frontend:3000
+	}
+}
