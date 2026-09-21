@@ -30,6 +30,7 @@ export function ProvidersSettings() {
     base_url: "",
     default_model: "",
     api_key: "",
+    active: true,
   });
 
   useEffect(() => {
@@ -49,11 +50,20 @@ export function ProvidersSettings() {
         base_url: form.base_url || null,
         default_model: form.default_model || null,
         api_key: form.api_key || null,
+        active: form.active,
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["providers"] });
+      qc.invalidateQueries({ queryKey: ["models"] });
       setOpen(false);
-      setForm({ name: "", kind: "openai_compatible", base_url: "", default_model: "", api_key: "" });
+      setForm({
+        name: "",
+        kind: "openai_compatible",
+        base_url: "",
+        default_model: "",
+        api_key: "",
+        active: true,
+      });
     },
   });
 
@@ -132,6 +142,14 @@ export function ProvidersSettings() {
               onChange={(e) => setForm({ ...form, api_key: e.target.value })}
             />
           </div>
+          <label className="flex items-center gap-2 text-xs text-neutral-400">
+            <input
+              type="checkbox"
+              checked={form.active}
+              onChange={(e) => setForm({ ...form, active: e.target.checked })}
+            />
+            Активен (модель появится в пикере)
+          </label>
           {insecure && (
             <label className="flex items-center gap-2 text-xs text-amber-300">
               <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} />

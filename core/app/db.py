@@ -24,3 +24,13 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
     """FastAPI dependency yielding a scoped async DB session."""
     async with SessionLocal() as session:
         yield session
+
+
+def get_sessionmaker() -> "async_sessionmaker[AsyncSession]":
+    """FastAPI-зависимость, отдающая фабрику сессий.
+
+    Нужна для фоновых/стриминговых операций (напр. SSE-чата), которым требуется
+    собственная сессия, живущая всё время стрима. В тестах подменяется вместе с
+    get_session.
+    """
+    return SessionLocal

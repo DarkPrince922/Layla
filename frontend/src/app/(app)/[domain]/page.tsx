@@ -1,5 +1,7 @@
 import { notFound } from "next/navigation";
 import { domainBySlug, DOMAINS } from "@/lib/domains";
+import { CodeDomain } from "@/components/CodeDomain";
+import { ChatPanel } from "@/components/ChatPanel";
 
 export function generateStaticParams() {
   return DOMAINS.map((d) => ({ domain: d.slug }));
@@ -33,22 +35,34 @@ export default function DomainPage({ params }: { params: { domain: string } }) {
         <div className="ml-auto text-[11px] text-neutral-500">⌘K</div>
       </header>
 
-      {/* Заглушка тела — функции домена появятся в следующих этапах. */}
-      <div className="grid flex-1 place-items-center p-8">
-        <div className="max-w-md text-center">
-          <div
-            className="mx-auto mb-4 grid h-12 w-12 place-items-center rounded-xl"
-            style={{ backgroundColor: `${domain.color}22` }}
-          >
-            <Icon className="h-6 w-6" style={{ color: domain.color }} />
+      <div className="min-h-0 flex-1">
+        {domain.slug === "code" ? (
+          <CodeDomain />
+        ) : (
+          // Прочие домены получают общий чат-слой; их доменные функции — в
+          // следующих этапах (Design M2, OSINT M3, Pentest M4-M5).
+          <div className="flex h-full">
+            <div className="grid flex-1 place-items-center p-8">
+              <div className="max-w-md text-center">
+                <div
+                  className="mx-auto mb-4 grid h-12 w-12 place-items-center rounded-xl"
+                  style={{ backgroundColor: `${domain.color}22` }}
+                >
+                  <Icon className="h-6 w-6" style={{ color: domain.color }} />
+                </div>
+                <h2 className="text-lg font-medium text-neutral-200">Домен «{domain.label}»</h2>
+                <p className="mt-1 text-sm text-neutral-500">{domain.tagline}</p>
+                <p className="mt-4 text-xs text-neutral-600">
+                  Доменные функции появятся в следующих этапах. Чат уже доступен
+                  как общий слой →
+                </p>
+              </div>
+            </div>
+            <div className="flex w-[420px] shrink-0 flex-col border-l border-ink-700">
+              <ChatPanel domain={domain.slug} />
+            </div>
           </div>
-          <h2 className="text-lg font-medium text-neutral-200">Домен «{domain.label}»</h2>
-          <p className="mt-1 text-sm text-neutral-500">{domain.tagline}</p>
-          <p className="mt-4 text-xs text-neutral-600">
-            Это оболочка этапа M0. Функции домена реализуются в следующих этапах
-            (чат и провайдеры — в M1).
-          </p>
-        </div>
+        )}
       </div>
     </div>
   );

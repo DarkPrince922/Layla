@@ -49,3 +49,113 @@ export interface AppMeta {
   domains: string[];
   https_required: boolean;
 }
+
+// ---- Типы M1 ----
+export interface Persona {
+  id: string;
+  name: string;
+  kind: string;
+  color?: string | null;
+  instructions?: string | null;
+  is_builtin: boolean;
+  hitl_required: boolean;
+}
+
+export interface ModelInfo {
+  name: string;
+  provider: string;
+  provider_id: string;
+}
+
+export interface Chat {
+  id: string;
+  domain: string;
+  title?: string | null;
+  persona_id?: string | null;
+  model?: string | null;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: string;
+  content: string;
+}
+
+export interface ChatDetail extends Chat {
+  messages: ChatMessage[];
+}
+
+export interface ProviderKey {
+  id: string;
+  label?: string | null;
+  status: string;
+  masked: string;
+}
+
+export interface AccountsHealth {
+  profiles: number;
+  active_models: number;
+  oauth_accounts: number;
+  quota_limited: number;
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  repo_url?: string | null;
+  path?: string | null;
+}
+
+export interface FileNode {
+  name: string;
+  path: string;
+  is_dir: boolean;
+}
+
+interface StreamHandlers {
+  onDelta: (text: string) => void;
+  onDone?: (messageId: string) => void;
+  onError?: (message: string) => void;
+}
+
+// Стриминг ответа ассистента по SSE. Парсит события `data: {...}`.
+export async function streamChat(
+  chatId: string,
+  content: string,
+  model: string | undefined,
+  handlers: StreamHandlers,
+): Promise<void> {
+  const res = await fetch(`${BASE}/chats/${chatId}/messages`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content, model }),
+  });
+  if (!res.ok || !res.body) {
+    handlers.onError?.(`Ошибка ${res.status}`);
+    return;
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx: number;
+    while ((idx = buf.indexOf("\n\n")) >= 0) {
+      const line = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 2);
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      try {
+        const evt = JSON.parse(data);
+        if (evt.delta) handlers.onDelta(evt.delta);
+        else if (evt.error) handlers.onError?.(evt.error);
+        else if (evt.done) handlers.onDone?.(evt.message_id);
+      } catch {
+        /* игнорируем неполные чанки */
+      }
+    }
+  }
+}

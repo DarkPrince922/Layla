@@ -22,10 +22,10 @@ personas (AI roles), sub-agent orchestration, MCP integrations, a knowledge base
 
 ---
 
-## Status — Milestone M0 (skeleton)
+## Status — Milestones M0–M1
 
-This repository currently implements **M0**: a working skeleton you can run,
-sign into, and navigate.
+The UI ships in **Russian** (переключатель EN/RU запланирован на M6). This
+repository currently implements **M0** (skeleton) and **M1** (providers & chat).
 
 **Included now**
 - Monorepo layout: `frontend/` · `core/` · `deploy/`.
@@ -40,8 +40,9 @@ sign into, and navigate.
     security-critical `Engagement.authorized`, `Scope.allow/deny`, `Venue`,
     `Server` (key-only auth) and a mandatory `AuditLog`.
   - Alembic migrations; built-in personas seeded on first login.
-  - REST: `/api/auth/*`, `/api/providers`, `/api/personas`, `/api/health`,
-    `/api/meta`.
+  - REST: `/api/auth/*`, `/api/providers` (+ keys, `/accounts/health`),
+    `/api/personas`, `/api/models`, `/api/chats/*`, `/api/projects/*`,
+    `/api/health`, `/api/meta`.
   - **Tests** for secret encryption/masking, password hashing, the auth flow,
     and the "API keys never leave the server in plaintext" invariant.
 - **Frontend (`frontend`)** — Next.js 14 (App Router), React 18, Tailwind,
@@ -55,11 +56,24 @@ sign into, and navigate.
   - **Plain-HTTP key-entry banner** that blocks key input until acknowledged
     (spec §4/§7.5).
 
-**Not yet built** (later milestones): streaming chat, LiteLLM config generation
-and key rotation (M1); Design sandbox + RAG + MCP client (M2); OSINT lookups
-(M3); pentest scope-enforcement/egress/findings/Acunetix import with tests (M4);
-CAI autonomous agent + Ultracode orchestration (M5); polish, i18n, combos (M6).
-See [`docs/ROADMAP.md`](docs/ROADMAP.md).
+**Added in M1**
+- **Providers → LiteLLM**: profiles translate into a LiteLLM `model_list`;
+  multiple keys per profile become rotatable entries (`app/services/litellm.py`).
+- **Key rotation + circuit breaker** (`app/services/rotation.py`): round-robin
+  over healthy keys, rate-limit/exhaustion cooldown, recovery — unit-tested.
+- **Accounts Lab**: health tiles (Profiles / Active models / OAuth / Quota-limited)
+  and per-provider key management with status control.
+- **Streaming chat** (`/api/chats`): SSE token streaming proxied from LiteLLM,
+  persona system prompt applied, history persisted; model picker from active
+  profiles.
+- **Code domain**: projects, **git repo import** (validated URL, shallow clone),
+  a lazy **file tree** and file viewer with hard **path-traversal** protection —
+  all tested.
+
+**Not yet built** (later milestones): Design sandbox + RAG + MCP client (M2);
+OSINT lookups (M3); pentest scope-enforcement/egress/findings/Acunetix import
+with tests (M4); CAI autonomous agent + Ultracode orchestration (M5); polish,
+EN/RU i18n switch, combos (M6). See [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ---
 

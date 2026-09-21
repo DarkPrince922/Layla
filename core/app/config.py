@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # --- Redis ---
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
 
+    # Куда клонируются репозитории / создаются проекты (Settings -> General).
+    projects_dir: str = Field(default="./data/projects", alias="LAYLA_PROJECTS_DIR")
+
     # --- LiteLLM ---
     litellm_base_url: str = Field(default="http://localhost:4000", alias="LITELLM_BASE_URL")
     litellm_master_key: str = Field(default="", alias="LITELLM_MASTER_KEY")

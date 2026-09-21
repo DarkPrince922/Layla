@@ -16,7 +16,7 @@ import pytest_asyncio  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 
-from app.db import Base, get_session  # noqa: E402
+from app.db import Base, get_session, get_sessionmaker  # noqa: E402
 import app.models  # noqa: E402,F401  (register tables)
 from app.main import app  # noqa: E402
 
@@ -45,6 +45,7 @@ async def client(db_sessionmaker):
             yield session
 
     app.dependency_overrides[get_session] = _override_get_session
+    app.dependency_overrides[get_sessionmaker] = lambda: db_sessionmaker
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac

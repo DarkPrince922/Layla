@@ -76,3 +76,131 @@ async def delete_provider(
     await audit.record(session, actor=user.id, action="provider.delete", target=provider.name)
     await session.delete(provider)
     await session.commit()
+
+
+# ---------------------------------------------------------------------------
+# Ключи провайдера (ротация, спец. §5.1) и Accounts Lab
+# ---------------------------------------------------------------------------
+from app.models.enums import KeyStatus  # noqa: E402
+from app.models.provider import ProviderKey  # noqa: E402
+from app.schemas.provider import (  # noqa: E402
+    AccountsHealth,
+    KeyStatusUpdate,
+    ModelOut,
+    ProviderKeyCreate,
+    ProviderKeyOut,
+)
+from app.services import litellm as litellm_svc  # noqa: E402
+
+
+async def _owned_provider(session: AsyncSession, user: User, provider_id: str) -> Provider:
+    provider = await session.get(Provider, provider_id)
+    if provider is None or provider.owner_id != user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Провайдер не найден")
+    return provider
+
+
+def _key_out(k: ProviderKey) -> ProviderKeyOut:
+    out = ProviderKeyOut.model_validate(k)
+    try:
+        out.masked = crypto.mask(crypto.decrypt(k.secret_ref))
+    except ValueError:
+        out.masked = "••••"
+    out.status = k.status.value if hasattr(k.status, "value") else str(k.status)
+    return out
+
+
+@router.get("/{provider_id}/keys", response_model=list[ProviderKeyOut])
+async def list_keys(
+    provider_id: str,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> list[ProviderKeyOut]:
+    await _owned_provider(session, user, provider_id)
+    rows = await session.scalars(
+        select(ProviderKey).where(ProviderKey.provider_id == provider_id)
+    )
+    return [_key_out(k) for k in rows]
+
+
+@router.post("/{provider_id}/keys", response_model=ProviderKeyOut, status_code=201)
+async def add_key(
+    provider_id: str,
+    body: ProviderKeyCreate,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> ProviderKeyOut:
+    await _owned_provider(session, user, provider_id)
+    key = ProviderKey(
+        provider_id=provider_id,
+        label=body.label,
+        secret_ref=crypto.encrypt(body.api_key),
+        status=KeyStatus.active,
+    )
+    session.add(key)
+    await session.flush()
+    await audit.record(
+        session, actor=user.id, action="provider.key.add", target=provider_id,
+        meta={"key_id": key.id},
+    )
+    await session.commit()
+    return _key_out(key)
+
+
+@router.post("/keys/{key_id}/status", response_model=ProviderKeyOut)
+async def set_key_status(
+    key_id: str,
+    body: KeyStatusUpdate,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> ProviderKeyOut:
+    key = await session.get(ProviderKey, key_id)
+    if key is None:
+        raise HTTPException(status_code=404, detail="Ключ не найден")
+    await _owned_provider(session, user, key.provider_id)
+    try:
+        key.status = KeyStatus(body.status)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Недопустимый статус ключа")
+    await session.commit()
+    return _key_out(key)
+
+
+@router.delete("/keys/{key_id}", status_code=204)
+async def delete_key(
+    key_id: str,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    key = await session.get(ProviderKey, key_id)
+    if key is None:
+        raise HTTPException(status_code=404, detail="Ключ не найден")
+    await _owned_provider(session, user, key.provider_id)
+    await session.delete(key)
+    await session.commit()
+
+
+@router.get("/accounts/health", response_model=AccountsHealth)
+async def accounts_health(
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> AccountsHealth:
+    """Сводка для Accounts Lab (спец. §5.1)."""
+    providers = list(await session.scalars(select(Provider).where(Provider.owner_id == user.id)))
+    provider_ids = [p.id for p in providers]
+    keys: list[ProviderKey] = []
+    if provider_ids:
+        keys = list(
+            await session.scalars(
+                select(ProviderKey).where(ProviderKey.provider_id.in_(provider_ids))
+            )
+        )
+    quota_limited = sum(
+        1 for k in keys if k.status in (KeyStatus.rate_limited, KeyStatus.exhausted)
+    )
+    return AccountsHealth(
+        profiles=len(providers),
+        active_models=len(litellm_svc.active_model_names(providers)),
+        oauth_accounts=0,  # OAuth-подписки — вторая фаза (спец. §5.1)
+        quota_limited=quota_limited,
+    )
