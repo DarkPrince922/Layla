@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-import app.services.litellm as litellm_svc
+import app.services.provider_client as pc
 from app.services import design_gen
 
 
@@ -33,7 +33,13 @@ async def _register_with_active_provider(client):
     )
     await client.post(
         "/api/providers",
-        json={"name": "M", "kind": "openai_compatible", "default_model": "gpt-4o", "active": True},
+        json={
+            "name": "M",
+            "kind": "openai_compatible",
+            "base_url": "http://prov.local/v1",
+            "default_model": "gpt-4o",
+            "active": True,
+        },
     )
 
 
@@ -41,11 +47,11 @@ async def _register_with_active_provider(client):
 async def test_generate_design(client, monkeypatch):
     await _register_with_active_provider(client)
 
-    async def fake_complete(self, model, messages, **kw):
+    async def fake_complete(provider, key, model, messages, **kw):
         assert model == "gpt-4o"
         return "```html\n<!doctype html><title>Layla</title><h1>Demo</h1>\n```"
 
-    monkeypatch.setattr(litellm_svc.LiteLLMClient, "complete", fake_complete)
+    monkeypatch.setattr(pc, "complete", fake_complete)
 
     r = await client.post(
         "/api/designs",

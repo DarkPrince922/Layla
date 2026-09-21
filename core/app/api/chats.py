@@ -18,8 +18,8 @@ from app.models.chat import Chat, Message
 from app.models.persona import Persona
 from app.models.user import User
 from app.schemas.chat import ChatCreate, ChatDetail, ChatOut, MessageOut, SendMessageRequest
+from app.services import provider_client
 from app.services.auth import get_current_user
-from app.services.litellm import LiteLLMClient
 
 router = APIRouter(prefix="/chats", tags=["chats"])
 
@@ -115,25 +115,31 @@ async def send_message(
     Использует собственную сессию (из фабрики), живущую весь стрим, чтобы
     корректно записать оба сообщения.
     """
-    # Подготовка вне стрима: проверка прав, модель, сохранение сообщения юзера.
+    # Подготовка вне стрима: проверка прав, модель, провайдер, ключ.
     async with maker() as session:
         chat = await _owned_chat(session, user, chat_id)
         model = body.model or chat.model
         if not model:
             raise HTTPException(status_code=400, detail="Не выбрана модель")
+        provider = await provider_client.resolve_provider(session, user.id, model)
+        if provider is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Модель недоступна: нет активного провайдера. "
+                "Добавьте провайдера и включите «активен» в настройках.",
+            )
+        key = await provider_client.pick_key(session, provider)
         session.add(Message(chat_id=chat_id, role="user", content=body.content))
         await session.commit()
         payload = await _build_messages(session, chat)
 
-    client = LiteLLMClient()
-
     async def event_stream() -> AsyncIterator[bytes]:
         full = []
         try:
-            async for delta in client.stream_chat(model, payload):
+            async for delta in provider_client.stream_chat(provider, key, model, payload):
                 full.append(delta)
                 yield f"data: {json.dumps({'delta': delta}, ensure_ascii=False)}\n\n".encode()
-        except Exception as exc:  # сеть/LiteLLM недоступен и т.п.
+        except Exception as exc:  # сеть/ошибка провайдера
             yield f"data: {json.dumps({'error': str(exc)}, ensure_ascii=False)}\n\n".encode()
         text = "".join(full)
         # Сохранить ответ ассистента (даже частичный).

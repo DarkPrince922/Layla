@@ -10,9 +10,9 @@ from app.models.design import Design
 from app.models.provider import Provider
 from app.models.user import User
 from app.schemas.design import DesignCreate, DesignOut
-from app.services import audit, design_gen
+from app.services import audit, design_gen, provider_client
 from app.services.auth import get_current_user
-from app.services.litellm import LiteLLMClient, active_model_names
+from app.services.litellm import active_model_names
 
 router = APIRouter(prefix="/designs", tags=["design"])
 
@@ -60,10 +60,13 @@ async def create_design(
     model = await _pick_model(session, user, body.model)
     messages = design_gen.build_prompt(body.brief.model_dump(), body.stack.value)
 
-    client = LiteLLMClient()
+    provider = await provider_client.resolve_provider(session, user.id, model)
+    if provider is None:
+        raise HTTPException(status_code=400, detail="Нет активного провайдера для генерации.")
+    key = await provider_client.pick_key(session, provider)
     try:
-        raw = await client.complete(model, messages)
-    except Exception as exc:  # LiteLLM недоступен и т.п.
+        raw = await provider_client.complete(provider, key, model, messages)
+    except Exception as exc:  # ошибка провайдера
         raise HTTPException(status_code=502, detail=f"Ошибка генерации: {exc}") from exc
 
     html = design_gen.extract_html(raw)

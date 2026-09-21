@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 
-import app.services.litellm as litellm_svc
+import app.services.provider_client as pc
 
 
 async def _register(client):
@@ -15,19 +15,33 @@ async def _register(client):
     )
 
 
+async def _add_active_provider(client, model="gpt-4o"):
+    await client.post(
+        "/api/providers",
+        json={
+            "name": "M",
+            "kind": "openai_compatible",
+            "base_url": "http://prov.local/v1",
+            "default_model": model,
+            "active": True,
+        },
+    )
+
+
 @pytest.mark.asyncio
 async def test_chat_stream_and_persist(client, monkeypatch):
     await _register(client)
+    await _add_active_provider(client)
 
-    # Мокаем сетевой стрим LiteLLM детерминированными дельтами.
-    async def fake_stream(self, model, messages, **kw) -> AsyncIterator[str]:
+    # Мокаем сетевой стрим провайдера детерминированными дельтами.
+    async def fake_stream(provider, key, model, messages, **kw) -> AsyncIterator[str]:
         assert model == "gpt-4o"
         # Системный промпт персоны должен попасть в payload.
         assert messages[0]["role"] == "system"
         for piece in ["При", "вет", "!"]:
             yield piece
 
-    monkeypatch.setattr(litellm_svc.LiteLLMClient, "stream_chat", fake_stream)
+    monkeypatch.setattr(pc, "stream_chat", fake_stream)
 
     # Найдём id встроенной персоны.
     personas = (await client.get("/api/personas")).json()

@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { Send, Bot, User as UserIcon } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Send, Bot, User as UserIcon, RefreshCw } from "lucide-react";
 import { api, streamChat, type Persona, type ModelInfo, type ChatMessage } from "@/lib/api";
 
 export function ChatPanel({ domain }: { domain: string }) {
@@ -13,7 +13,9 @@ export function ChatPanel({ domain }: { domain: string }) {
   const [model, setModel] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const qc = useQueryClient();
 
   const { data: personas = [] } = useQuery({
     queryKey: ["personas"],
@@ -23,6 +25,21 @@ export function ChatPanel({ domain }: { domain: string }) {
     queryKey: ["models"],
     queryFn: () => api.get<ModelInfo[]>("/models"),
   });
+
+  // Подтянуть реальный список моделей у провайдеров (GET /models на их стороне).
+  async function refreshModels() {
+    setRefreshing(true);
+    setError(null);
+    try {
+      const fresh = await api.get<ModelInfo[]>("/models?refresh=true");
+      qc.setQueryData(["models"], fresh);
+      if (fresh.length && !fresh.some((m) => m.name === model)) setModel(fresh[0].name);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось загрузить модели");
+    } finally {
+      setRefreshing(false);
+    }
+  }
 
   useEffect(() => {
     if (!model && models.length) setModel(models[0].name);
@@ -125,11 +142,21 @@ export function ChatPanel({ domain }: { domain: string }) {
           >
             {models.length === 0 && <option value="">Нет активных моделей</option>}
             {models.map((m) => (
-              <option key={m.provider_id} value={m.name}>
+              <option key={`${m.provider_id}:${m.name}`} value={m.name}>
                 {m.name} · {m.provider}
               </option>
             ))}
           </select>
+          <button
+            type="button"
+            onClick={refreshModels}
+            disabled={refreshing}
+            title="Загрузить модели у провайдера"
+            className="flex items-center gap-1 rounded-md border border-ink-700 bg-ink-800 px-2 py-1 text-neutral-400 hover:text-neutral-200 disabled:opacity-50"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
+            модели
+          </button>
         </div>
         <div className="flex items-end gap-2">
           <textarea
