@@ -33,13 +33,14 @@ async def test_chat_stream_and_persist(client, monkeypatch):
     await _register(client)
     await _add_active_provider(client)
 
-    # Мокаем сетевой стрим провайдера детерминированными дельтами.
-    async def fake_stream(provider, key, model, messages, **kw) -> AsyncIterator[str]:
+    # Мокаем сетевой стрим провайдера: сначала reasoning, затем контент.
+    async def fake_stream(provider, key, model, messages, **kw) -> AsyncIterator[tuple[str, str]]:
         assert model == "gpt-4o"
         # Системный промпт персоны должен попасть в payload.
         assert messages[0]["role"] == "system"
+        yield ("reasoning", "думаю…")
         for piece in ["При", "вет", "!"]:
-            yield piece
+            yield ("content", piece)
 
     monkeypatch.setattr(pc, "stream_chat", fake_stream)
 

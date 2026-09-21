@@ -81,6 +81,12 @@ export function ChatPanel({ domain }: { domain: string }) {
           setMessages((m) =>
             m.map((msg) => (msg.id === assistantId ? { ...msg, content: msg.content + delta } : msg)),
           ),
+        onReasoning: (r) =>
+          setMessages((m) =>
+            m.map((msg) =>
+              msg.id === assistantId ? { ...msg, reasoning: (msg.reasoning || "") + r } : msg,
+            ),
+          ),
         onError: (msg) => setError(msg),
       });
     } catch (e) {
@@ -107,8 +113,20 @@ export function ChatPanel({ domain }: { domain: string }) {
                 <UserIcon className="h-5 w-5 text-neutral-500" />
               )}
             </div>
-            <div className="whitespace-pre-wrap text-sm leading-relaxed text-neutral-200">
-              {m.content || <span className="text-neutral-600">…</span>}
+            <div className="min-w-0 flex-1">
+              {m.reasoning && (
+                <details className="mb-2 rounded-md border border-ink-700 bg-ink-800/60" open={!m.content}>
+                  <summary className="cursor-pointer select-none px-2 py-1 text-[11px] text-neutral-400">
+                    💭 Размышление
+                  </summary>
+                  <div className="whitespace-pre-wrap border-t border-ink-700 px-2 py-1.5 text-xs italic leading-relaxed text-neutral-500">
+                    {m.reasoning}
+                  </div>
+                </details>
+              )}
+              <div className="whitespace-pre-wrap text-sm leading-relaxed text-neutral-200">
+                {m.content || (!m.reasoning && <span className="text-neutral-600">…</span>)}
+              </div>
             </div>
           </div>
         ))}

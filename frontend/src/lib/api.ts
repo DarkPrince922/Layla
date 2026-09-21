@@ -83,6 +83,7 @@ export interface ChatMessage {
   id: string;
   role: string;
   content: string;
+  reasoning?: string;
 }
 
 export interface ChatDetail extends Chat {
@@ -118,6 +119,7 @@ export interface FileNode {
 
 interface StreamHandlers {
   onDelta: (text: string) => void;
+  onReasoning?: (text: string) => void;
   onDone?: (messageId: string) => void;
   onError?: (message: string) => void;
 }
@@ -155,6 +157,7 @@ export async function streamChat(
       try {
         const evt = JSON.parse(data);
         if (evt.delta) handlers.onDelta(evt.delta);
+        else if (evt.reasoning) handlers.onReasoning?.(evt.reasoning);
         else if (evt.error) handlers.onError?.(evt.error);
         else if (evt.done) handlers.onDone?.(evt.message_id);
       } catch {

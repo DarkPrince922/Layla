@@ -117,11 +117,15 @@ async def list_models(provider: Provider, key: str | None) -> list[str]:
 
 async def stream_chat(
     provider: Provider, key: str | None, model: str, messages: list[dict]
-) -> AsyncIterator[str]:
-    """Стримить дельты текста от провайдера."""
+) -> AsyncIterator[tuple[str, str]]:
+    """Стримить дельты от провайдера как пары (kind, text).
+
+    kind == "content" — видимый ответ; kind == "reasoning" — размышление модели
+    (reasoning-модели вроде kimi/deepseek-r1/o-серии отдают его отдельно).
+    """
     if _is_anthropic_native(provider):
-        async for piece in _stream_anthropic(provider, key, model, messages):
-            yield piece
+        async for pair in _stream_anthropic(provider, key, model, messages):
+            yield pair
         return
 
     payload = {"model": model, "messages": messages, "stream": True}
@@ -141,14 +145,18 @@ async def stream_chat(
                     chunk = json.loads(data)
                 except json.JSONDecodeError:
                     continue
-                delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content")
-                if delta:
-                    yield delta
+                d = chunk.get("choices", [{}])[0].get("delta", {})
+                reasoning = d.get("reasoning_content") or d.get("reasoning")
+                if reasoning:
+                    yield ("reasoning", reasoning)
+                content = d.get("content")
+                if content:
+                    yield ("content", content)
 
 
 async def _stream_anthropic(
     provider: Provider, key: str | None, model: str, messages: list[dict]
-) -> AsyncIterator[str]:
+) -> AsyncIterator[tuple[str, str]]:
     # Anthropic /v1/messages: system отдельным полем, роли user/assistant.
     system = "\n".join(m["content"] for m in messages if m["role"] == "system")
     conv = [m for m in messages if m["role"] in ("user", "assistant")]
@@ -174,16 +182,19 @@ async def _stream_anthropic(
                 except json.JSONDecodeError:
                     continue
                 if evt.get("type") == "content_block_delta":
-                    text = evt.get("delta", {}).get("text")
-                    if text:
-                        yield text
+                    delta = evt.get("delta", {})
+                    if delta.get("type") == "thinking_delta" and delta.get("thinking"):
+                        yield ("reasoning", delta["thinking"])
+                    elif delta.get("text"):
+                        yield ("content", delta["text"])
 
 
 async def complete(
     provider: Provider, key: str | None, model: str, messages: list[dict]
 ) -> str:
-    """Не-стрим комплишн (для генерации Design)."""
+    """Не-стрим комплишн (для генерации Design). Reasoning отбрасывается."""
     parts = []
-    async for piece in stream_chat(provider, key, model, messages):
-        parts.append(piece)
+    async for kind, text in stream_chat(provider, key, model, messages):
+        if kind == "content":
+            parts.append(text)
     return "".join(parts)

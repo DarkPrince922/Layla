@@ -135,16 +135,26 @@ async def send_message(
 
     async def event_stream() -> AsyncIterator[bytes]:
         full = []
+        reasoning = []
         try:
-            async for delta in provider_client.stream_chat(provider, key, model, payload):
-                full.append(delta)
-                yield f"data: {json.dumps({'delta': delta}, ensure_ascii=False)}\n\n".encode()
+            async for kind, text in provider_client.stream_chat(provider, key, model, payload):
+                if kind == "reasoning":
+                    reasoning.append(text)
+                    yield f"data: {json.dumps({'reasoning': text}, ensure_ascii=False)}\n\n".encode()
+                else:
+                    full.append(text)
+                    yield f"data: {json.dumps({'delta': text}, ensure_ascii=False)}\n\n".encode()
         except Exception as exc:  # сеть/ошибка провайдера
             yield f"data: {json.dumps({'error': str(exc)}, ensure_ascii=False)}\n\n".encode()
         text = "".join(full)
-        # Сохранить ответ ассистента (даже частичный).
+        # Сохранить ответ ассистента (даже частичный); размышление — в meta.
         async with maker() as session:
-            msg = Message(chat_id=chat_id, role="assistant", content=text)
+            msg = Message(
+                chat_id=chat_id,
+                role="assistant",
+                content=text,
+                meta={"reasoning": "".join(reasoning)} if reasoning else {},
+            )
             session.add(msg)
             await session.commit()
             msg_id = msg.id
