@@ -7,7 +7,9 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-RUN npm run build
+# Гарантируем существование public/ (git не хранит пустые каталоги),
+# иначе COPY на стадии runner упадёт.
+RUN mkdir -p public && npm run build
 
 FROM node:20-alpine AS runner
 WORKDIR /app
