@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { domainBySlug, DOMAINS } from "@/lib/domains";
 import { CodeDomain } from "@/components/CodeDomain";
+import { DesignDomain } from "@/components/DesignDomain";
 import { ChatPanel } from "@/components/ChatPanel";
 
 export function generateStaticParams() {
@@ -38,6 +39,8 @@ export default function DomainPage({ params }: { params: { domain: string } }) {
       <div className="min-h-0 flex-1">
         {domain.slug === "code" ? (
           <CodeDomain />
+        ) : domain.slug === "design" ? (
+          <DesignDomain />
         ) : (
           // Прочие домены получают общий чат-слой; их доменные функции — в
           // следующих этапах (Design M2, OSINT M3, Pentest M4-M5).

@@ -5,7 +5,9 @@ from app.models.agent import AgentRun
 from app.models.audit import AuditLog
 from app.models.chat import Chat, Message
 from app.models.design import Design
+from app.models.knowledge import KnowledgeChunk, KnowledgeDoc
 from app.models.mcp import IntelKey, McpServer
+from app.models.telegram import TelegramConfig
 from app.models.osint import OsintCase
 from app.models.persona import Persona
 from app.models.pentest import (
@@ -26,8 +28,11 @@ __all__ = [
     "Chat",
     "Message",
     "Design",
+    "KnowledgeChunk",
+    "KnowledgeDoc",
     "IntelKey",
     "McpServer",
+    "TelegramConfig",
     "OsintCase",
     "Persona",
     "Engagement",

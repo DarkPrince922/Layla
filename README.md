@@ -22,10 +22,11 @@ personas (AI roles), sub-agent orchestration, MCP integrations, a knowledge base
 
 ---
 
-## Status — Milestones M0–M1
+## Status — Milestones M0–M2
 
 The UI ships in **Russian** (переключатель EN/RU запланирован на M6). This
-repository currently implements **M0** (skeleton) and **M1** (providers & chat).
+repository currently implements **M0** (skeleton), **M1** (providers & chat)
+and **M2** (Design + Knowledge + MCP + Telegram).
 
 **Included now**
 - Monorepo layout: `frontend/` · `core/` · `deploy/`.
@@ -70,10 +71,23 @@ repository currently implements **M0** (skeleton) and **M1** (providers & chat).
   a lazy **file tree** and file viewer with hard **path-traversal** protection —
   all tested.
 
-**Not yet built** (later milestones): Design sandbox + RAG + MCP client (M2);
-OSINT lookups (M3); pentest scope-enforcement/egress/findings/Acunetix import
-with tests (M4); CAI autonomous agent + Ultracode orchestration (M5); polish,
-EN/RU i18n switch, combos (M6). See [`docs/ROADMAP.md`](docs/ROADMAP.md).
+**Added in M2**
+- **Design domain**: brief → artifact generated via LiteLLM, rendered in an
+  **isolated `sandbox` iframe** (`allow-scripts`, no same-origin), Preview/Code
+  toggle and desktop/tablet/mobile breakpoints (`/api/designs`).
+- **Knowledge / RAG** (`/api/knowledge`): chunking, offline-deterministic
+  embeddings (stable hashing, LiteLLM embeddings optional), cosine search,
+  per-domain scoping — tested.
+- **MCP registry + client** (`/api/mcp/servers`): CRUD for stdio/http servers,
+  per-persona enablement, env values never returned, live "test connection"
+  via the official `mcp` SDK (optional import) — tested.
+- **Telegram bot** (`/api/integrations/telegram`): encrypted bot token, status
+  with masked token, test send — tested.
+
+**Not yet built** (later milestones): OSINT lookups (M3); pentest
+scope-enforcement/egress/findings/Acunetix import with tests (M4); CAI
+autonomous agent + Ultracode orchestration (M5); polish, EN/RU i18n switch,
+combos (M6). See [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ---
 

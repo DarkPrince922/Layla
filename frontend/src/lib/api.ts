@@ -34,6 +34,10 @@ export const api = {
   get: <T>(p: string) => request<T>(p),
   post: <T>(p: string, body?: unknown) =>
     request<T>(p, { method: "POST", body: body ? JSON.stringify(body) : undefined }),
+  put: <T>(p: string, body?: unknown) =>
+    request<T>(p, { method: "PUT", body: body ? JSON.stringify(body) : undefined }),
+  patch: <T>(p: string, body?: unknown) =>
+    request<T>(p, { method: "PATCH", body: body ? JSON.stringify(body) : undefined }),
   del: <T>(p: string) => request<T>(p, { method: "DELETE" }),
 };
 
@@ -158,4 +162,59 @@ export async function streamChat(
       }
     }
   }
+}
+
+// ---- Типы M2 ----
+export interface DesignFile {
+  name: string;
+  content: string;
+  language?: string;
+}
+
+export interface Design {
+  id: string;
+  stack: string;
+  brief: Record<string, unknown>;
+  files: DesignFile[];
+  design_system_ref?: string | null;
+}
+
+export interface KnowledgeDoc {
+  id: string;
+  title: string;
+  source?: string | null;
+  domain?: string | null;
+  chunk_count: number;
+}
+
+export interface SearchHit {
+  chunk_id: string;
+  doc_id: string;
+  ordinal: number;
+  content: string;
+  score: number;
+}
+
+export interface McpServer {
+  id: string;
+  name: string;
+  transport: string;
+  command?: string | null;
+  url?: string | null;
+  enabled: boolean;
+  personas: string[];
+  env_keys: string[];
+}
+
+export interface McpTestResult {
+  ok: boolean;
+  tools: { name: string; description?: string | null }[];
+  error?: string | null;
+}
+
+export interface TelegramConfig {
+  configured: boolean;
+  enabled: boolean;
+  default_chat_id?: string | null;
+  token_masked?: string | null;
 }

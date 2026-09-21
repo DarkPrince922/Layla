@@ -7,8 +7,9 @@ Each milestone is a working application, verified before moving on (spec §9).
 - **M1 — Providers & chat** ✅ *(this repo)* — Providers + Accounts Lab over
   LiteLLM, key rotation with circuit breaker, streaming chat with personas,
   Code domain with file tree and repo import.
-- **M2 — Design + Knowledge + MCP** — Design brief → sandboxed artifact,
-  Preview/Code, RAG (pgvector), MCP client + integration registry, Telegram bot.
+- **M2 — Design + Knowledge + MCP** ✅ *(this repo)* — Design brief → sandboxed
+  iframe artifact with Preview/Code + breakpoints, RAG (chunk + embed + cosine
+  search), MCP client + registry with connection test, Telegram bot.
 - **M3 — OSINT** — cases, intelligence APIs (Shodan/VT/SecurityTrails/urlscan)
   via MCP, passive lookups.
 - **M4 — Pentest (core)** — engagements, Scope + authorized gate, Servers /

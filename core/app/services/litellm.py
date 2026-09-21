@@ -129,3 +129,29 @@ class LiteLLMClient:
                     )
                     if delta:
                         yield delta
+
+    async def complete(self, model: str, messages: list[dict[str, str]], **kwargs) -> str:
+        """Неблокирующий (не-стрим) чат-комплишн: вернуть полный текст ответа."""
+        payload = {"model": model, "messages": messages, "stream": False, **kwargs}
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(
+                f"{self._base}/v1/chat/completions",
+                headers=self._headers(),
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+    async def embeddings(self, model: str, inputs: list[str]) -> list[list[float]]:
+        """Получить эмбеддинги через LiteLLM (OpenAI-совместимый /v1/embeddings)."""
+        payload = {"model": model, "input": inputs}
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                f"{self._base}/v1/embeddings",
+                headers=self._headers(),
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return [item["embedding"] for item in data.get("data", [])]

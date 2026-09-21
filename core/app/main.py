@@ -6,7 +6,19 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import auth, chats, health, models, personas, projects, providers
+from app.api import (
+    auth,
+    chats,
+    designs,
+    health,
+    knowledge,
+    mcp,
+    models,
+    personas,
+    projects,
+    providers,
+    telegram,
+)
 from app.config import get_settings
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
@@ -41,6 +53,10 @@ app.include_router(personas.router, prefix=api_prefix)
 app.include_router(models.router, prefix=api_prefix)
 app.include_router(chats.router, prefix=api_prefix)
 app.include_router(projects.router, prefix=api_prefix)
+app.include_router(designs.router, prefix=api_prefix)
+app.include_router(knowledge.router, prefix=api_prefix)
+app.include_router(mcp.router, prefix=api_prefix)
+app.include_router(telegram.router, prefix=api_prefix)
 
 
 @app.get("/")
