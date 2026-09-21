@@ -19,11 +19,11 @@ async def test_register_login_me_and_persona_seed(client):
     assert r.status_code == 200
     assert r.json()["email"] == "op@example.com"
 
-    # Built-in personas were seeded (Pentest/OSINT/Coding...).
+    # Built-in personas were seeded (Пентест/OSINT/Разработка...).
     r = await client.get("/api/personas")
     assert r.status_code == 200
     names = {p["name"] for p in r.json()}
-    assert {"Coding", "Pentest", "OSINT", "Security"} <= names
+    assert {"Разработка", "Пентест", "OSINT", "Безопасность"} <= names
 
 
 @pytest.mark.asyncio

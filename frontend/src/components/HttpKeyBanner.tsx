@@ -3,13 +3,13 @@
 import { useEffect, useState } from "react";
 import { ShieldAlert } from "lucide-react";
 
-// Spec §4 / §7.5: if the app is served over plain HTTP, warn on any screen that
-// accepts secrets and gate key entry behind explicit acknowledgement.
+// Спец. §4 / §7.5: если приложение открыто по обычному HTTP, предупреждаем на
+// любом экране ввода секретов и блокируем ввод ключей до явного подтверждения.
 export function HttpKeyBanner() {
   const [insecure, setInsecure] = useState(false);
 
   useEffect(() => {
-    // window.isSecureContext is true on https:// and on localhost.
+    // window.isSecureContext = true для https:// и для localhost.
     if (typeof window !== "undefined" && !window.isSecureContext) {
       setInsecure(true);
     }
@@ -21,11 +21,11 @@ export function HttpKeyBanner() {
     <div className="flex items-start gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
       <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
       <div>
-        <p className="font-medium">Insecure connection (plain HTTP)</p>
+        <p className="font-medium">Небезопасное соединение (обычный HTTP)</p>
         <p className="text-amber-200/80">
-          Secrets entered here travel unencrypted. Serve Layla over HTTPS before
-          adding API keys or SSH keys. Key entry is blocked until you confirm you
-          understand the risk.
+          Введённые здесь секреты передаются в открытом виде. Откройте Layla по
+          HTTPS, прежде чем добавлять API-ключи или SSH-ключи. Ввод ключей
+          заблокирован, пока вы не подтвердите, что понимаете риск.
         </p>
       </div>
     </div>

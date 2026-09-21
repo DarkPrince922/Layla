@@ -12,15 +12,15 @@ export default function SettingsSectionPage({ params }: { params: { section: str
   if (section.slug === "providers") return <ProvidersSettings />;
   if (section.slug === "personas") return <PersonasSettings />;
 
-  // Placeholder for sections implemented in later milestones.
+  // Заглушка для разделов, реализуемых в следующих этапах.
   return (
     <div>
       <h1 className="text-xl font-semibold">{section.label}</h1>
       <p className="mt-1 text-sm text-neutral-500">{section.blurb}</p>
       <div className="mt-6 rounded-lg border border-dashed border-ink-700 p-8 text-center text-sm text-neutral-600">
-        The <span className="text-neutral-400">{section.label}</span> section is
-        part of the Layla shell (M0). Its controls are wired up in a later
-        milestone.
+        Раздел «<span className="text-neutral-400">{section.label}</span>» входит в
+        оболочку Layla (M0). Его элементы управления подключаются на следующем
+        этапе.
       </div>
     </div>
   );

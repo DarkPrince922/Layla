@@ -4,7 +4,8 @@ import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/store/auth";
 
-// Client-side gate: fetch /me on mount, redirect to /login if unauthenticated.
+// Клиентский гейт: запрашивает /me при монтировании и перенаправляет на /login,
+// если пользователь не аутентифицирован.
 export function AuthGate({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const { user, loaded, fetchMe } = useAuth();
@@ -20,7 +21,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   if (!loaded) {
     return (
       <div className="grid h-screen place-items-center text-sm text-neutral-500">
-        Loading Layla…
+        Загрузка Layla…
       </div>
     );
   }

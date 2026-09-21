@@ -62,24 +62,24 @@ export function ProvidersSettings() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["providers"] }),
   });
 
-  // Key entry blocked over plain HTTP until acknowledged (spec §4/§7.5).
+  // Ввод ключа заблокирован по обычному HTTP до подтверждения (спец. §4/§7.5).
   const keyBlocked = insecure && !ack;
 
   return (
     <div>
       <div className="mb-4 flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-semibold">Providers</h1>
+          <h1 className="text-xl font-semibold">Провайдеры</h1>
           <p className="text-sm text-neutral-500">
-            LLM connection profiles. Active profiles appear in the model picker.
-            All profiles are served through the LiteLLM proxy.
+            Профили подключения LLM. Активные профили появляются в пикере модели.
+            Все профили обслуживаются через прокси LiteLLM.
           </p>
         </div>
         <button
           onClick={() => setOpen((v) => !v)}
           className="flex items-center gap-1.5 rounded-md bg-indigo-600 px-3 py-1.5 text-sm text-white hover:bg-indigo-500"
         >
-          <Plus className="h-4 w-4" /> Add
+          <Plus className="h-4 w-4" /> Добавить
         </button>
       </div>
 
@@ -92,7 +92,7 @@ export function ProvidersSettings() {
           <div className="grid grid-cols-2 gap-3">
             <input
               className="rounded-md border border-ink-700 bg-ink-800 px-3 py-2 text-sm"
-              placeholder="Name (e.g. OpenAI)"
+              placeholder="Название (напр. OpenAI)"
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
             />
@@ -109,13 +109,13 @@ export function ProvidersSettings() {
             </select>
             <input
               className="rounded-md border border-ink-700 bg-ink-800 px-3 py-2 text-sm"
-              placeholder="Base URL (for OpenAI-compatible / local)"
+              placeholder="Base URL (для OpenAI-совместимых / локальных)"
               value={form.base_url}
               onChange={(e) => setForm({ ...form, base_url: e.target.value })}
             />
             <input
               className="rounded-md border border-ink-700 bg-ink-800 px-3 py-2 text-sm"
-              placeholder="Default model"
+              placeholder="Модель по умолчанию"
               value={form.default_model}
               onChange={(e) => setForm({ ...form, default_model: e.target.value })}
             />
@@ -125,7 +125,7 @@ export function ProvidersSettings() {
             <KeyRound className="h-4 w-4 text-neutral-500" />
             <input
               className="flex-1 rounded-md border border-ink-700 bg-ink-800 px-3 py-2 text-sm disabled:opacity-40"
-              placeholder={keyBlocked ? "Key entry blocked on plain HTTP" : "API key (stored encrypted)"}
+              placeholder={keyBlocked ? "Ввод ключа заблокирован по обычному HTTP" : "API-ключ (хранится в зашифрованном виде)"}
               type="password"
               disabled={keyBlocked}
               value={form.api_key}
@@ -135,30 +135,30 @@ export function ProvidersSettings() {
           {insecure && (
             <label className="flex items-center gap-2 text-xs text-amber-300">
               <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} />
-              I understand keys sent over plain HTTP are not encrypted in transit.
+              Я понимаю, что ключи, отправленные по обычному HTTP, не шифруются при передаче.
             </label>
           )}
 
           <div className="flex justify-end gap-2">
             <button onClick={() => setOpen(false)} className="rounded-md px-3 py-1.5 text-sm text-neutral-400">
-              Cancel
+              Отмена
             </button>
             <button
               onClick={() => create.mutate()}
               disabled={!form.name || create.isPending}
               className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm text-white disabled:opacity-50"
             >
-              {create.isPending ? "Saving…" : "Save profile"}
+              {create.isPending ? "Сохранение…" : "Сохранить профиль"}
             </button>
           </div>
         </div>
       )}
 
       {isLoading ? (
-        <p className="text-sm text-neutral-500">Loading…</p>
+        <p className="text-sm text-neutral-500">Загрузка…</p>
       ) : providers.length === 0 ? (
         <p className="rounded-lg border border-dashed border-ink-700 p-6 text-center text-sm text-neutral-500">
-          No providers yet. Add one to populate the model picker.
+          Пока нет провайдеров. Добавьте хотя бы один, чтобы наполнить пикер модели.
         </p>
       ) : (
         <ul className="divide-y divide-ink-700 rounded-lg border border-ink-700">
@@ -172,23 +172,23 @@ export function ProvidersSettings() {
                   </span>
                   {p.active && (
                     <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[10px] text-emerald-300">
-                      active
+                      активен
                     </span>
                   )}
                   {p.has_secret && (
                     <span className="flex items-center gap-1 text-[10px] text-neutral-500">
-                      <KeyRound className="h-3 w-3" /> key set
+                      <KeyRound className="h-3 w-3" /> ключ задан
                     </span>
                   )}
                 </div>
                 <div className="text-xs text-neutral-500">
-                  {p.base_url || "—"} · {p.default_model || "no default model"}
+                  {p.base_url || "—"} · {p.default_model || "нет модели по умолчанию"}
                 </div>
               </div>
               <button
                 onClick={() => remove.mutate(p.id)}
                 className="text-neutral-500 hover:text-red-400"
-                aria-label="Delete provider"
+                aria-label="Удалить провайдера"
               >
                 <Trash2 className="h-4 w-4" />
               </button>

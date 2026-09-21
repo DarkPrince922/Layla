@@ -33,12 +33,12 @@ export function Sidebar() {
       </div>
 
       <button className="mx-3 mb-1 flex items-center gap-2 rounded-md border border-ink-700 bg-ink-800 px-3 py-1.5 text-xs text-neutral-400 hover:text-neutral-200">
-        <Search className="h-3.5 w-3.5" /> Search
+        <Search className="h-3.5 w-3.5" /> Поиск
         <span className="ml-auto rounded bg-ink-600 px-1.5 py-0.5 text-[10px]">⌘K</span>
       </button>
 
       <nav className="flex-1 overflow-y-auto px-2 pb-4">
-        <Section title="Domains">
+        <Section title="Домены">
           {DOMAINS.map((d) => {
             const active = pathname === `/${d.slug}` || pathname.startsWith(`/${d.slug}/`);
             const Icon = d.icon;
@@ -62,21 +62,21 @@ export function Sidebar() {
           })}
         </Section>
 
-        <Section title="Working">
+        <Section title="В работе">
           <div className="px-3 py-2 text-xs text-neutral-500 flex items-center gap-2">
-            <Activity className="h-3.5 w-3.5" /> No active tasks
+            <Activity className="h-3.5 w-3.5" /> Нет активных задач
           </div>
         </Section>
 
-        <Section title="Workspace">
+        <Section title="Рабочее пространство">
           <div className="px-3 py-2 text-xs text-neutral-500 flex items-center gap-2">
-            <FolderTree className="h-3.5 w-3.5" /> No projects yet
+            <FolderTree className="h-3.5 w-3.5" /> Пока нет проектов
           </div>
         </Section>
 
-        <Section title="Chats">
+        <Section title="Чаты">
           <div className="px-3 py-2 text-xs text-neutral-500 flex items-center gap-2">
-            <MessageSquare className="h-3.5 w-3.5" /> No chats yet
+            <MessageSquare className="h-3.5 w-3.5" /> Пока нет чатов
           </div>
         </Section>
       </nav>
@@ -86,16 +86,16 @@ export function Sidebar() {
           href="/settings/general"
           className="flex items-center gap-2 rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-ink-800"
         >
-          <Settings className="h-4 w-4" /> Settings
+          <Settings className="h-4 w-4" /> Настройки
         </Link>
         <div className="mt-1 flex items-center gap-2 px-3 py-2 text-xs text-neutral-500">
           <div className="grid h-6 w-6 place-items-center rounded-full bg-ink-600 text-[10px] text-neutral-300">
             {(user?.email || "?").slice(0, 1).toUpperCase()}
           </div>
-          <span className="truncate">{user?.email || "Not signed in"}</span>
+          <span className="truncate">{user?.email || "Вход не выполнен"}</span>
           {user && (
             <button onClick={() => logout()} className="ml-auto text-neutral-500 hover:text-neutral-300">
-              Sign out
+              Выйти
             </button>
           )}
         </div>

@@ -31,7 +31,7 @@ export default function LoginPage() {
       else await register(email, password, name || undefined);
       router.replace("/code");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Something went wrong");
+      setError(err instanceof Error ? err.message : "Что-то пошло не так");
     } finally {
       setBusy(false);
     }
@@ -58,11 +58,11 @@ export default function LoginPage() {
                 key={m}
                 type="button"
                 onClick={() => setMode(m)}
-                className={`flex-1 rounded px-3 py-1.5 capitalize ${
+                className={`flex-1 rounded px-3 py-1.5 ${
                   mode === m ? "bg-ink-600 text-white" : "text-neutral-400"
                 }`}
               >
-                {m}
+                {m === "login" ? "Вход" : "Регистрация"}
               </button>
             ))}
           </div>
@@ -70,14 +70,14 @@ export default function LoginPage() {
           {mode === "register" && (
             <input
               className="w-full rounded-md border border-ink-700 bg-ink-800 px-3 py-2 text-sm outline-none focus:border-indigo-500"
-              placeholder="Display name (optional)"
+              placeholder="Отображаемое имя (необязательно)"
               value={name}
               onChange={(e) => setName(e.target.value)}
             />
           )}
           <input
             className="w-full rounded-md border border-ink-700 bg-ink-800 px-3 py-2 text-sm outline-none focus:border-indigo-500"
-            placeholder="Email"
+            placeholder="Электронная почта"
             type="email"
             required
             value={email}
@@ -85,7 +85,7 @@ export default function LoginPage() {
           />
           <input
             className="w-full rounded-md border border-ink-700 bg-ink-800 px-3 py-2 text-sm outline-none focus:border-indigo-500"
-            placeholder="Password"
+            placeholder="Пароль"
             type="password"
             required
             minLength={8}
@@ -99,11 +99,12 @@ export default function LoginPage() {
             disabled={busy}
             className="w-full rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
           >
-            {busy ? "…" : mode === "login" ? "Sign in" : "Create account"}
+            {busy ? "…" : mode === "login" ? "Войти" : "Создать аккаунт"}
           </button>
         </form>
         <p className="mt-4 text-center text-xs text-neutral-600">
-          Single-tenant self-hosted workstation. Your data stays on your server.
+          Самохостируемая рабочая станция для одного оператора. Ваши данные
+          остаются на вашем сервере.
         </p>
       </div>
     </div>

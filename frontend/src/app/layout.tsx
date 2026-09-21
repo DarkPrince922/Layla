@@ -4,12 +4,12 @@ import { Providers } from "./providers";
 
 export const metadata: Metadata = {
   title: "Layla",
-  description: "Multi-domain AI workstation — Code · Pentest · OSINT · Design",
+  description: "Мультидоменная ИИ-рабочая станция — Код · Пентест · OSINT · Дизайн",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="ru" suppressHydrationWarning>
       <body>
         <Providers>{children}</Providers>
       </body>

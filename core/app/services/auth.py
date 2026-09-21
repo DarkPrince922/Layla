@@ -18,16 +18,16 @@ async def get_current_user(
 ) -> User:
     token = request.cookies.get(COOKIE_NAME)
     if not token:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Требуется аутентификация")
     try:
         payload = decode_session_token(token)
     except Exception as exc:  # invalid/expired token
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session"
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Недействительная сессия"
         ) from exc
     user = await session.get(User, payload.get("sub"))
     if user is None or not user.is_active:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unknown user")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Неизвестный пользователь")
     return user
 
 
@@ -37,7 +37,7 @@ async def ensure_user_bootstrapped(session: AsyncSession, user: User) -> None:
         select(Workspace).where(Workspace.owner_id == user.id).limit(1)
     )
     if existing_ws is None:
-        session.add(Workspace(owner_id=user.id, name="Default", projects_dir="/workspace/projects"))
+        session.add(Workspace(owner_id=user.id, name="По умолчанию", projects_dir="/workspace/projects"))
 
     existing_persona = await session.scalar(
         select(Persona).where(Persona.owner_id == user.id).limit(1)

@@ -1,4 +1,4 @@
-// Settings sections (spec §5 / §3). Each is a route under /settings.
+// Разделы настроек (спец. §5 / §3). Каждый — маршрут под /settings.
 export interface SettingsSection {
   slug: string;
   label: string;
@@ -6,16 +6,16 @@ export interface SettingsSection {
 }
 
 export const SETTINGS_SECTIONS: SettingsSection[] = [
-  { slug: "general", label: "General", blurb: "Hotkeys, projects directory, layout." },
-  { slug: "appearance", label: "Appearance", blurb: "Themes and accents." },
-  { slug: "providers", label: "Providers", blurb: "LLM connection profiles (via LiteLLM)." },
-  { slug: "agent", label: "Agent", blurb: "Ultracode orchestration, budgets, diagnostics." },
-  { slug: "personas", label: "Personas", blurb: "AI roles, tool access and boundaries." },
-  { slug: "knowledge", label: "Knowledge", blurb: "RAG documents indexed into pgvector." },
-  { slug: "security", label: "Security", blurb: "Access policies, confirmations, audit log." },
-  { slug: "integrations", label: "Integrations", blurb: "MCP servers, Telegram, intelligence APIs." },
-  { slug: "local-api", label: "Local API", blurb: "Layla's own OpenAI-compatible endpoint." },
-  { slug: "data", label: "Data", blurb: "Export, import, retention, cleanup." },
-  { slug: "accounts-lab", label: "Accounts Lab", blurb: "Provider onboarding, rotation, combos." },
-  { slug: "privacy-chain", label: "Privacy Chain", blurb: "Global egress profile (Direct/Tor/Proxy)." },
+  { slug: "general", label: "Общие", blurb: "Горячие клавиши, папка проектов, раскладка." },
+  { slug: "appearance", label: "Внешний вид", blurb: "Темы и акценты." },
+  { slug: "providers", label: "Провайдеры", blurb: "Профили подключения LLM (через LiteLLM)." },
+  { slug: "agent", label: "Агент", blurb: "Оркестрация Ultracode, бюджеты, диагностика." },
+  { slug: "personas", label: "Персоны", blurb: "Роли ИИ, доступ к инструментам и рамки." },
+  { slug: "knowledge", label: "База знаний", blurb: "Документы RAG, индексация в pgvector." },
+  { slug: "security", label: "Безопасность", blurb: "Политики доступа, подтверждения, аудит-лог." },
+  { slug: "integrations", label: "Интеграции", blurb: "MCP-серверы, Telegram, intelligence-API." },
+  { slug: "local-api", label: "Локальный API", blurb: "Собственный OpenAI-совместимый эндпоинт Layla." },
+  { slug: "data", label: "Данные", blurb: "Экспорт, импорт, ретеншн, очистка." },
+  { slug: "accounts-lab", label: "Accounts Lab", blurb: "Подключение провайдеров, ротация, combos." },
+  { slug: "privacy-chain", label: "Privacy Chain", blurb: "Глобальный egress-профиль (Direct/Tor/Proxy)." },
 ];

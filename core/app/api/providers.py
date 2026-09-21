@@ -72,7 +72,7 @@ async def delete_provider(
 ) -> None:
     provider = await session.get(Provider, provider_id)
     if provider is None or provider.owner_id != user.id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Provider not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Провайдер не найден")
     await audit.record(session, actor=user.id, action="provider.delete", target=provider.name)
     await session.delete(provider)
     await session.commit()

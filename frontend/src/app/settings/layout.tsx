@@ -17,7 +17,7 @@ export default function SettingsLayout({ children }: { children: React.ReactNode
             href="/code"
             className="flex items-center gap-2 border-b border-ink-700 px-4 py-4 text-sm text-neutral-300 hover:text-white"
           >
-            <ArrowLeft className="h-4 w-4" /> Back to app
+            <ArrowLeft className="h-4 w-4" /> Назад в приложение
           </Link>
           <nav className="flex-1 overflow-y-auto p-2">
             {SETTINGS_SECTIONS.map((s) => {

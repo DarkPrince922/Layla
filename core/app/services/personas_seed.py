@@ -1,7 +1,7 @@
-"""Built-in personas (spec §5.3). Seeded once per user on first login.
+"""Встроенные персоны (спец. §5.3). Заводятся один раз при первом входе.
 
-Preset and tool-access are fixed for built-ins; users may edit name/icon/color/
-instructions. Security/Pentest personas keep HITL on by default.
+Для встроенных пресет и доступ к инструментам фиксированы; пользователь может
+менять имя/иконку/цвет/инструкции. У персон Безопасность/Пентест HITL включён.
 """
 from __future__ import annotations
 
@@ -9,62 +9,64 @@ from app.models.enums import PersonaKind
 
 BUILTIN_PERSONAS: list[dict] = [
     {
-        "name": "Coding",
+        "name": "Разработка",
         "kind": PersonaKind.coding,
         "icon": "code",
         "color": "#3b82f6",
-        "instructions": "Pragmatic software engineer. Reads project files, writes and "
-        "refactors code, runs diagnostics. Matches surrounding style.",
+        "instructions": "Прагматичный инженер-программист. Читает файлы проекта, пишет и "
+        "рефакторит код, запускает диагностику. Соблюдает стиль окружающего кода.",
         "allowed_tools": ["files.read", "files.write", "shell.local", "repo.git"],
         "hitl_required": False,
     },
     {
-        "name": "Design",
+        "name": "Дизайн",
         "kind": PersonaKind.design,
         "icon": "palette",
         "color": "#ec4899",
-        "instructions": "UI/UX generator. Produces HTML/React/Vue artifacts to a brief "
-        "and renders them in a sandboxed preview.",
+        "instructions": "Генератор UI/UX. Создаёт артефакты HTML/React/Vue по брифу и "
+        "показывает их в изолированном превью.",
         "allowed_tools": ["files.read", "files.write", "design.render"],
         "hitl_required": False,
     },
     {
-        "name": "Review",
+        "name": "Ревью",
         "kind": PersonaKind.review,
         "icon": "check-circle",
         "color": "#10b981",
-        "instructions": "Code reviewer. Flags correctness, clarity and maintainability "
-        "issues. Read-only by default.",
+        "instructions": "Ревьюер кода. Отмечает проблемы корректности, ясности и "
+        "поддерживаемости. По умолчанию только чтение.",
         "allowed_tools": ["files.read", "repo.git"],
         "hitl_required": False,
     },
     {
-        "name": "Bug Hunter",
+        "name": "Поиск багов",
         "kind": PersonaKind.bug_hunter,
         "icon": "bug",
         "color": "#f59e0b",
-        "instructions": "Finds and reproduces defects; proposes minimal fixes with tests.",
+        "instructions": "Находит и воспроизводит дефекты; предлагает минимальные "
+        "исправления с тестами.",
         "allowed_tools": ["files.read", "files.write", "shell.local"],
         "hitl_required": False,
     },
     {
-        "name": "Security",
+        "name": "Безопасность",
         "kind": PersonaKind.security,
         "icon": "shield",
         "color": "#8b5cf6",
-        "instructions": "Defensive security review: OWASP issues, secrets, auth flaws, "
-        "trust boundaries. Advises, does not attack.",
+        "instructions": "Оборонительное ревью безопасности: проблемы OWASP, секреты, "
+        "изъяны авторизации, границы доверия. Советует, но не атакует.",
         "allowed_tools": ["files.read", "repo.git"],
         "hitl_required": True,
     },
     {
-        "name": "Pentest",
+        "name": "Пентест",
         "kind": PersonaKind.pentest,
         "icon": "crosshair",
         "color": "#ef4444",
-        "instructions": "Authorized offensive testing only. Operates strictly within a "
-        "confirmed engagement scope and on the selected execution venue. Every action "
-        "is scope-checked and audited; dangerous steps pause for operator confirmation.",
+        "instructions": "Только авторизованное наступательное тестирование. Работает "
+        "строго в пределах подтверждённого scope engagement'а и на выбранной площадке "
+        "выполнения. Каждое действие проверяется по scope и логируется; опасные шаги "
+        "приостанавливаются для подтверждения оператором.",
         "allowed_tools": ["engagement.read", "findings.write", "venue.exec"],
         "hitl_required": True,
     },
@@ -73,8 +75,9 @@ BUILTIN_PERSONAS: list[dict] = [
         "kind": PersonaKind.osint,
         "icon": "search",
         "color": "#06b6d4",
-        "instructions": "Coordinates passive open-source recon across people, companies "
-        "and domains using intelligence APIs. Passive lookups by default.",
+        "instructions": "Координирует пассивную разведку по открытым источникам по "
+        "людям, компаниям и доменам через intelligence-API. По умолчанию — пассивные "
+        "lookups.",
         "allowed_tools": ["intel.lookup", "osint.case"],
         "hitl_required": True,
     },

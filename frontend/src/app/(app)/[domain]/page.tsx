@@ -12,7 +12,7 @@ export default function DomainPage({ params }: { params: { domain: string } }) {
 
   return (
     <div className="flex h-full flex-col">
-      {/* Top bar: domain tabs (spec §3). */}
+      {/* Верхний бар: табы домена (спец. §3). */}
       <header className="flex items-center gap-4 border-b border-ink-700 bg-ink-900 px-6 py-3">
         <div className="flex items-center gap-2">
           <Icon className="h-5 w-5" style={{ color: domain.color }} />
@@ -33,7 +33,7 @@ export default function DomainPage({ params }: { params: { domain: string } }) {
         <div className="ml-auto text-[11px] text-neutral-500">⌘K</div>
       </header>
 
-      {/* Placeholder body — domain features land in later milestones. */}
+      {/* Заглушка тела — функции домена появятся в следующих этапах. */}
       <div className="grid flex-1 place-items-center p-8">
         <div className="max-w-md text-center">
           <div
@@ -42,11 +42,11 @@ export default function DomainPage({ params }: { params: { domain: string } }) {
           >
             <Icon className="h-6 w-6" style={{ color: domain.color }} />
           </div>
-          <h2 className="text-lg font-medium text-neutral-200">{domain.label} domain</h2>
+          <h2 className="text-lg font-medium text-neutral-200">Домен «{domain.label}»</h2>
           <p className="mt-1 text-sm text-neutral-500">{domain.tagline}</p>
           <p className="mt-4 text-xs text-neutral-600">
-            This is the M0 shell. Domain features are implemented in later
-            milestones (chat &amp; providers in M1).
+            Это оболочка этапа M0. Функции домена реализуются в следующих этапах
+            (чат и провайдеры — в M1).
           </p>
         </div>
       </div>

@@ -39,7 +39,7 @@ async def register(
 ) -> User:
     existing = await session.scalar(select(User).where(User.email == body.email))
     if existing is not None:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Эта почта уже зарегистрирована")
     user = User(
         email=body.email,
         pw_hash=hash_password(body.password),
@@ -63,7 +63,7 @@ async def login(
     user = await session.scalar(select(User).where(User.email == body.email))
     if user is None or not verify_password(body.password, user.pw_hash):
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password"
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Неверная почта или пароль"
         )
     if needs_rehash(user.pw_hash):
         user.pw_hash = hash_password(body.password)

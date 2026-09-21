@@ -21,14 +21,14 @@ export function PersonasSettings() {
 
   return (
     <div>
-      <h1 className="text-xl font-semibold">Personas</h1>
+      <h1 className="text-xl font-semibold">Персоны</h1>
       <p className="mb-4 text-sm text-neutral-500">
-        A persona switches the AI&apos;s role, tool access and boundaries at the
-        chat level. Built-ins are provided; custom personas arrive in a later
-        milestone.
+        Персона переключает роль ИИ, доступ к инструментам и рамки на уровне
+        чата. Встроенные персоны уже готовы; пользовательские появятся на
+        следующем этапе.
       </p>
       {isLoading ? (
-        <p className="text-sm text-neutral-500">Loading…</p>
+        <p className="text-sm text-neutral-500">Загрузка…</p>
       ) : (
         <ul className="grid grid-cols-2 gap-3">
           {personas.map((p) => (
@@ -41,7 +41,7 @@ export function PersonasSettings() {
                 <span className="text-sm font-medium">{p.name}</span>
                 {p.is_builtin && (
                   <span className="rounded bg-ink-700 px-1.5 py-0.5 text-[10px] text-neutral-400">
-                    built-in
+                    встроенная
                   </span>
                 )}
                 {p.hitl_required && (

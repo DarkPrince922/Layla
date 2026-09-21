@@ -9,38 +9,40 @@ export interface DomainDef {
   tabs: string[];
 }
 
+// slug остаётся латиницей (используется в маршрутах); переведены только
+// отображаемые строки.
 export const DOMAINS: DomainDef[] = [
   {
     slug: "code",
-    label: "Code",
+    label: "Код",
     icon: Code2,
     color: "#3b82f6",
-    tagline: "Chat agent with access to project files and repositories.",
-    tabs: ["Chat", "Files", "Repos"],
+    tagline: "Чат-агент с доступом к файлам проекта и репозиториям.",
+    tabs: ["Чат", "Файлы", "Репозитории"],
   },
   {
     slug: "pentest",
-    label: "Pentest",
+    label: "Пентест",
     icon: Crosshair,
     color: "#ef4444",
-    tagline: "Authorized engagements: scope, findings, reports, agent.",
-    tabs: ["Overview", "Findings", "Reports", "Servers", "Activity", "Agent"],
+    tagline: "Авторизованные engagement'ы: scope, находки, отчёты, агент.",
+    tabs: ["Обзор", "Находки", "Отчёты", "Серверы", "Активность", "Агент"],
   },
   {
     slug: "osint",
     label: "OSINT",
     icon: Search,
     color: "#06b6d4",
-    tagline: "Open-source recon cases via intelligence APIs (passive).",
-    tabs: ["Cases", "Timeline", "Sources"],
+    tagline: "Кейсы разведки по открытым источникам через intelligence-API (пассивно).",
+    tabs: ["Кейсы", "Таймлайн", "Источники"],
   },
   {
     slug: "design",
-    label: "Design",
+    label: "Дизайн",
     icon: Palette,
     color: "#ec4899",
-    tagline: "Generate UI artifacts (HTML/React/Vue) from a brief.",
-    tabs: ["Brief", "Preview", "Code", "Design system"],
+    tagline: "Генерация UI-артефактов (HTML/React/Vue) по брифу.",
+    tabs: ["Бриф", "Превью", "Код", "Дизайн-система"],
   },
 ];
 
