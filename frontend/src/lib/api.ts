@@ -20,7 +20,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     let detail = res.statusText;
     try {
       const body = await res.json();
-      detail = body.detail || detail;
+      if (typeof body.detail === "string") detail = body.detail;
+      else if (Array.isArray(body.detail)) {
+        detail = body.detail.map((e: { msg?: string }) => e.msg || "Некорректные данные").join("; ");
+      }
     } catch {
       /* ignore */
     }
@@ -40,6 +43,56 @@ export const api = {
     request<T>(p, { method: "PATCH", body: body ? JSON.stringify(body) : undefined }),
   del: <T>(p: string) => request<T>(p, { method: "DELETE" }),
 };
+
+// ---- OSINT / intelligence (M3) ----
+export type IntelProviderName = "shodan" | "virustotal" | "securitytrails" | "urlscan";
+export interface IntelProvider {
+  provider: IntelProviderName;
+  name: string;
+  docs_url: string;
+  tool_name: string;
+  supports_ip: boolean;
+  key_required: boolean;
+  configured: boolean;
+  key_masked: string | null;
+  passive: boolean;
+}
+export type SubjectType = "person" | "company" | "domain";
+export interface OsintCase {
+  id: string;
+  subject_type: SubjectType;
+  subject: string;
+  artifact_count: number;
+  lookup_count: number;
+  created_at: string;
+}
+export interface OsintArtifact {
+  id: string;
+  provider: string;
+  target: string;
+  kind: string;
+  title: string;
+  summary: string;
+  source_url: string;
+  data: Record<string, unknown>;
+  created_at: string;
+}
+export interface OsintLookup {
+  id: string;
+  provider: IntelProviderName;
+  target: string;
+  status: "ok" | "empty" | "error";
+  artifact_count: number;
+  duplicate_count: number;
+  error_code: string | null;
+  error: string | null;
+  created_at: string;
+}
+export interface OsintSource {
+  provider: string;
+  source_url: string;
+  artifact_count: number;
+}
 
 export interface Me {
   id: string;

@@ -4,16 +4,20 @@ from __future__ import annotations
 import logging
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.api import (
     auth,
     chats,
     designs,
     health,
+    intelligence,
     knowledge,
     mcp,
     models,
+    osint,
     personas,
     projects,
     providers,
@@ -32,6 +36,18 @@ app = FastAPI(
     docs_url="/api/docs",
     openapi_url="/api/openapi.json",
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(_request, exc: RequestValidationError):
+    # Pydantic's default error includes the original input (possibly an API key).
+    return JSONResponse(
+        status_code=422,
+        content={"detail": [
+            {"loc": e["loc"], "msg": e["msg"], "type": e["type"]} for e in exc.errors()
+        ]},
+    )
+
 
 # In prod the frontend and API share an origin behind Caddy, so CORS is only
 # needed for local split-origin dev.
@@ -57,6 +73,8 @@ app.include_router(designs.router, prefix=api_prefix)
 app.include_router(knowledge.router, prefix=api_prefix)
 app.include_router(mcp.router, prefix=api_prefix)
 app.include_router(telegram.router, prefix=api_prefix)
+app.include_router(intelligence.router, prefix=api_prefix)
+app.include_router(osint.router, prefix=api_prefix)
 
 
 @app.get("/")

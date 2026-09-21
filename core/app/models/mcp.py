@@ -22,6 +22,7 @@ class McpServer(UUIDPk, Timestamps, Base):
     # Persona ids allowed to use this server.
     personas: Mapped[list] = mapped_column(JSONList, default=list)
     env: Mapped[dict] = mapped_column(JSONList, default=dict)
+    env_secret_ref: Mapped[str | None] = mapped_column(Text)
 
 
 class IntelKey(UUIDPk, Timestamps, Base):

@@ -22,11 +22,12 @@ personas (AI roles), sub-agent orchestration, MCP integrations, a knowledge base
 
 ---
 
-## Status — Milestones M0–M2
+## Status — Milestones M0–M3
 
 The UI ships in **Russian** (переключатель EN/RU запланирован на M6). This
 repository currently implements **M0** (skeleton), **M1** (providers & chat)
-and **M2** (Design + Knowledge + MCP + Telegram).
+and **M2** (Design + Knowledge + MCP + Telegram), plus **M3** (OSINT).
+Remaining M0–M2 spec gaps are tracked explicitly in [the roadmap](docs/ROADMAP.md).
 
 **Included now**
 - Monorepo layout: `frontend/` · `core/` · `deploy/`.
@@ -80,11 +81,26 @@ and **M2** (Design + Knowledge + MCP + Telegram).
   per-domain scoping — tested.
 - **MCP registry + client** (`/api/mcp/servers`): CRUD for stdio/http servers,
   per-persona enablement, env values never returned, live "test connection"
-  via the official `mcp` SDK (optional import) — tested.
+  via the official `mcp` SDK (installed by default since M3) — tested.
 - **Telegram bot** (`/api/integrations/telegram`): encrypted bot token, status
   with masked token, test send — tested.
 
-**Not yet built** (later milestones): OSINT lookups (M3); pentest
+**Added in M3**
+- **OSINT cases**: domain/IP, person and company cases, searchable list,
+  manual source-attributed observations, persisted artifacts and query timeline.
+- **Passive intelligence through MCP**: Shodan, VirusTotal, SecurityTrails and
+  urlscan.io domain/IP lookups through a bundled stdio MCP server; no scan
+  submissions or requests to targets. Deduplicated artifacts retain sources.
+- **Intelligence API settings**: encrypted provider keys, masked responses,
+  HTTP input acknowledgement and a local MCP connection test.
+- Owner isolation, safe error reporting, audit records, response size/deadline
+  limits, encrypted MCP env migration and Streamable HTTP client support.
+- Narrow-screen navigation for OSINT/settings; backend, protocol and migration
+  tests plus GitHub Actions backend/frontend checks.
+
+See [M3 usage, upgrade instructions and limits](docs/OSINT.md).
+
+**Not yet built** (later milestones): pentest
 scope-enforcement/egress/findings/Acunetix import with tests (M4); CAI
 autonomous agent + Ultracode orchestration (M5); polish, EN/RU i18n switch,
 combos (M6). See [`docs/ROADMAP.md`](docs/ROADMAP.md).

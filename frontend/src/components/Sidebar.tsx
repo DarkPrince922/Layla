@@ -24,7 +24,7 @@ export function Sidebar() {
   const logout = useAuth((s) => s.logout);
 
   return (
-    <aside className="flex h-full w-64 shrink-0 flex-col border-r border-ink-700 bg-ink-900">
+    <aside className="flex h-full w-full shrink-0 flex-col border-r border-ink-700 bg-ink-900 md:w-64">
       <div className="flex items-center gap-2 px-4 py-4">
         <div className="grid h-7 w-7 place-items-center rounded-md bg-gradient-to-br from-fuchsia-500 to-indigo-500 text-sm font-bold text-white">
           L

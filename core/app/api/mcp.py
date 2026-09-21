@@ -17,13 +17,17 @@ from app.schemas.mcp import (
 )
 from app.services import audit, mcp_client
 from app.services.auth import get_current_user
+from app.services.mcp_secrets import decrypt_env, encrypt_env
 
 router = APIRouter(prefix="/mcp/servers", tags=["mcp"])
 
 
 def _to_out(s: McpServer) -> McpServerOut:
     out = McpServerOut.model_validate(s)
-    out.env_keys = list((s.env or {}).keys())
+    try:
+        out.env_keys = list(decrypt_env(s))
+    except ValueError:
+        out.env_keys = []
     return out
 
 
@@ -57,7 +61,8 @@ async def create_server(
         url=body.url,
         enabled=body.enabled,
         personas=body.personas,
-        env=body.env,
+        env={},
+        env_secret_ref=encrypt_env(body.env),
     )
     session.add(srv)
     await audit.record(session, actor=user.id, action="mcp.register", target=body.name)
@@ -98,13 +103,17 @@ async def test_server(
 ) -> McpTestResult:
     """Проверить подключение: инициализировать сессию и получить список инструментов."""
     srv = await _owned(session, user, server_id)
+    if not srv.enabled:
+        return McpTestResult(ok=False, error="MCP-сервер выключен")
     try:
         tools = await mcp_client.list_tools(
             transport=srv.transport.value if hasattr(srv.transport, "value") else str(srv.transport),
             command=srv.command,
             url=srv.url,
-            env=srv.env,
+            env=decrypt_env(srv),
         )
         return McpTestResult(ok=True, tools=[McpToolInfo(**t) for t in tools])
     except RuntimeError as exc:
         return McpTestResult(ok=False, error=str(exc))
+    except ValueError:
+        return McpTestResult(ok=False, error="Не удалось прочитать настройки MCP-сервера")

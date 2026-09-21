@@ -10,6 +10,7 @@ import {
   type TelegramConfig,
 } from "@/lib/api";
 import { HttpKeyBanner } from "@/components/HttpKeyBanner";
+import { IntelligenceSettings } from "@/components/IntelligenceSettings";
 
 function McpRegistry() {
   const qc = useQueryClient();
@@ -273,12 +274,12 @@ export function IntegrationsSettings() {
     <div>
       <h1 className="text-xl font-semibold">Интеграции</h1>
       <p className="mb-4 text-sm text-neutral-500">
-        MCP-серверы, Telegram-бот. Intelligence-API (Shodan/VirusTotal/…) появятся
-        в M3.
+        Intelligence APIs, MCP-серверы и Telegram-бот.
       </p>
       <div className="mb-4">
         <HttpKeyBanner />
       </div>
+      <IntelligenceSettings />
       <McpRegistry />
       <TelegramIntegration />
     </div>

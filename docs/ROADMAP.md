@@ -10,8 +10,10 @@ Each milestone is a working application, verified before moving on (spec §9).
 - **M2 — Design + Knowledge + MCP** ✅ *(this repo)* — Design brief → sandboxed
   iframe artifact with Preview/Code + breakpoints, RAG (chunk + embed + cosine
   search), MCP client + registry with connection test, Telegram bot.
-- **M3 — OSINT** — cases, intelligence APIs (Shodan/VT/SecurityTrails/urlscan)
-  via MCP, passive lookups.
+- **M3 — OSINT** ✅ — persistent cases, source-attributed artifacts, query
+  timeline, encrypted intelligence keys, Shodan/VT/SecurityTrails/urlscan via
+  a bundled read-only MCP server. Passive domain/IP lookups and manual material
+  collection for all case types. See [OSINT usage and limits](OSINT.md).
 - **M4 — Pentest (core)** — engagements, Scope + authorized gate, Servers /
   execution venue + SSH + egress, findings, Acunetix import, reports.
   **Scope-enforcement and egress fail-closed shipped with tests.**
@@ -19,3 +21,21 @@ Each milestone is a working application, verified before moving on (spec §9).
   (live log, HITL, finding triage), Ultracode sub-agent orchestration, budgets.
 - **M6 — Polish** — Combos router, audit export, mobile layout, RU i18n,
   hardening, docs.
+
+## Gaps found while taking over from M2
+
+The M0–M2 labels above describe shipped code, not full spec acceptance.
+The following remain tracked explicitly:
+
+- Knowledge uses JSON-stored hash embeddings and Python cosine search, not
+  pgvector queries; retrieval is not wired into every chat turn.
+- Telegram supports encrypted configuration and a test send, not inbound chat
+  control or subscriptions to running-agent updates.
+- A post-M2 fix routed chat/design directly to providers. Restore the mandated
+  LiteLLM-only path with working proxy model synchronization and fallback tests.
+- General tool-enabled chat, per-persona execution enforcement and OSINT
+  specialist-agent coordination belong to the agent milestone, not this M3 UI.
+- M3 fixes the missing MCP dependency, adds actual tool calls and Streamable
+  HTTP support, and encrypts legacy MCP environment secrets during migration.
+- M3 makes OSINT and integrations usable on narrow screens. The explicit
+  desktop/mobile preference and complete EN/RU dictionaries remain in M6.

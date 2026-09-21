@@ -8,7 +8,7 @@ from app.models.design import Design
 from app.models.knowledge import KnowledgeChunk, KnowledgeDoc
 from app.models.mcp import IntelKey, McpServer
 from app.models.telegram import TelegramConfig
-from app.models.osint import OsintCase
+from app.models.osint import OsintArtifact, OsintCase, OsintLookup
 from app.models.persona import Persona
 from app.models.pentest import (
     Engagement,
@@ -34,6 +34,8 @@ __all__ = [
     "McpServer",
     "TelegramConfig",
     "OsintCase",
+    "OsintArtifact",
+    "OsintLookup",
     "Persona",
     "Engagement",
     "Evidence",

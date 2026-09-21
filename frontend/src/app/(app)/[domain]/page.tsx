@@ -3,6 +3,7 @@ import { domainBySlug, DOMAINS } from "@/lib/domains";
 import { CodeDomain } from "@/components/CodeDomain";
 import { DesignDomain } from "@/components/DesignDomain";
 import { ChatPanel } from "@/components/ChatPanel";
+import { OsintDomain } from "@/components/OsintDomain";
 
 export function generateStaticParams() {
   return DOMAINS.map((d) => ({ domain: d.slug }));
@@ -12,6 +13,7 @@ export default function DomainPage({ params }: { params: { domain: string } }) {
   const domain = domainBySlug(params.domain);
   if (!domain) notFound();
   const Icon = domain.icon;
+  if (domain.slug === "osint") return <OsintDomain />;
 
   return (
     <div className="flex h-full flex-col">
@@ -43,7 +45,7 @@ export default function DomainPage({ params }: { params: { domain: string } }) {
           <DesignDomain />
         ) : (
           // Прочие домены получают общий чат-слой; их доменные функции — в
-          // следующих этапах (Design M2, OSINT M3, Pentest M4-M5).
+          // следующих этапах (Pentest M4-M5).
           <div className="flex h-full">
             <div className="grid flex-1 place-items-center p-8">
               <div className="max-w-md text-center">
