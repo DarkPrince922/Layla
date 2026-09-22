@@ -15,6 +15,23 @@ class User(UUIDPk, Timestamps, Base):
     pw_hash: Mapped[str] = mapped_column(Text, nullable=False)
     display_name: Mapped[str | None] = mapped_column(String(120))
     is_active: Mapped[bool] = mapped_column(default=True, nullable=False)
+    # Администратор: единственный, кто может заводить/отключать пользователей.
+    is_admin: Mapped[bool] = mapped_column(default=False, nullable=False)
+    # Пароль выдан администратором/бутстрапом — попросить сменить при входе.
+    must_change_password: Mapped[bool] = mapped_column(default=False, nullable=False)
+
+
+class AdminBootstrap(UUIDPk, Timestamps, Base):
+    """Одноразовые учётные данные админа, созданные при первой установке.
+
+    Строка живёт до первого входа администратора (или смены пароля), после чего
+    удаляется — пароль показывается в UI ровно один раз.
+    """
+
+    __tablename__ = "admin_bootstrap"
+
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+    password: Mapped[str] = mapped_column(String(255), nullable=False)
 
 
 class Workspace(UUIDPk, Timestamps, Base):

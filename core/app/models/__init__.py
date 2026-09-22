@@ -21,7 +21,7 @@ from app.models.pentest import (
     Venue,
 )
 from app.models.provider import Provider, ProviderKey
-from app.models.user import Project, User, Workspace
+from app.models.user import AdminBootstrap, Project, User, Workspace
 
 __all__ = [
     "AgentRun",
@@ -53,4 +53,5 @@ __all__ = [
     "Project",
     "User",
     "Workspace",
+    "AdminBootstrap",
 ]

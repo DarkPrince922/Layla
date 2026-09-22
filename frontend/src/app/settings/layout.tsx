@@ -8,10 +8,13 @@ import clsx from "clsx";
 import { AuthGate } from "@/components/AuthGate";
 import { SETTINGS_SECTIONS } from "@/lib/settings-nav";
 import { useLocale } from "@/store/locale";
+import { useAuth } from "@/store/auth";
 
 export default function SettingsLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const t = useLocale((s) => s.t);
+  const isAdmin = useAuth((s) => s.user?.is_admin);
+  const sections = SETTINGS_SECTIONS.filter((s) => !s.adminOnly || isAdmin);
   const [menu, setMenu] = useState(false);
   useEffect(() => setMenu(false), [pathname]);
   return (
@@ -31,7 +34,7 @@ export default function SettingsLayout({ children }: { children: React.ReactNode
             <ArrowLeft className="h-4 w-4" /> {t("back.toApp")}
           </Link>
           <nav className="flex-1 overflow-y-auto p-2">
-            {SETTINGS_SECTIONS.map((s) => {
+            {sections.map((s) => {
               const active = pathname === `/settings/${s.slug}`;
               return (
                 <Link

@@ -10,6 +10,7 @@ import { IntegrationsSettings } from "@/components/IntegrationsSettings";
 import { AgentSettings } from "@/components/AgentSettings";
 import { GeneralSettings } from "@/components/GeneralSettings";
 import { SecuritySettings } from "@/components/SecuritySettings";
+import { UsersSettings } from "@/components/UsersSettings";
 
 export default function SettingsSectionPage({ params }: { params: { section: string } }) {
   const section = SETTINGS_SECTIONS.find((s) => s.slug === params.section);
@@ -23,6 +24,7 @@ export default function SettingsSectionPage({ params }: { params: { section: str
   if (section.slug === "agent") return <AgentSettings />;
   if (section.slug === "general") return <GeneralSettings />;
   if (section.slug === "security") return <SecuritySettings />;
+  if (section.slug === "users") return <UsersSettings />;
 
   // Заглушка для разделов, реализуемых в следующих этапах.
   return (

@@ -10,6 +10,8 @@ os.environ.setdefault("LAYLA_SECRET_KEY", "test-secret-key-for-derivation")
 os.environ.setdefault("LAYLA_JWT_SECRET", "test-jwt-secret")
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("LAYLA_ENV", "dev")
+# Тесты создают пользователей через открытую регистрацию (в проде она закрыта).
+os.environ.setdefault("LAYLA_ALLOW_OPEN_REGISTRATION", "1")
 import tempfile  # noqa: E402
 os.environ.setdefault("LAYLA_PROJECTS_DIR", tempfile.mkdtemp(prefix="layla-proj-"))
 

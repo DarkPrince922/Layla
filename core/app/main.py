@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
@@ -9,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api import (
+    admin,
     agent,
     audit,
     auth,
@@ -41,12 +43,28 @@ _prod_problems = settings.validate_for_prod()
 if _prod_problems:
     raise RuntimeError("Небезопасная конфигурация prod: " + "; ".join(_prod_problems))
 
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # Первый запуск: гарантировать администратора (создать со случайным паролем
+    # или повысить существующего). Не валим старт, если БД ещё недоступна.
+    from app.db import SessionLocal
+    from app.services.auth import ensure_admin_bootstrapped
+
+    try:
+        async with SessionLocal() as session:
+            await ensure_admin_bootstrapped(session)
+    except Exception:  # noqa: BLE001 — старт не должен падать из-за бутстрапа
+        logging.getLogger("layla").exception("Бутстрап администратора не выполнен")
+    yield
+
+
 app = FastAPI(
     title="Layla Core",
     version="0.1.0",
     description="Backend orchestrating Layla's Code / Pentest / OSINT / Design domains.",
     docs_url="/api/docs",
     openapi_url="/api/openapi.json",
+    lifespan=lifespan,
 )
 
 
@@ -76,6 +94,7 @@ if not settings.is_prod:
 api_prefix = "/api"
 app.include_router(health.router, prefix=api_prefix)
 app.include_router(auth.router, prefix=api_prefix)
+app.include_router(admin.router, prefix=api_prefix)
 app.include_router(providers.router, prefix=api_prefix)
 app.include_router(personas.router, prefix=api_prefix)
 app.include_router(models.router, prefix=api_prefix)

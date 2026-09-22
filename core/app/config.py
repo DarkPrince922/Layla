@@ -14,6 +14,15 @@ class Settings(BaseSettings):
     # --- General ---
     env: str = Field(default="dev", alias="LAYLA_ENV")
     public_host: str = Field(default="localhost", alias="LAYLA_PUBLIC_HOST")
+    # E-mail админа, создаваемого при первой установке (если пользователей ещё нет).
+    # Домен .app — валидный (в отличие от .local), почта туда не шлётся: это лишь
+    # логин. Замените на свой реальный e-mail через LAYLA_ADMIN_EMAIL.
+    admin_email: str = Field(default="admin@layla.app", alias="LAYLA_ADMIN_EMAIL")
+    # Открытая саморегистрация. По умолчанию ВЫКЛ: пользователей заводит админ.
+    # Включите, если хотите разрешить всем регистрироваться самостоятельно.
+    allow_open_registration: bool = Field(
+        default=False, alias="LAYLA_ALLOW_OPEN_REGISTRATION"
+    )
 
     # --- Crypto / auth ---
     # Fernet key for secrets-at-rest. A dev fallback is generated if unset so

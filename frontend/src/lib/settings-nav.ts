@@ -3,10 +3,12 @@ export interface SettingsSection {
   slug: string;
   label: string;
   blurb: string;
+  adminOnly?: boolean;
 }
 
 export const SETTINGS_SECTIONS: SettingsSection[] = [
   { slug: "general", label: "Общие", blurb: "Горячие клавиши, папка проектов, раскладка." },
+  { slug: "users", label: "Пользователи", blurb: "Учётные записи, роли, сброс паролей.", adminOnly: true },
   { slug: "appearance", label: "Внешний вид", blurb: "Темы и акценты." },
   { slug: "providers", label: "Провайдеры", blurb: "Профили подключения LLM (через LiteLLM)." },
   { slug: "agent", label: "Агент", blurb: "Оркестрация Ultracode, бюджеты, диагностика." },

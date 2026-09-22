@@ -98,6 +98,31 @@ export interface Me {
   id: string;
   email: string;
   display_name?: string | null;
+  is_admin?: boolean;
+  is_active?: boolean;
+  must_change_password?: boolean;
+}
+
+// ---- Управление пользователями (админ) ----
+export interface AdminUser {
+  id: string;
+  email: string;
+  display_name?: string | null;
+  is_admin: boolean;
+  is_active: boolean;
+  must_change_password: boolean;
+  created_at?: string | null;
+}
+
+export interface AdminUserCreated {
+  user: AdminUser;
+  generated_password?: string | null;
+}
+
+export interface Bootstrap {
+  available: boolean;
+  email?: string | null;
+  password?: string | null;
 }
 
 export interface AppMeta {
