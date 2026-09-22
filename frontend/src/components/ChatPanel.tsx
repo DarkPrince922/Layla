@@ -38,6 +38,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile }: {
   const [input, setInput] = useState("");
   const [personaId, setPersonaId] = useState("");
   const [model, setModel] = useState("");
+  const [providerId, setProviderId] = useState("");
   const [sending, setSending] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -94,7 +95,21 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile }: {
   useEffect(() => {
     if (savedId) { setPersonaId(savedPersona || ""); if (savedModel) setModel(savedModel); }
   }, [savedId, savedModel, savedPersona]);
-  useEffect(() => { if (!model && models.length) setModel(models[0].name); }, [model, models]);
+  useEffect(() => { if (!model && models.length) { setModel(models[0].name); setProviderId(models[0].provider_id); } }, [model, models]);
+  // Имя модели может встречаться у нескольких провайдеров, поэтому пикер хранит
+  // пару «провайдер+модель». Если провайдер неизвестен (модель восстановлена из
+  // чата) — берём первого, у кого эта модель есть.
+  const selected = useMemo(
+    () => models.find(m => m.name === model && m.provider_id === providerId) || models.find(m => m.name === model) || null,
+    [models, model, providerId],
+  );
+  const choice = selected ? `${selected.provider_id}|${selected.name}` : "";
+  function pickModel(value: string) {
+    const at = value.indexOf("|");
+    if (at < 0) return;
+    setProviderId(value.slice(0, at));
+    setModel(value.slice(at + 1));
+  }
   useEffect(() => {
     for (const message of messages) for (const tool of message.meta?.tools || []) {
       const key = `${message.id}:${tool.id}`;
@@ -117,7 +132,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile }: {
         if (version === generation.current) { setChatId(id); remember(scope, id); }
       }
       if (!request.current || request.current.content !== content || request.current.chat !== id) request.current = { content, chat: id, id: newRequestId() };
-      await api.post<Job>(`/chats/${id}/run`, { content, model, request_id: request.current.id });
+      await api.post<Job>(`/chats/${id}/run`, { content, model, provider_id: selected?.provider_id, request_id: request.current.id });
       remember(`${scope}:draft:${chatId || "new"}`, "");
       if (version === generation.current) setInput("");
       request.current = null;
@@ -181,7 +196,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile }: {
     <div className="mx-4 mb-4 rounded-2xl border border-ink-600/60 bg-ink-800/70 p-3">
       <div className="mb-3 flex flex-wrap gap-2 text-xs">
         <select aria-label="Персона" value={personaId} disabled={!!chatId || sending} onChange={e => setPersonaId(e.target.value)} className="min-w-0 max-w-full rounded-lg bg-ink-900 px-3 py-2"><option value="">Без персоны</option>{personas.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
-        <select aria-label="Модель" value={model} disabled={running || sending} onChange={e => setModel(e.target.value)} className="min-w-0 max-w-full rounded-lg bg-ink-900 px-3 py-2">{!models.length && <option value="">Нет активных моделей</option>}{models.map(m => <option key={`${m.provider_id}:${m.name}`} value={m.name}>{m.name} · {m.provider}</option>)}</select>
+        <select aria-label="Модель" value={choice} disabled={running || sending} onChange={e => pickModel(e.target.value)} className="min-w-0 max-w-full rounded-lg bg-ink-900 px-3 py-2">{!models.length && <option value="">Нет активных моделей</option>}{models.map(m => <option key={`${m.provider_id}|${m.name}`} value={`${m.provider_id}|${m.name}`}>{m.name} · {m.provider}</option>)}</select>
       </div>
       <div className="flex items-end gap-3"><textarea aria-label="Сообщение агенту" rows={3} value={input} onChange={e => { setInput(e.target.value); remember(`${scope}:draft:${chatId || "new"}`, e.target.value); }} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); } }} placeholder={running ? "Задача выполняется. Для другой задачи создайте новый чат." : "Опишите задачу…"} className="min-w-0 flex-1 resize-none bg-transparent p-2 text-sm outline-none" /><button aria-label="Отправить" onClick={send} disabled={!input.trim() || running || sending || !ready} className="primary-button h-11 w-11 shrink-0 !p-0">{sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}</button></div>
       <p className="px-2 pt-2 text-[11px] text-neutral-500">Работа продолжается в фоне. Файлы и диалог сохраняются автоматически.</p>

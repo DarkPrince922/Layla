@@ -113,3 +113,62 @@ async def test_cannot_delete_foreign_chat(client):
         json={"email": "other@example.com", "password": "hunter2hunter2"},
     )
     assert (await client.delete(f"/api/chats/{chat['id']}")).status_code == 404
+
+
+async def _add_second_provider(client, name="N", model="model-b", base="http://n.local/v1"):
+    await client.post(
+        "/api/providers",
+        json={"name": name, "kind": "openai_compatible", "base_url": base,
+              "default_model": model, "active": True},
+    )
+    providers = (await client.get("/api/providers")).json()
+    return next(p["id"] for p in providers if p["name"] == name)
+
+
+@pytest.mark.asyncio
+async def test_selected_model_sticks_to_chat(client, monkeypatch):
+    """Выбранная модель закрепляется за чатом, а не откатывается к исходной."""
+    await _register(client)
+    await _add_active_provider(client, model="model-a")
+    await _add_second_provider(client)
+
+    from app.services import project_agent
+
+    async def fake_run(provider, key, model, payload, root, permissions):
+        yield {"delta": "ok"}
+
+    monkeypatch.setattr(project_agent, "run", fake_run)
+    chat = (await client.post("/api/chats", json={"domain": "osint", "model": "model-a"})).json()
+    r = await client.post(f"/api/chats/{chat['id']}/run", json={"content": "hi", "model": "model-b"})
+    assert r.status_code == 202, r.text
+    assert (await client.get(f"/api/chats/{chat['id']}")).json()["model"] == "model-b"
+
+
+@pytest.mark.asyncio
+async def test_explicit_provider_wins_over_name_guess(client, monkeypatch):
+    """При одинаковом имени модели используется явно выбранный провайдер."""
+    import asyncio
+
+    from app.services import project_agent
+
+    await _register(client)
+    await _add_active_provider(client, model="shared")
+    second = await _add_second_provider(client, model="shared")
+    used: dict[str, str] = {}
+
+    async def fake_run(provider, key, model, payload, root, permissions):
+        used["base"] = provider.base_url
+        yield {"delta": "ok"}
+
+    monkeypatch.setattr(project_agent, "run", fake_run)
+    chat = (await client.post("/api/chats", json={"domain": "osint", "model": "shared"})).json()
+    r = await client.post(
+        f"/api/chats/{chat['id']}/run",
+        json={"content": "hi", "model": "shared", "provider_id": second},
+    )
+    assert r.status_code == 202, r.text
+    for _ in range(300):
+        await asyncio.sleep(0.02)
+        if used:
+            break
+    assert used.get("base") == "http://n.local/v1"

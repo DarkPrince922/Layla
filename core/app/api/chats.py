@@ -318,7 +318,19 @@ async def run_chat(
     model = body.model or chat.model
     if not model:
         raise HTTPException(status_code=400, detail="Не выбрана модель")
-    provider = await provider_client.resolve_provider(session, user.id, model)
+    # Выбор пользователя закрепляется за чатом: иначе при следующем открытии
+    # подставлялась бы исходная модель чата и выбор «не держался».
+    if body.model and body.model != chat.model:
+        chat.model = body.model
+    # Провайдер, указанный явно в пикере, важнее угадывания по имени модели:
+    # одно и то же имя может быть у нескольких провайдеров.
+    provider = None
+    if body.provider_id:
+        provider = await session.get(Provider, body.provider_id)
+        if provider is None or provider.owner_id != user.id or not (provider.enabled and provider.active):
+            raise HTTPException(status_code=400, detail="Выбранный провайдер недоступен")
+    if provider is None:
+        provider = await provider_client.resolve_provider(session, user.id, model)
     if provider is None:
         raise HTTPException(status_code=400, detail="Модель недоступна: нет активного провайдера.")
     provider_id = provider.id

@@ -43,4 +43,5 @@ class ChatDetail(ChatOut):
 class SendMessageRequest(BaseModel):
     content: str = Field(min_length=1, max_length=100_000)
     request_id: str | None = Field(default=None, min_length=1, max_length=64)
-    model: str | None = None  # переопределяет модель чата на этот запрос
+    model: str | None = None  # выбранная модель; закрепляется за чатом
+    provider_id: str | None = None  # явный провайдер из пикера (имена моделей могут совпадать)
