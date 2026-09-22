@@ -15,9 +15,8 @@ def test_safe_join_blocks_traversal(tmp_path):
         files.safe_join(tmp_path, "../secret")
     with pytest.raises(ValueError):
         files.safe_join(tmp_path, "../../etc/passwd")
-    # Абсолютный путь трактуется относительно base (ведущий / срезается).
-    p = files.safe_join(tmp_path, "/etc/passwd")
-    assert str(tmp_path) in str(p)
+    with pytest.raises(ValueError):
+        files.safe_join(tmp_path, "/etc/passwd")
 
 
 def test_list_dir_and_read(tmp_path):
@@ -62,20 +61,19 @@ def test_safe_dir_name():
 
 
 @pytest.mark.asyncio
-async def test_project_files_api_and_traversal_blocked(client, tmp_path):
+async def test_project_files_api_and_traversal_blocked(client, tmp_path, monkeypatch):
+    from app.config import get_settings
+    monkeypatch.setattr(get_settings(), "projects_dir", str(tmp_path))
     await client.post(
         "/api/auth/register",
         json={"email": "code@example.com", "password": "hunter2hunter2"},
     )
-    # Создаём проект, указывающий на временный каталог с файлами.
-    (tmp_path / "readme.md").write_text("# hi")
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "main.py").write_text("print(1)")
-    proj = (
-        await client.post(
-            "/api/projects", json={"name": "demo", "path": str(tmp_path)}
-        )
-    ).json()
+    proj = (await client.post("/api/projects", json={"name": "demo"})).json()
+    from pathlib import Path
+    root = Path(proj["path"])
+    (root / "readme.md").write_text("# hi")
+    (root / "src").mkdir()
+    (root / "src" / "main.py").write_text("print(1)")
 
     files_top = (await client.get(f"/api/projects/{proj['id']}/files?path=.")).json()
     names = {f["name"] for f in files_top}

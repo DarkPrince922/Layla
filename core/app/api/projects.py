@@ -1,33 +1,39 @@
 """Проекты, импорт репозиториев и файловое дерево (спец. §5.7)."""
+
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import quote
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.background import BackgroundTask
+from starlette.concurrency import run_in_threadpool
 
 from app.config import get_settings
 from app.db import get_session
 from app.models.user import Project, User, Workspace
 from app.schemas.project import (
+    FileChange,
     FileContent,
     FileNode,
+    FileWrite,
     ProjectCreate,
     ProjectOut,
     RepoImport,
 )
-from app.services import files, repo
-from app.services import audit
+from app.services import audit, files, repo
 from app.services.auth import get_current_user
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
 
 async def _default_workspace(session: AsyncSession, user: User) -> Workspace | None:
-    return await session.scalar(
-        select(Workspace).where(Workspace.owner_id == user.id).limit(1)
-    )
+    return await session.scalar(select(Workspace).where(Workspace.owner_id == user.id).limit(1))
 
 
 async def _owned_project(session: AsyncSession, user: User, project_id: str) -> Project:
@@ -76,9 +82,20 @@ async def create_project(
     if ws is None:
         raise HTTPException(status_code=400, detail="Нет рабочего пространства")
 
-    project = Project(workspace_id=ws.id, name=body.name, path=body.path)
-    session.add(project)
-    await session.commit()
+    # The client supplies a name, never a server path. UUIDs isolate workspaces
+    # and also allow multiple projects with the same display name.
+    project_id = str(uuid4())
+    base = Path(ws.projects_dir or get_settings().projects_dir).resolve()
+    dest = base / project_id
+    await run_in_threadpool(lambda: dest.mkdir(parents=True, mode=0o755))
+    project = Project(id=project_id, workspace_id=ws.id, name=body.name, path=str(dest))
+    try:
+        session.add(project)
+        await audit.record(session, actor=user.id, action="project.create", target=project_id)
+        await session.commit()
+    except BaseException:
+        dest.rmdir()  # only our newly created, empty directory
+        raise
     return project
 
 
@@ -107,7 +124,7 @@ async def import_repo(
     settings = get_settings()
     base = Path(ws.projects_dir or settings.projects_dir).resolve()
     name = body.name or repo.safe_dir_name(url)
-    dest = base / repo.safe_dir_name(name)
+    dest = base / str(uuid4())
     if dest.exists():
         raise HTTPException(status_code=409, detail="Каталог назначения уже существует")
 
@@ -125,38 +142,127 @@ async def import_repo(
     return project
 
 
+@contextmanager
+def file_errors():
+    try:
+        yield
+    except files.FileConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail="Файл уже существует") from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Файл или каталог не найден") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail="Операция с файлом недоступна") from exc
+
+
 @router.get("/{project_id}/files", response_model=list[FileNode])
 async def project_files(
     project_id: str,
-    path: str = Query(default="."),
+    path: str = Query(default=".", max_length=4096),
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
-) -> list[FileNode]:
+) -> list[dict]:
     project = await _owned_project(session, user, project_id)
-    root = _project_root(project)
-    try:
-        return [FileNode(**e) for e in files.list_dir(root, path)]
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Недопустимый путь")
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Каталог не найден")
+    with file_errors():
+        return await run_in_threadpool(files.list_dir, _project_root(project), path)
 
 
 @router.get("/{project_id}/file", response_model=FileContent)
 async def project_file(
     project_id: str,
-    path: str = Query(...),
+    path: str = Query(..., min_length=1, max_length=4096),
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
-) -> FileContent:
+) -> dict:
     project = await _owned_project(session, user, project_id)
-    root = _project_root(project)
-    try:
-        return FileContent(path=path, content=files.read_text(root, path))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Файл не найден")
+    with file_errors():
+        return await run_in_threadpool(files.read_file, _project_root(project), path)
+
+
+@router.put("/{project_id}/file", response_model=FileChange)
+async def write_project_file(
+    project_id: str,
+    body: FileWrite,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    project = await _owned_project(session, user, project_id)
+    with file_errors():
+        change = await run_in_threadpool(
+            files.change_file,
+            _project_root(project),
+            body.path,
+            body.content,
+            body.expected_sha256,
+        )
+    await audit.record(
+        session,
+        actor=user.id,
+        action="project.file." + change["operation"],
+        target=project.id,
+        meta={"path": change["path"]},
+    )
+    await session.commit()
+    return change
+
+
+@router.delete("/{project_id}/file", response_model=FileChange)
+async def delete_project_file(
+    project_id: str,
+    path: str = Query(..., min_length=1, max_length=4096),
+    expected_sha256: str = Query(..., pattern=r"^[a-f0-9]{64}$"),
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    project = await _owned_project(session, user, project_id)
+    with file_errors():
+        change = await run_in_threadpool(
+            files.change_file,
+            _project_root(project),
+            path,
+            None,
+            expected_sha256,
+        )
+    await audit.record(
+        session,
+        actor=user.id,
+        action="project.file.delete",
+        target=project.id,
+        meta={"path": change["path"]},
+    )
+    await session.commit()
+    return change
+
+
+@router.get("/{project_id}/archive")
+async def project_archive(
+    project_id: str,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> StreamingResponse:
+    project = await _owned_project(session, user, project_id)
+    with file_errors():
+        archive = await run_in_threadpool(files.export_zip, _project_root(project))
+
+    def chunks():
+        try:
+            while block := archive.read(64 * 1024):
+                yield block
+        finally:
+            archive.close()
+
+    filename = quote(project.name.replace("/", "-").replace("\\", "-") + ".zip", safe="")
+    return StreamingResponse(
+        chunks(),
+        media_type="application/zip",
+        background=BackgroundTask(archive.close),
+        headers={
+            "Content-Disposition": f"attachment; filename=project.zip; filename*=UTF-8''{filename}"
+        },
+    )
 
 
 @router.delete("/{project_id}", status_code=204)
