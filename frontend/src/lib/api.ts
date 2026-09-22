@@ -158,11 +158,15 @@ export interface Persona {
   id: string;
   name: string;
   kind: string;
+  icon?: string | null;
   color?: string | null;
   instructions?: string | null;
   is_builtin: boolean;
   hitl_required: boolean;
   allowed_tools?: string[];
+  /** Что подставить в чат при выборе роли. */
+  default_model?: string | null;
+  default_mode?: "auto" | "confirm" | "plan" | null;
 }
 
 export interface ModelInfo {

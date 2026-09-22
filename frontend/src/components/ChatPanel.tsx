@@ -140,6 +140,14 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
   }
   useEffect(() => { const saved = read(modeKey); if (isMode(saved)) setMode(saved); }, [modeKey]);
   function pickMode(next: Mode) { setMode(next); remember(modeKey, next); }
+  // Выбор роли подставляет её умолчания (режим и модель), если они заданы в настройках.
+  function pickPersona(id: string) {
+    setPersonaId(id);
+    const persona = personas.find(p => p.id === id);
+    if (persona?.default_mode) pickMode(persona.default_mode);
+    const preferred = persona?.default_model ? models.find(m => m.name === persona.default_model) : undefined;
+    if (preferred) { setModel(preferred.name); setProviderId(preferred.provider_id); }
+  }
   useEffect(() => {
     for (const message of messages) for (const tool of message.meta?.tools || []) {
       const key = `${message.id}:${tool.id}`;
@@ -273,7 +281,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
         {MODES.map(({ id, label, hint, icon: Icon }) => <button key={id} role="radio" aria-checked={mode === id} title={hint} onClick={() => pickMode(id)} className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 ${mode === id ? "bg-accent-500/20 text-accent-100" : "text-neutral-400 hover:bg-ink-900"}`}><Icon className="h-3.5 w-3.5" />{label}</button>)}
       </div>
       <div className="mb-3 flex flex-wrap gap-2 text-xs">
-        <select aria-label="Персона" value={personaId} disabled={!!chatId || sending} onChange={e => setPersonaId(e.target.value)} className="min-w-0 max-w-full rounded-lg bg-ink-900 px-3 py-2"><option value="">Без персоны</option>{personas.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
+        <select aria-label="Персона" value={personaId} disabled={!!chatId || sending} onChange={e => pickPersona(e.target.value)} className="min-w-0 max-w-full rounded-lg bg-ink-900 px-3 py-2"><option value="">Без персоны</option>{personas.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
         <select aria-label="Модель" value={choice} disabled={running || sending} onChange={e => pickModel(e.target.value)} className="min-w-0 max-w-full rounded-lg bg-ink-900 px-3 py-2">{!models.length && <option value="">Нет активных моделей</option>}{models.map(m => <option key={`${m.provider_id}|${m.name}`} value={`${m.provider_id}|${m.name}`}>{m.name} · {m.provider}</option>)}</select>
       </div>
       <div className="flex items-end gap-3"><textarea aria-label="Сообщение агенту" rows={3} value={input} onChange={e => { setInput(e.target.value); remember(`${scope}:draft:${chatId || "new"}`, e.target.value); }} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); } }} placeholder={running ? "Задача выполняется. Для другой задачи создайте новый чат." : mode === "plan" ? "Опишите задачу — агент предложит план…" : "Опишите задачу…"} className="min-w-0 flex-1 resize-none bg-transparent p-2 text-sm outline-none" /><button aria-label="Отправить" onClick={() => send()} disabled={!input.trim() || running || sending || loading || !ready} className="primary-button h-11 w-11 shrink-0 !p-0">{sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}</button></div>

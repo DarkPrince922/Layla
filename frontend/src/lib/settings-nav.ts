@@ -12,7 +12,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
   { slug: "appearance", label: "Внешний вид", blurb: "Темы и акценты." },
   { slug: "providers", label: "Провайдеры", blurb: "Профили подключения LLM (через LiteLLM)." },
   { slug: "agent", label: "Агент", blurb: "Оркестрация Ultracode, бюджеты, диагностика." },
-  { slug: "personas", label: "Персоны", blurb: "Роли ИИ, доступ к инструментам и рамки." },
+  { slug: "personas", label: "Роли", blurb: "Промты ролей, доступ к файлам, свои роли." },
   { slug: "knowledge", label: "База знаний", blurb: "Документы RAG, индексация в pgvector." },
   { slug: "security", label: "Безопасность", blurb: "Политики доступа, подтверждения, аудит-лог." },
   { slug: "integrations", label: "Интеграции", blurb: "MCP-серверы, Telegram, intelligence-API." },
