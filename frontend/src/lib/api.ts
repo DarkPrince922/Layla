@@ -274,3 +274,56 @@ export interface TelegramConfig {
   default_chat_id?: string | null;
   token_masked?: string | null;
 }
+
+// ---- Типы M4 (Pentest) ----
+export interface PentestScope {
+  allow: string[];
+  deny: string[];
+  confirmed: boolean;
+}
+
+export interface PentestVenue {
+  mode: string;
+  attack_box_id?: string | null;
+  egress_route: string;
+}
+
+export interface Engagement {
+  id: string;
+  target: string;
+  authorized: boolean;
+  status: string;
+  scope?: PentestScope | null;
+  venue?: PentestVenue | null;
+}
+
+export interface Finding {
+  id: string;
+  severity: string;
+  type: string;
+  url?: string | null;
+  method?: string | null;
+  param?: string | null;
+  status: string;
+  source: string;
+  title?: string | null;
+  description?: string | null;
+}
+
+export interface PentestReport {
+  id: string;
+  format: string;
+  sha256_source?: string | null;
+  stats: Record<string, unknown>;
+  status: string;
+}
+
+export interface PentestServer {
+  id: string;
+  host: string;
+  port: number;
+  user: string;
+  status: string;
+  egress_route: string;
+  has_key: boolean;
+}

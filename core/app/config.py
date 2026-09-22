@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     # Куда клонируются репозитории / создаются проекты (Settings -> General).
     projects_dir: str = Field(default="./data/projects", alias="LAYLA_PROJECTS_DIR")
 
+    # Адреса анонимизирующих маршрутов для egress-проб (спец. §7.4).
+    tor_addr: str = Field(default="127.0.0.1:9050", alias="LAYLA_TOR_ADDR")
+    proxy_addr: str = Field(default="", alias="LAYLA_PROXY_ADDR")
+
     # --- LiteLLM ---
     litellm_base_url: str = Field(default="http://localhost:4000", alias="LITELLM_BASE_URL")
     litellm_master_key: str = Field(default="", alias="LITELLM_MASTER_KEY")

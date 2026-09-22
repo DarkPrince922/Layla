@@ -22,11 +22,12 @@ personas (AI roles), sub-agent orchestration, MCP integrations, a knowledge base
 
 ---
 
-## Status — Milestones M0–M3
+## Status — Milestones M0–M4
 
 The UI ships in **Russian** (переключатель EN/RU запланирован на M6). This
 repository currently implements **M0** (skeleton), **M1** (providers & chat)
-and **M2** (Design + Knowledge + MCP + Telegram), plus **M3** (OSINT).
+and **M2** (Design + Knowledge + MCP + Telegram), **M3** (OSINT) and
+**M4** (Pentest core: scope/authorized gate, venue+egress, findings, Acunetix import).
 Remaining M0–M2 spec gaps are tracked explicitly in [the roadmap](docs/ROADMAP.md).
 
 **Included now**
@@ -100,10 +101,19 @@ Remaining M0–M2 spec gaps are tracked explicitly in [the roadmap](docs/ROADMAP
 
 See [M3 usage, upgrade instructions and limits](docs/OSINT.md).
 
-**Not yet built** (later milestones): pentest
-scope-enforcement/egress/findings/Acunetix import with tests (M4); CAI
-autonomous agent + Ultracode orchestration (M5); polish, EN/RU i18n switch,
-combos (M6). See [`docs/ROADMAP.md`](docs/ROADMAP.md).
+**Added in M4**
+- **Pentest domain**: engagements list, authorized-workspace gate, scope
+  editor (allow/deny) with confirm, venue selector (analysis/attack-box/this-machine),
+  findings with severity filters, **Acunetix HTML import** (dedup + SHA-256),
+  markdown report generation, SSH attack-box servers with egress route test.
+- **Security core §7 (with tests)**: hard scope-enforcement
+  (`app/services/scope.py`), egress **fail-closed** (`egress.py`) — Tor/Proxy
+  failure blocks traffic, never falls back to Direct — and the active-action
+  gate (`venue_gate.py`). Changing scope revokes authorization.
+
+**Not yet built** (later milestones): CAI autonomous agent + Ultracode
+orchestration (M5); polish, EN/RU i18n switch, combos (M6). See
+[`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ---
 

@@ -12,6 +12,8 @@ from app.api import (
     auth,
     chats,
     designs,
+    engagements,
+    findings,
     health,
     intelligence,
     knowledge,
@@ -21,6 +23,7 @@ from app.api import (
     personas,
     projects,
     providers,
+    servers,
     telegram,
 )
 from app.config import get_settings
@@ -75,6 +78,9 @@ app.include_router(mcp.router, prefix=api_prefix)
 app.include_router(telegram.router, prefix=api_prefix)
 app.include_router(intelligence.router, prefix=api_prefix)
 app.include_router(osint.router, prefix=api_prefix)
+app.include_router(engagements.router, prefix=api_prefix)
+app.include_router(servers.router, prefix=api_prefix)
+app.include_router(findings.router, prefix=api_prefix)
 
 
 @app.get("/")

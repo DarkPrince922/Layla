@@ -14,9 +14,11 @@ Each milestone is a working application, verified before moving on (spec §9).
   timeline, encrypted intelligence keys, Shodan/VT/SecurityTrails/urlscan via
   a bundled read-only MCP server. Passive domain/IP lookups and manual material
   collection for all case types. See [OSINT usage and limits](OSINT.md).
-- **M4 — Pentest (core)** — engagements, Scope + authorized gate, Servers /
-  execution venue + SSH + egress, findings, Acunetix import, reports.
-  **Scope-enforcement and egress fail-closed shipped with tests.**
+- **M4 — Pentest (core)** ✅ — engagements, Scope + authorized gate, execution
+  venue + SSH servers + egress route, findings with filters, Acunetix HTML
+  import with dedup + SHA-256, markdown report generation. **Scope-enforcement
+  and egress fail-closed shipped with tests** (`app/services/scope.py`,
+  `egress.py`, `venue_gate.py`).
 - **M5 — Autonomous agent** — CAI integrated as an MCP engine, Pentest Agent
   (live log, HITL, finding triage), Ultracode sub-agent orchestration, budgets.
 - **M6 — Polish** — Combos router, audit export, mobile layout, RU i18n,

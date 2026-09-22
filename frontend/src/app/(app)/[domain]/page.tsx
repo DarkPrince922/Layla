@@ -4,6 +4,7 @@ import { CodeDomain } from "@/components/CodeDomain";
 import { DesignDomain } from "@/components/DesignDomain";
 import { ChatPanel } from "@/components/ChatPanel";
 import { OsintDomain } from "@/components/OsintDomain";
+import { PentestDomain } from "@/components/PentestDomain";
 
 export function generateStaticParams() {
   return DOMAINS.map((d) => ({ domain: d.slug }));
@@ -14,6 +15,7 @@ export default function DomainPage({ params }: { params: { domain: string } }) {
   if (!domain) notFound();
   const Icon = domain.icon;
   if (domain.slug === "osint") return <OsintDomain />;
+  if (domain.slug === "pentest") return <PentestDomain />;
 
   return (
     <div className="flex h-full flex-col">
