@@ -1,24 +1,28 @@
 """Чаты и стриминг ответов (спец. §5.2).
 
-Ответ стримится из LiteLLM по SSE. Системный промпт берётся из выбранной
+Ответ стримится от провайдера по SSE; кодовые чаты могут работать с файлами. Системный промпт берётся из выбранной
 персоны. Оба сообщения (пользователя и ассистента) сохраняются в истории.
 """
+
 from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
 
+import anyio
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.api.projects import _owned_project, _project_root
 from app.db import get_session, get_sessionmaker
 from app.models.chat import Chat, Message
+from app.models.enums import Domain
 from app.models.persona import Persona
 from app.models.user import User
 from app.schemas.chat import ChatCreate, ChatDetail, ChatOut, MessageOut, SendMessageRequest
-from app.services import provider_client
+from app.services import audit, project_agent, provider_client
 from app.services.auth import get_current_user
 
 router = APIRouter(prefix="/chats", tags=["chats"])
@@ -33,12 +37,15 @@ async def _owned_chat(session: AsyncSession, user: User, chat_id: str) -> Chat:
 
 @router.get("", response_model=list[ChatOut])
 async def list_chats(
+    project_id: str | None = None,
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> list[Chat]:
-    rows = await session.scalars(
-        select(Chat).where(Chat.owner_id == user.id).order_by(Chat.created_at.desc())
-    )
+    query = select(Chat).where(Chat.owner_id == user.id)
+    if project_id:
+        await _owned_project(session, user, project_id)
+        query = query.where(Chat.project_id == project_id)
+    rows = await session.scalars(query.order_by(Chat.created_at.desc()))
     return list(rows)
 
 
@@ -48,13 +55,28 @@ async def create_chat(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> Chat:
+    if body.persona_id:
+        persona = await session.get(Persona, body.persona_id)
+        if persona is None or (not persona.is_builtin and persona.owner_id != user.id):
+            raise HTTPException(status_code=404, detail="Персона не найдена")
+    project = None
+    if body.project_id:
+        if body.domain != Domain.code:
+            raise HTTPException(
+                status_code=400, detail="Файловые инструменты доступны в разделе Код"
+            )
+        project = await _owned_project(session, user, body.project_id)
+        _project_root(project)
+        if body.workspace_id and body.workspace_id != project.workspace_id:
+            raise HTTPException(status_code=400, detail="Проект из другого рабочего пространства")
     chat = Chat(
         owner_id=user.id,
         domain=body.domain,
         title=body.title or "Новый чат",
         persona_id=body.persona_id,
         model=body.model,
-        workspace_id=body.workspace_id,
+        workspace_id=project.workspace_id if project else body.workspace_id,
+        project_id=project.id if project else None,
     )
     session.add(chat)
     await session.commit()
@@ -99,7 +121,16 @@ async def _build_messages(session: AsyncSession, chat: Chat) -> list[dict[str, s
     )
     for m in history:
         if m.role in ("user", "assistant", "system"):
-            out.append({"role": m.role, "content": m.content})
+            content = m.content
+            changes = [t["change"] for t in (m.meta or {}).get("tools", []) if t.get("change")]
+            if changes:
+                content += (
+                    "\n[Applied project changes: "
+                    + ", ".join(f"{c['operation']} {c['path']}" for c in changes)
+                    + "]"
+                )
+            if content:
+                out.append({"role": m.role, "content": content})
     return out
 
 
@@ -118,6 +149,20 @@ async def send_message(
     # Подготовка вне стрима: проверка прав, модель, провайдер, ключ.
     async with maker() as session:
         chat = await _owned_chat(session, user, chat_id)
+        root = None
+        permissions = None
+        if chat.persona_id:
+            persona = await session.get(Persona, chat.persona_id)
+            if persona is None or (not persona.is_builtin and persona.owner_id != user.id):
+                raise HTTPException(status_code=404, detail="Персона не найдена")
+            permissions = persona.allowed_tools or []
+        if chat.project_id:
+            project = await _owned_project(session, user, chat.project_id)
+            if chat.domain != Domain.code:
+                raise HTTPException(
+                    status_code=400, detail="Файловые инструменты доступны в разделе Код"
+                )
+            root = _project_root(project)
         model = body.model or chat.model
         if not model:
             raise HTTPException(status_code=400, detail="Не выбрана модель")
@@ -132,32 +177,87 @@ async def send_message(
         session.add(Message(chat_id=chat_id, role="user", content=body.content))
         await session.commit()
         payload = await _build_messages(session, chat)
+        assistant = Message(chat_id=chat_id, role="assistant", content="", meta={})
+        session.add(assistant)
+        await session.commit()
+        msg_id = assistant.id
 
     async def event_stream() -> AsyncIterator[bytes]:
-        full = []
-        reasoning = []
+        full: list[str] = []
+        reasoning: list[str] = []
+        tool_events: dict[str, dict] = {}
+        stream_error = None
+        completed = False
+
+        async def persist(change: dict | None = None):
+            async with maker() as session:
+                msg = await session.get(Message, msg_id)
+                if msg is None:
+                    return
+                msg.content = "".join(full)
+                msg.meta = {
+                    "reasoning": "".join(reasoning),
+                    "tools": list(tool_events.values()),
+                    "error": stream_error,
+                }
+                if change:
+                    await audit.record(
+                        session,
+                        actor=user.id,
+                        action="project.agent." + change["operation"],
+                        target=chat.project_id,
+                        meta={"path": change["path"]},
+                    )
+                await session.commit()
+
+        async def events():
+            if root:
+                async for event in project_agent.run(
+                    provider, key, model, payload, root, permissions
+                ):
+                    yield event
+            else:
+                async for kind, text in provider_client.stream_chat(provider, key, model, payload):
+                    yield {"reasoning" if kind == "reasoning" else "delta": text}
+
         try:
-            async for kind, text in provider_client.stream_chat(provider, key, model, payload):
-                if kind == "reasoning":
-                    reasoning.append(text)
-                    yield f"data: {json.dumps({'reasoning': text}, ensure_ascii=False)}\n\n".encode()
-                else:
-                    full.append(text)
-                    yield f"data: {json.dumps({'delta': text}, ensure_ascii=False)}\n\n".encode()
-        except Exception as exc:  # сеть/ошибка провайдера
-            yield f"data: {json.dumps({'error': str(exc)}, ensure_ascii=False)}\n\n".encode()
-        text = "".join(full)
-        # Сохранить ответ ассистента (даже частичный); размышление — в meta.
-        async with maker() as session:
-            msg = Message(
-                chat_id=chat_id,
-                role="assistant",
-                content=text,
-                meta={"reasoning": "".join(reasoning)} if reasoning else {},
+            async for event in events():
+                if "delta" in event:
+                    full.append(event["delta"])
+                elif "reasoning" in event:
+                    reasoning.append(event["reasoning"])
+                elif "tool" in event:
+                    tool = event["tool"]
+                    tool_events[tool["id"]] = tool
+                    if tool["status"] != "running":
+                        # Persist each completed operation before acknowledging it over SSE.
+                        await persist(tool.get("change"))
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode()
+            completed = True
+        except Exception as exc:  # noqa: BLE001 — SSE must terminate with a saved partial response
+            stream_error = (
+                str(exc)
+                if isinstance(exc, RuntimeError)
+                else "Не удалось завершить ответ провайдера. Попробуйте продолжить диалог."
             )
-            session.add(msg)
-            await session.commit()
-            msg_id = msg.id
+            yield f"data: {json.dumps({'error': stream_error}, ensure_ascii=False)}\n\n".encode()
+        finally:
+            # Client disconnects must not discard diffs for files already written.
+            if not completed and stream_error is None:
+                stream_error = "Ответ остановлен; выполненные изменения сохранены."
+            for event_id, event in list(tool_events.items()):
+                if event["status"] == "running":
+                    tool_events[event_id] = {
+                        **event,
+                        "status": "error",
+                        "error": "Вызов прерван. Проверьте файл перед продолжением.",
+                    }
+            with anyio.CancelScope(shield=True):
+                await persist()
         yield f"data: {json.dumps({'done': True, 'message_id': msg_id})}\n\n".encode()
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

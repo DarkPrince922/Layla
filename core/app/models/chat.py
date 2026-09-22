@@ -1,4 +1,5 @@
 """Chats and messages (spec §5.2)."""
+
 from __future__ import annotations
 
 from sqlalchemy import ForeignKey, String, Text
@@ -17,6 +18,9 @@ class Chat(UUIDPk, Timestamps, Base):
     domain: Mapped[Domain] = mapped_column(default=Domain.code)
     workspace_id: Mapped[str | None] = mapped_column(
         ForeignKey("workspaces.id", ondelete="SET NULL")
+    )
+    project_id: Mapped[str | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="SET NULL"), index=True
     )
     persona_id: Mapped[str | None] = mapped_column(ForeignKey("personas.id", ondelete="SET NULL"))
     title: Mapped[str | None] = mapped_column(String(300))
