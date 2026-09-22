@@ -26,19 +26,26 @@ from app.main import app  # noqa: E402
 
 
 @pytest_asyncio.fixture
-async def db_sessionmaker():
-    # StaticPool keeps a single in-memory DB across connections.
-    from sqlalchemy.pool import StaticPool
-
+async def db_sessionmaker(tmp_path_factory):
+    # Файловая SQLite (а не :memory:+StaticPool): у каждой параллельной фоновой
+    # задачи своё соединение, поэтому они не сериализуются на одном подключении.
+    # WAL + busy timeout: конкурентные записи ждут, а не падают с «database locked».
+    db_file = tmp_path_factory.mktemp("layladb") / "test.db"
     engine = create_async_engine(
-        "sqlite+aiosqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
+        f"sqlite+aiosqlite:///{db_file}",
+        connect_args={"timeout": 30, "check_same_thread": False},
     )
     async with engine.begin() as conn:
+        await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
+        await conn.exec_driver_sql("PRAGMA busy_timeout=30000")
         await conn.run_sync(Base.metadata.create_all)
     maker = async_sessionmaker(engine, expire_on_commit=False)
     yield maker
+    # Снять фоновые задачи до закрытия движка — иначе незавершённые воркеры
+    # текут в следующий тест и создают гонки.
+    from app.services import jobs
+
+    await jobs.shutdown()
     await engine.dispose()
 
 

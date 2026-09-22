@@ -9,7 +9,7 @@ import app.services.provider_client as pc
 from app.services import jobs
 
 
-async def _wait_job(client, job_id, tries=150):
+async def _wait_job(client, job_id, tries=600):
     for _ in range(tries):
         await asyncio.sleep(0.02)
         r = await client.get(f"/api/jobs/{job_id}")
