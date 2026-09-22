@@ -191,7 +191,7 @@ async def test_coding_agent_runs_in_background(client, tmp_path, monkeypatch):
 
     monkeypatch.setattr(project_agent, "run", fake_run)
     r = await client.post(
-        f"/api/chats/{chat['id']}/agent-run",
+        f"/api/chats/{chat['id']}/run",
         json={"content": "Создай простой сайт", "model": "gpt-4o"},
     )
     assert r.status_code == 202, r.text
@@ -201,3 +201,37 @@ async def test_coding_agent_runs_in_background(client, tmp_path, monkeypatch):
     assert "планирую" in body["reasoning"]
     detail = (await client.get(f"/api/chats/{chat['id']}")).json()
     assert any(m["role"] == "assistant" and "Готово" in m["content"] for m in detail["messages"])
+
+
+@pytest.mark.asyncio
+async def test_plain_chat_runs_in_background_and_persists(client, monkeypatch):
+    """Обычный (не проектный) чат тоже уходит в фон и сохраняется в историю."""
+    await client.post(
+        "/api/auth/register", json={"email": "oc@example.com", "password": "hunter2hunter2"}
+    )
+    await client.post(
+        "/api/providers",
+        json={"name": "M", "kind": "openai_compatible", "base_url": "http://p/v1",
+              "default_model": "gpt-4o", "active": True},
+    )
+    chat = (await client.post("/api/chats", json={"domain": "osint", "model": "gpt-4o"})).json()
+
+    async def fake_stream(provider, key, model, messages):
+        yield ("reasoning", "ищу зацепки")
+        yield ("content", "Вот что нашлось по цели.")
+
+    monkeypatch.setattr(pc, "stream_chat", fake_stream)
+    r = await client.post(
+        f"/api/chats/{chat['id']}/run", json={"content": "Проверь домен example.com", "model": "gpt-4o"}
+    )
+    assert r.status_code == 202, r.text
+    body = await _wait_job(client, r.json()["id"])
+    assert body["status"] == "done", body
+    # Диалог сохранён и восстанавливается из истории (не пропадает при уходе).
+    detail = (await client.get(f"/api/chats/{chat['id']}")).json()
+    roles = [m["role"] for m in detail["messages"]]
+    assert "user" in roles and "assistant" in roles
+    assert any("нашлось" in m["content"] for m in detail["messages"] if m["role"] == "assistant")
+    # Чат находится по домену (для восстановления панелью).
+    listed = (await client.get("/api/chats?domain=osint")).json()
+    assert any(c["id"] == chat["id"] for c in listed)

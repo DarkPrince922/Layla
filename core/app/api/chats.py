@@ -48,6 +48,7 @@ async def _owned_chat(session: AsyncSession, user: User, chat_id: str) -> Chat:
 @router.get("", response_model=list[ChatOut])
 async def list_chats(
     project_id: str | None = None,
+    domain: str | None = None,
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> list[Chat]:
@@ -55,6 +56,8 @@ async def list_chats(
     if project_id:
         await _owned_project(session, user, project_id)
         query = query.where(Chat.project_id == project_id)
+    if domain:
+        query = query.where(Chat.domain == domain)
     rows = await session.scalars(query.order_by(Chat.created_at.desc()))
     return list(rows)
 
@@ -273,34 +276,35 @@ async def send_message(
     )
 
 
-@router.post("/{chat_id}/agent-run", response_model=JobOut, status_code=202)
-async def agent_run_bg(
+@router.post("/{chat_id}/run", response_model=JobOut, status_code=202)
+async def run_chat(
     chat_id: str,
     body: SendMessageRequest,
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
     maker: async_sessionmaker[AsyncSession] = Depends(get_sessionmaker),
 ) -> Job:
-    """Запустить кодинг-агента в ФОНЕ для проектного чата.
+    """Запустить ответ ассистента в ФОНЕ (для ЛЮБОГО чата: код/osint/дизайн/пентест).
 
-    Возвращает задачу сразу; агент создаёт/меняет файлы проекта в фоне, а его
-    шаги, размышление и дифы видны в панели «В работе». Ответ ассистента и
-    изменения сохраняются в историю чата.
+    Возвращает задачу сразу; ответ и (для проектов) изменения файлов пишутся в
+    историю чата по мере выполнения. Можно закрыть панель и переключить домен —
+    задача продолжится, а прогресс/размышление видны в «В работе». Диалог
+    восстанавливается из истории при возврате.
     """
     chat = await _owned_chat(session, user, chat_id)
-    if not chat.project_id:
-        raise HTTPException(status_code=400, detail="Фоновый агент доступен только в чате проекта")
-    project = await _owned_project(session, user, chat.project_id)
-    if chat.domain != Domain.code:
-        raise HTTPException(status_code=400, detail="Файловые инструменты доступны в разделе Код")
-    root = _project_root(project)
 
     permissions = None
+    root = None
     if chat.persona_id:
         persona = await session.get(Persona, chat.persona_id)
         if persona is None or (not persona.is_builtin and persona.owner_id != user.id):
             raise HTTPException(status_code=404, detail="Персона не найдена")
         permissions = persona.allowed_tools or []
+    if chat.project_id:
+        project = await _owned_project(session, user, chat.project_id)
+        if chat.domain != Domain.code:
+            raise HTTPException(status_code=400, detail="Файловые инструменты доступны в разделе Код")
+        root = _project_root(project)
 
     model = body.model or chat.model
     if not model:
@@ -320,9 +324,18 @@ async def agent_run_bg(
 
     owner_id = user.id
     project_id = chat.project_id
+    domain = chat.domain.value if hasattr(chat.domain, "value") else str(chat.domain)
     job = await jobs.create_job(
-        session, owner_id=owner_id, domain="code", kind="project.agent", title=body.content[:80]
+        session,
+        owner_id=owner_id,
+        domain=domain,
+        kind="project.agent" if root else "chat",
+        title=body.content[:80],
     )
+    # chat_id виден сразу (ещё до завершения) — чтобы UI мог заново привязать
+    # активную задачу к чату при возврате в домен.
+    job.result = {"chat_id": chat_id, "message_id": msg_id}
+    await session.commit()
 
     async def worker(h: jobs.JobHandle) -> None:
         prov = await h.session.get(Provider, provider_id)
@@ -330,8 +343,10 @@ async def agent_run_bg(
         full: list[str] = []
         reasoning_all: list[str] = []
         tools: dict[str, dict] = {}
+        since_commit = 0
 
         async def persist(change: dict | None = None) -> None:
+            nonlocal since_commit
             msg = await h.session.get(Message, msg_id)
             if msg is None:
                 return
@@ -346,21 +361,35 @@ async def agent_run_bg(
                     meta={"path": change["path"]},
                 )
             await h.session.commit()
+            since_commit = 0
 
-        await h.step("Агент анализирует задачу", progress=0.1)
-        async for event in project_agent.run(prov, key, model, payload, root, permissions):
-            if "delta" in event:
-                full.append(event["delta"])
-            elif "reasoning" in event:
-                reasoning_all.append(event["reasoning"])
-                await h.reason(event["reasoning"])
-            elif "tool" in event:
-                tool = event["tool"]
-                tools[tool["id"]] = tool
-                if tool["status"] != "running":
-                    label = _TOOL_LABELS.get(tool["name"], tool["name"])
-                    await h.step(f"{label}: {tool.get('path', '')}")
-                    await persist(tool.get("change"))
+        await h.step("Обрабатываю запрос", progress=0.1)
+        if root:
+            async for event in project_agent.run(prov, key, model, payload, root, permissions):
+                if "delta" in event:
+                    full.append(event["delta"])
+                elif "reasoning" in event:
+                    reasoning_all.append(event["reasoning"])
+                    await h.reason(event["reasoning"])
+                elif "tool" in event:
+                    tool = event["tool"]
+                    tools[tool["id"]] = tool
+                    if tool["status"] != "running":
+                        label = _TOOL_LABELS.get(tool["name"], tool["name"])
+                        await h.step(f"{label}: {tool.get('path', '')}")
+                        await persist(tool.get("change"))
+        else:
+            async for kind, text in provider_client.stream_chat(prov, key, model, payload):
+                if kind == "reasoning":
+                    reasoning_all.append(text)
+                    await h.reason(text)
+                else:
+                    full.append(text)
+                    since_commit += len(text)
+                    # Периодически сохраняем частичный ответ, чтобы он был виден
+                    # при опросе и не терялся при уходе со страницы.
+                    if since_commit >= 400:
+                        await persist()
         await persist()
         await h.set_result({"chat_id": chat_id, "message_id": msg_id})
         await h.step("Готово", progress=1.0)
