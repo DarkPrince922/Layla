@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Send, Bot, Plus, Loader2, Download, Square } from "lucide-react";
+import { Send, Bot, Plus, Loader2, Download, Square, Trash2 } from "lucide-react";
 import { api, downloadProject, type Persona, type ModelInfo, type Chat, type ChatDetail, type FileChange, type Job } from "@/lib/api";
 import { useAuth } from "@/store/auth";
 import { FileDiff } from "@/components/FileDiff";
@@ -39,6 +39,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile }: {
   const [personaId, setPersonaId] = useState("");
   const [model, setModel] = useState("");
   const [sending, setSending] = useState(false);
+  const [removing, setRemoving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const lock = useRef(false);
   const generation = useRef(0);
@@ -137,6 +138,24 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile }: {
     try { await downloadProject({ id: detail.data.project_id, name: detail.data.title || "Layla" }); }
     catch (e) { setError(e instanceof Error ? e.message : "Не удалось скачать файлы"); }
   }
+  // Удаление доступно во всех доменах. Активную задачу бэкенд не даст удалить
+  // (409) — сначала остановите её, иначе фоновая работа осталась бы без чата.
+  async function removeChat() {
+    if (!chatId || removing) return;
+    const title = history.data?.find(c => c.id === chatId)?.title || "Чат";
+    if (!confirm(`Удалить «${title}»? Сообщения и история задач этого чата будут удалены безвозвратно.`)) return;
+    setRemoving(true); setError(null);
+    try {
+      await api.del(`/chats/${chatId}`);
+      remember(`${scope}:draft:${chatId}`, "");
+      const rest = (history.data || []).filter(c => c.id !== chatId);
+      select(rest[0]?.id || null);
+      await history.refetch();
+      qc.invalidateQueries({ queryKey: ["jobs"] });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось удалить чат");
+    } finally { setRemoving(false); }
+  }
   return <div className="chat-panel flex h-full min-h-0 min-w-0 flex-col">
     <div className="flex items-center gap-2 border-b border-ink-700/50 px-4 py-3">
       <Bot className="h-5 w-5 shrink-0 text-accent-300" />
@@ -144,6 +163,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile }: {
         <option value="">Новый чат</option>{history.data?.map(c => <option key={c.id} value={c.id}>{c.title || "Чат"}</option>)}
       </select>
       {detail.data?.project_id && <button onClick={zip} className="icon-button" aria-label="Скачать файлы чата ZIP"><Download className="h-4 w-4" /></button>}
+      {chatId && <button aria-label="Удалить чат" title={running ? "Сначала остановите задачу" : "Удалить чат"} onClick={removeChat} disabled={sending || removing || running || !ready} className="icon-button hover:bg-red-500/15 hover:text-red-300">{removing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}</button>}
       <button aria-label="Новый чат" onClick={() => select(null)} disabled={sending || !ready} className="icon-button"><Plus className="h-5 w-5" /></button>
     </div>
     <div ref={scroll} className="chat-scroll min-h-0 flex-1 space-y-5 overflow-y-auto p-5">

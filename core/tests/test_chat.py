@@ -88,3 +88,28 @@ async def test_chat_isolation_between_users(client):
     )
     r = await client.get(f"/api/chats/{chat['id']}")
     assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_chat_in_every_domain(client):
+    """Удаление чата доступно во всех доменах и убирает его из истории."""
+    await _register(client)
+    for domain in ("code", "design", "osint", "pentest"):
+        chat = (await client.post("/api/chats", json={"domain": domain, "model": "m"})).json()
+        assert (await client.delete(f"/api/chats/{chat['id']}")).status_code == 204
+        assert (await client.get(f"/api/chats/{chat['id']}")).status_code == 404
+        listed = (await client.get(f"/api/chats?domain={domain}")).json()
+        assert all(c["id"] != chat["id"] for c in listed)
+
+
+@pytest.mark.asyncio
+async def test_cannot_delete_foreign_chat(client):
+    """Чужой чат удалить нельзя — изоляция по владельцу."""
+    await _register(client)
+    chat = (await client.post("/api/chats", json={"domain": "osint", "model": "m"})).json()
+    await client.post("/api/auth/logout")
+    await client.post(
+        "/api/auth/register",
+        json={"email": "other@example.com", "password": "hunter2hunter2"},
+    )
+    assert (await client.delete(f"/api/chats/{chat['id']}")).status_code == 404
