@@ -1,3 +1,4 @@
+import { ConfirmHost } from "@/components/ConfirmDialog";
 import type { Metadata } from "next";
 import "@fontsource-variable/manrope";
 import "../styles/globals.css";
@@ -12,7 +13,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="ru" suppressHydrationWarning>
       <body>
-        <Providers>{children}</Providers>
+        <Providers>{children}<ConfirmHost /></Providers>
       </body>
     </html>
   );

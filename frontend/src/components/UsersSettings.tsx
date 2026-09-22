@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { KeyRound, ShieldCheck, ShieldOff, Trash2, UserPlus, Power } from "lucide-react";
 import { api, type AdminUser, type AdminUserCreated } from "@/lib/api";
 import { useAuth } from "@/store/auth";
+import { confirmAction } from "@/components/ConfirmDialog";
 
 interface Credential {
   email: string;
@@ -220,8 +221,8 @@ export function UsersSettings() {
                 {u.id !== meId && (
                   <button
                     title="Удалить"
-                    onClick={() => {
-                      if (confirm(`Удалить пользователя ${u.email}? Данные будут удалены безвозвратно.`))
+                    onClick={async () => {
+                      if (await confirmAction(`Удалить пользователя ${u.email}? Данные будут удалены безвозвратно.`))
                         remove.mutate(u.id);
                     }}
                     className="rounded p-1.5 text-neutral-400 hover:bg-red-500/20 hover:text-red-300"

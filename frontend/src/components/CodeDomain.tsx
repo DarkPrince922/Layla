@@ -26,6 +26,7 @@ import {
 import { FileTree } from "@/components/FileTree";
 import { FileDiff } from "@/components/FileDiff";
 import { ChatPanel } from "@/components/ChatPanel";
+import { confirmAction } from "@/components/ConfirmDialog";
 
 type OpenFile = Omit<FileContent, "sha256"> & { sha256: string | null };
 type Pane = "projects" | "editor" | "chat";
@@ -109,8 +110,9 @@ export function CodeDomain() {
   // Удаляет проект целиком: файлы на сервере и чаты проекта (бэкенд стирает папку).
   async function removeProject(target: Project) {
     if (pending) return;
-    if (target.id === projectId && !canLeave()) return;
-    if (!window.confirm(`Удалить проект «${target.name}»? Файлы проекта и его чаты будут удалены с сервера безвозвратно. Если нужна копия — сначала скачайте ZIP.`)) return;
+    // Одно окно подтверждения на всё (без системного confirm для несохранённого файла).
+    const unsaved = target.id === projectId && dirty ? "\nНесохранённые изменения открытого файла тоже пропадут." : "";
+    if (!(await confirmAction(`Удалить проект «${target.name}»? Файлы проекта и его чаты будут удалены с сервера безвозвратно. Если нужна копия — сначала скачайте ZIP.${unsaved}`))) return;
     setPending(true);
     setError(null);
     try {
@@ -195,7 +197,7 @@ export function CodeDomain() {
   }
   async function saveFile(remove = false) {
     if (!projectId || !openFile || pending) return;
-    if (remove && !window.confirm(`Удалить файл ${openFile.path}?`)) return;
+    if (remove && !(await confirmAction(`Удалить файл ${openFile.path}?`))) return;
     setPending(true);
     setError(null);
     try {

@@ -6,6 +6,7 @@ import { Send, Bot, Plus, Loader2, Download, Square, Trash2, Eraser, Zap, Shield
 import { api, downloadProject, type Persona, type ModelInfo, type Chat, type ChatDetail, type FileChange, type Job, type ToolEvent } from "@/lib/api";
 import { useAuth } from "@/store/auth";
 import { FileDiff } from "@/components/FileDiff";
+import { confirmAction } from "@/components/ConfirmDialog";
 
 const active = (job?: Job | null) => !!job && ["queued", "running"].includes(job.status);
 
@@ -197,7 +198,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
     if (!chatId || removing) return;
     const title = history.data?.find(c => c.id === chatId)?.title || "Чат";
     const files = domain === "code" ? "" : " Файлы, созданные в этом чате, тоже будут удалены.";
-    if (!confirm(`Удалить «${title}»? Сообщения и история задач этого чата будут удалены безвозвратно.${files}`)) return;
+    if (!(await confirmAction(`Удалить «${title}»? Сообщения и история задач этого чата будут удалены безвозвратно.${files}`))) return;
     setRemoving(true); setError(null);
     try {
       await api.del(`/chats/${chatId}`);
@@ -215,7 +216,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
     const count = history.data?.length || 0;
     if (!count || removing) return;
     const files = domain === "code" ? "" : " Файлы этих чатов тоже будут удалены.";
-    if (!confirm(`Удалить всю историю раздела — ${count} чат(ов)? Это необратимо.${files}`)) return;
+    if (!(await confirmAction(`Удалить всю историю раздела — ${count} чат(ов)? Это необратимо.${files}`, "Очистить"))) return;
     setRemoving(true); setError(null);
     try {
       const params = new URLSearchParams({ domain });

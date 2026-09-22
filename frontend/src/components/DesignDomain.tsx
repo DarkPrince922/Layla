@@ -8,7 +8,9 @@ import {
   Sparkles, Tablet, Trash2,
 } from "lucide-react";
 import { ChatPanel } from "@/components/ChatPanel";
-import { api, type Design, type FileContent, type FileNode, type Job, type ModelInfo, type Project } from "@/lib/api";
+import { api, type Chat, type Design, type FileContent, type FileNode, type Job, type ModelInfo, type Project } from "@/lib/api";
+import { useAuth } from "@/store/auth";
+import { confirmAction } from "@/components/ConfirmDialog";
 
 const STACKS = ["html", "react", "vue"];
 const ARTIFACTS = ["Landing", "Dashboard", "Pricing", "Mobile app", "Email", "Editorial", "Slides"];
@@ -50,6 +52,12 @@ export function DesignDomain() {
 
   const { data: models = [] } = useQuery({ queryKey: ["models"], queryFn: () => api.get<ModelInfo[]>("/models") });
   const { data: designs = [], isSuccess: designsLoaded } = useQuery({ queryKey: ["designs"], queryFn: () => api.get<Design[]>("/designs") });
+  // Тот же ключ, что у истории в ChatPanel, — общий кеш, без лишнего запроса.
+  const owner = useAuth(s => s.user?.id);
+  const { data: chats = [], isSuccess: chatsLoaded } = useQuery({
+    queryKey: ["chats", owner, "design", undefined],
+    queryFn: () => api.get<Chat[]>("/chats?domain=design"),
+  });
 
   // Файлы чата: их пишет агент, поэтому превью показывает актуальный результат.
   const tree = useQuery({
@@ -79,8 +87,11 @@ export function DesignDomain() {
     onError: e => setError(e instanceof Error ? e.message : "Ошибка генерации"),
   });
 
-  // Первый вход без единой версии: бриф открыт, он же и есть быстрый старт.
-  useEffect(() => { if (designsLoaded && !designs.length && !chatProject) setBriefOpen(true); }, [designsLoaded, designs.length, chatProject]);
+  // Бриф раскрывается сам только на совсем пустом разделе. Раньше он открывался,
+  // когда не было версий, и прятал чат — вместе с кнопками удаления и очистки истории.
+  useEffect(() => {
+    if (designsLoaded && chatsLoaded && !designs.length && !chats.length) setBriefOpen(true);
+  }, [designsLoaded, chatsLoaded, designs.length, chats.length]);
   // Фоновая генерация завершилась — сразу показываем её результат в превью.
   useEffect(() => {
     if (awaiting === null || !designs.length || designs[0].id === awaiting) return;
@@ -127,7 +138,7 @@ export function DesignDomain() {
     if (versionsMenu.current) versionsMenu.current.open = false;
   }
   async function clearVersions() {
-    if (!designs.length || !window.confirm(`Удалить все версии (${designs.length})? Проекты, созданные из них в «Коде», останутся.`)) return;
+    if (!designs.length || !(await confirmAction(`Удалить все версии (${designs.length})? Проекты, созданные из них в «Коде», останутся.`))) return;
     setBusy(true);
     try {
       await api.del("/designs");
@@ -141,7 +152,7 @@ export function DesignDomain() {
   }
 
   async function removeVersion(id: string) {
-    if (!window.confirm("Удалить эту версию макета? Проект, созданный из неё, останется.")) return;
+    if (!(await confirmAction("Удалить эту версию макета? Проект, созданный из неё, останется."))) return;
     setBusy(true);
     try {
       await api.del(`/designs/${id}`);
