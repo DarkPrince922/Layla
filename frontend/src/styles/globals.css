@@ -12,7 +12,8 @@ body {
 }
 
 body {
-  @apply bg-ink-950 text-neutral-200 antialiased;
+  @apply bg-ink-950 text-neutral-200 antialiased font-sans;
+  font-feature-settings: "cv11", "ss01";
 }
 
 /* thin scrollbars for the workstation feel */
@@ -59,7 +60,12 @@ body {
     width: auto;
   }
   .code-chat {
-    width: 380px;
+    width: 440px;
     flex-shrink: 0;
+  }
+}
+@container (min-width: 1500px) {
+  .code-chat {
+    width: 500px;
   }
 }

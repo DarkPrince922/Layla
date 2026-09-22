@@ -99,7 +99,7 @@ export function ProvidersSettings() {
 
       {open && (
         <div className="mb-5 space-y-3 rounded-lg border border-ink-700 bg-ink-900 p-4">
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <input
               className="rounded-md border border-ink-700 bg-ink-800 px-3 py-2 text-sm"
               placeholder="Название (напр. OpenAI)"

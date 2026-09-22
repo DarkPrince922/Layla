@@ -30,7 +30,7 @@ export function PersonasSettings() {
       {isLoading ? (
         <p className="text-sm text-neutral-500">Загрузка…</p>
       ) : (
-        <ul className="grid grid-cols-2 gap-3">
+        <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           {personas.map((p) => (
             <li key={p.id} className="rounded-lg border border-ink-700 bg-ink-900 p-4">
               <div className="flex items-center gap-2">

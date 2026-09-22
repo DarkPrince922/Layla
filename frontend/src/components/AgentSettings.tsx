@@ -93,7 +93,7 @@ export function AgentSettings() {
 
       <section className="mb-5">
         <div className="mb-1 text-sm font-semibold">Бюджеты</div>
-        <div className="grid grid-cols-3 gap-2">
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
           <label className="text-xs text-neutral-400">
             Токены/ход
             <input type="number" value={tokens} onChange={(e) => setTokens(Number(e.target.value))}

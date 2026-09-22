@@ -19,17 +19,17 @@ export default function DomainPage({ params }: { params: { domain: string } }) {
 
   return (
     <div className="flex h-full flex-col">
-      {/* Верхний бар: табы домена (спец. §3). */}
-      <header className="flex shrink-0 flex-wrap items-center gap-2 border-b border-ink-700 bg-ink-900 px-4 py-3">
-        <div className="flex items-center gap-2">
-          <Icon className="h-5 w-5" style={{ color: domain.color }} />
-          <h1 className="text-sm font-semibold">{domain.label}</h1>
+      {/* Верхний бар: табы домена (спец. §3). Компактный — минимум высоты. */}
+      <header className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-ink-700 bg-ink-900 px-4 py-1.5">
+        <div className="flex items-center gap-1.5">
+          <Icon className="h-4 w-4" style={{ color: domain.color }} />
+          <h1 className="text-[13px] font-semibold leading-none">{domain.label}</h1>
         </div>
-        <nav className="flex max-w-full gap-1 overflow-x-auto text-xs">
+        <nav className="flex max-w-full gap-0.5 overflow-x-auto text-[11px]">
           {domain.tabs.map((t, i) => (
             <button
               key={t}
-              className={`rounded px-2.5 py-1 ${
+              className={`whitespace-nowrap rounded px-2 py-0.5 ${
                 i === 0 ? "bg-ink-700 text-white" : "text-neutral-400 hover:bg-ink-800"
               }`}
             >
@@ -37,7 +37,7 @@ export default function DomainPage({ params }: { params: { domain: string } }) {
             </button>
           ))}
         </nav>
-        <div className="ml-auto text-[11px] text-neutral-500">⌘K</div>
+        <div className="ml-auto hidden text-[11px] text-neutral-500 sm:block">⌘K</div>
       </header>
 
       <div className="min-h-0 flex-1">
@@ -65,7 +65,7 @@ export default function DomainPage({ params }: { params: { domain: string } }) {
                 </p>
               </div>
             </div>
-            <div className="flex w-[420px] shrink-0 flex-col border-l border-ink-700">
+            <div className="flex w-[460px] max-w-[45%] shrink-0 flex-col border-l border-ink-700 xl:w-[520px]">
               <ChatPanel domain={domain.slug} />
             </div>
           </div>

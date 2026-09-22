@@ -176,7 +176,7 @@ export function AccountsLab() {
         <HttpKeyBanner />
       </div>
 
-      <div className="mb-6 grid grid-cols-4 gap-3">
+      <div className="mb-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
         <HealthTile label="Профили" value={health?.profiles ?? 0} />
         <HealthTile label="Активные модели" value={health?.active_models ?? 0} />
         <HealthTile label="OAuth-аккаунты" value={health?.oauth_accounts ?? 0} />
