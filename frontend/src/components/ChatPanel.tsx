@@ -240,7 +240,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
         <option value="">Новый чат</option>{history.data?.map(c => <option key={c.id} value={c.id}>{c.title || "Чат"}</option>)}
       </select>
       {detail.data?.project_id && <button onClick={zip} className="icon-button" aria-label="Скачать файлы чата ZIP"><Download className="h-4 w-4" /></button>}
-      {chatId && <button aria-label="Удалить чат" title={running ? "Сначала остановите задачу" : "Удалить чат"} onClick={removeChat} disabled={sending || removing || running || !ready} className="icon-button hover:bg-red-500/15 hover:text-red-300">{removing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}</button>}
+      {chatId && <button aria-label="Удалить чат" title="Удалить чат" onClick={removeChat} disabled={sending || removing || !ready} className="icon-button hover:bg-red-500/15 hover:text-red-300">{removing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}</button>}
       {!!history.data?.length && <button aria-label="Очистить историю" title="Очистить историю раздела" onClick={clearHistory} disabled={sending || removing || !ready} className="icon-button hover:bg-red-500/15 hover:text-red-300"><Eraser className="h-4 w-4" /></button>}
       <button aria-label="Новый чат" onClick={() => select(null)} disabled={sending || !ready} className="icon-button"><Plus className="h-5 w-5" /></button>
     </div>

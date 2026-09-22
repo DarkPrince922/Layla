@@ -141,10 +141,12 @@ async def delete_chat(
     chat_id: str,
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
+    maker: async_sessionmaker[AsyncSession] = Depends(get_sessionmaker),
 ) -> None:
     chat = await _owned_chat(session, user, chat_id)
-    active = await session.scalar(select(Job.id).where(Job.chat_id == chat_id, Job.status.in_(jobs.ACTIVE)))
-    if active:
+    active = list(await session.scalars(select(Job).where(Job.chat_id == chat_id, Job.status.in_(jobs.ACTIVE))))
+    # Зависшую задачу (воркер умер) удаление освобождает само, а не упирается в 409.
+    if await jobs.live_jobs(maker, active):
         raise HTTPException(status_code=409, detail="Сначала остановите задачу этого чата")
     folder = await _delete_chat(session, chat)
     await session.commit()
@@ -158,15 +160,17 @@ async def clear_chats(
     project_id: str | None = None,
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
+    maker: async_sessionmaker[AsyncSession] = Depends(get_sessionmaker),
 ) -> ClearChatsOut:
     """Очистить историю раздела (или проекта в «Коде»). Работающие чаты не трогаем."""
     query = select(Chat).where(Chat.owner_id == user.id, Chat.domain == domain)
     if project_id:
         await _owned_project(session, user, project_id)
         query = query.where(Chat.project_id == project_id)
-    busy = set(await session.scalars(
-        select(Job.chat_id).where(Job.owner_id == user.id, Job.chat_id.is_not(None), Job.status.in_(jobs.ACTIVE))
+    active = list(await session.scalars(
+        select(Job).where(Job.owner_id == user.id, Job.chat_id.is_not(None), Job.status.in_(jobs.ACTIVE))
     ))
+    busy = {job.chat_id for job in await jobs.live_jobs(maker, active)}
     deleted, skipped, folders = 0, 0, []
     for chat in list(await session.scalars(query)):
         if chat.id in busy:

@@ -16,7 +16,7 @@ from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
 from app.config import get_settings
-from app.db import get_session
+from app.db import get_session, get_sessionmaker
 from app.models.chat import Chat
 from app.models.job import Job
 from app.models.user import Project, User, Workspace
@@ -29,7 +29,7 @@ from app.schemas.project import (
     ProjectOut,
     RepoImport,
 )
-from app.services import audit, files, repo
+from app.services import audit, files, jobs, repo
 from app.services.auth import get_current_user
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -300,14 +300,16 @@ async def delete_project(
     project_id: str,
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
+    maker=Depends(get_sessionmaker),
 ) -> None:
     project = await _owned_project(session, user, project_id)
-    active = await session.scalar(
-        select(Job.id).join(Chat, Job.chat_id == Chat.id).where(
+    active = list(await session.scalars(
+        select(Job).join(Chat, Job.chat_id == Chat.id).where(
             Chat.project_id == project_id, Job.status.in_(("queued", "running"))
         )
-    )
-    if active:
+    ))
+    # Зависшую задачу удаление освобождает само; 409 только при реально живой.
+    if await jobs.live_jobs(maker, active):
         raise HTTPException(status_code=409, detail="В проекте выполняется задача. Сначала остановите её.")
     folder = await remove_project(session, project)
     await audit.record(session, actor=user.id, action="project.delete", target=project_id)

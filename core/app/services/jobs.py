@@ -124,6 +124,21 @@ async def release_orphan(maker, job_id: str) -> None:
     await _finish(maker, job_id, "error", "Предыдущий ответ прервался. История и файлы сохранены.")
 
 
+async def live_jobs(maker, active: list[Job]) -> list[Job]:
+    """Из активных задач освободить «мёртвые» (воркер умер) и вернуть реально живые.
+
+    Нужно на путях удаления: раньше зависшая задача навсегда блокировала
+    удаление чата/проекта, потому что числилась running, хотя уже не выполнялась.
+    """
+    alive = []
+    for job in active:
+        if is_orphaned(job):
+            await release_orphan(maker, job.id)
+        else:
+            alive.append(job)
+    return alive
+
+
 async def wait_decision(job_id: str, approval_id: str, timeout: float = APPROVAL_TIMEOUT) -> str:
     """Ждать решения пользователя по изменению. Без ответа — изменение отклоняется."""
     future: asyncio.Future = asyncio.get_running_loop().create_future()

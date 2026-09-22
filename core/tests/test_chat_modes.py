@@ -233,3 +233,58 @@ async def test_delete_project_removes_files_and_chats(client):
     assert (await client.delete(f"/api/projects/{project['id']}")).status_code == 204
     assert not root.exists()
     assert (await client.get(f"/api/chats/{chat['id']}")).status_code == 404
+
+
+async def test_delete_chat_with_stuck_job(client, db_sessionmaker):
+    """Зависшая задача (воркер умер) больше не мешает удалить чат."""
+    await _setup(client)
+    chat = (await client.post("/api/chats", json={"domain": "osint", "model": "m"})).json()
+    me = (await client.get("/api/auth/me")).json()["id"]
+    old = datetime.now(UTC) - timedelta(minutes=5)
+    async with db_sessionmaker() as s:
+        s.add(Job(owner_id=me, domain="osint", kind="project.agent", title="ghost", chat_id=chat["id"],
+                  status="running", created_at=old, updated_at=old))
+        await s.commit()
+    assert (await client.delete(f"/api/chats/{chat['id']}")).status_code == 204
+    assert (await client.get(f"/api/chats/{chat['id']}")).status_code == 404
+
+
+async def test_delete_chat_blocked_only_by_live_job(client, db_sessionmaker):
+    """Свежая (живая) задача по-прежнему защищает чат от удаления."""
+    await _setup(client)
+    chat = (await client.post("/api/chats", json={"domain": "osint", "model": "m"})).json()
+    me = (await client.get("/api/auth/me")).json()["id"]
+    async with db_sessionmaker() as s:
+        s.add(Job(owner_id=me, domain="osint", kind="project.agent", title="live", chat_id=chat["id"],
+                  status="running", created_at=datetime.now(UTC), updated_at=datetime.now(UTC)))
+        await s.commit()
+    assert (await client.delete(f"/api/chats/{chat['id']}")).status_code == 409
+
+
+async def test_delete_project_with_stuck_job(client, db_sessionmaker):
+    """Зависшая задача проекта не мешает удалить проект."""
+    await _setup(client)
+    project = (await client.post("/api/projects", json={"name": "P"})).json()
+    chat = (await client.post("/api/chats", json={"domain": "code", "project_id": project["id"]})).json()
+    me = (await client.get("/api/auth/me")).json()["id"]
+    old = datetime.now(UTC) - timedelta(minutes=5)
+    async with db_sessionmaker() as s:
+        s.add(Job(owner_id=me, domain="code", kind="project.agent", title="ghost", chat_id=chat["id"],
+                  status="running", created_at=old, updated_at=old))
+        await s.commit()
+    assert (await client.delete(f"/api/projects/{project['id']}")).status_code == 204
+    assert all(p["id"] != project["id"] for p in (await client.get("/api/projects")).json())
+
+
+async def test_clear_history_releases_stuck_job(client, db_sessionmaker):
+    """«Очистить историю» удаляет чат с зависшей задачей, а не пропускает его."""
+    await _setup(client)
+    chat = (await client.post("/api/chats", json={"domain": "osint", "model": "m"})).json()
+    me = (await client.get("/api/auth/me")).json()["id"]
+    old = datetime.now(UTC) - timedelta(minutes=5)
+    async with db_sessionmaker() as s:
+        s.add(Job(owner_id=me, domain="osint", kind="project.agent", title="ghost", chat_id=chat["id"],
+                  status="running", created_at=old, updated_at=old))
+        await s.commit()
+    r = await client.delete("/api/chats", params={"domain": "osint"})
+    assert r.status_code == 200 and r.json() == {"deleted": 1, "skipped": 0}
