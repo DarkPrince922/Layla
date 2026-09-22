@@ -5,6 +5,7 @@ from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.db import get_session
 from app.models.persona import Persona
 from app.models.user import User, Workspace
@@ -37,7 +38,13 @@ async def ensure_user_bootstrapped(session: AsyncSession, user: User) -> None:
         select(Workspace).where(Workspace.owner_id == user.id).limit(1)
     )
     if existing_ws is None:
-        session.add(Workspace(owner_id=user.id, name="По умолчанию", projects_dir="/workspace/projects"))
+        session.add(
+            Workspace(
+                owner_id=user.id,
+                name="По умолчанию",
+                projects_dir=get_settings().projects_dir,
+            )
+        )
 
     existing_persona = await session.scalar(
         select(Persona).where(Persona.owner_id == user.id).limit(1)

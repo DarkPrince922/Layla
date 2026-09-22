@@ -10,6 +10,8 @@ os.environ.setdefault("LAYLA_SECRET_KEY", "test-secret-key-for-derivation")
 os.environ.setdefault("LAYLA_JWT_SECRET", "test-jwt-secret")
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("LAYLA_ENV", "dev")
+import tempfile  # noqa: E402
+os.environ.setdefault("LAYLA_PROJECTS_DIR", tempfile.mkdtemp(prefix="layla-proj-"))
 
 import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
