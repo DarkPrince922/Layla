@@ -12,7 +12,7 @@ from app.models.enums import FindingSource, FindingStatus, Severity
 from app.models.pentest import Engagement, Finding, Report
 from app.models.user import User
 from app.schemas.pentest import FindingCreate, FindingOut, FindingUpdate, ReportOut
-from app.services import acunetix, audit
+from app.services import acunetix, audit, pentest_import
 from app.services.auth import get_current_user
 
 router = APIRouter(prefix="/engagements/{eid}", tags=["pentest"])
@@ -117,45 +117,12 @@ async def import_acunetix(
     if not html:
         raise HTTPException(status_code=400, detail="Пустой отчёт")
 
-    parsed = acunetix.parse_html(html)
-    sha = acunetix.sha256_of(html)
-
-    # Существующие ключи дедупа в этом engagement.
-    existing = {
-        f.dedup_key
-        for f in await session.scalars(
-            select(Finding).where(Finding.engagement_id == eid)
-        )
-        if f.dedup_key
-    }
-    imported = 0
-    dupes = 0
-    seen: set[str] = set()
-    for item in parsed.findings:
-        key = acunetix.dedup_key(item)
-        if key in existing or key in seen:
-            dupes += 1
-            continue
-        seen.add(key)
-        session.add(
-            Finding(
-                engagement_id=eid,
-                severity=item["severity"], type=item["type"], url=item.get("url"),
-                param=item.get("param"), method=item.get("method"),
-                source=FindingSource.scanner, dedup_key=key, created_by=user.id,
-            )
-        )
-        imported += 1
-
-    stats = {"declared": parsed.declared, "imported": imported, "dupes": dupes}
-    report = Report(
-        engagement_id=eid, format="acunetix-import", sha256_source=sha,
-        stats=stats, status="ok" if parsed.declared else "failed",
+    report = await pentest_import.import_report(
+        session, engagement_id=eid, html=html, user_id=user.id
     )
-    session.add(report)
     await audit.record(
         session, actor=user.id, action="report.import.acunetix", target=eid,
-        meta={**stats, "sha256": sha},
+        meta={**report.stats, "sha256": report.sha256_source},
     )
     await session.commit()
     return ReportOut.model_validate(report)

@@ -23,6 +23,7 @@ from app.api import (
     mcp,
     models,
     osint,
+    pentest_imports,
     personas,
     projects,
     providers,
@@ -89,6 +90,7 @@ app.include_router(osint.router, prefix=api_prefix)
 app.include_router(engagements.router, prefix=api_prefix)
 app.include_router(servers.router, prefix=api_prefix)
 app.include_router(findings.router, prefix=api_prefix)
+app.include_router(pentest_imports.router, prefix=api_prefix)
 app.include_router(agent.router, prefix=api_prefix)
 app.include_router(combos.router, prefix=api_prefix)
 app.include_router(audit.router, prefix=api_prefix)

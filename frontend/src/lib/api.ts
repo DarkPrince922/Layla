@@ -360,3 +360,12 @@ export interface AgentConfig {
   diagnostics: Record<string, unknown>;
   context: Record<string, unknown>;
 }
+
+export interface AcunetixImportResult {
+  engagement_id: string;
+  created: boolean;
+  scope_hosts: string[];
+  stats: Record<string, number>;
+  sha256_source?: string | null;
+  status: string;
+}
