@@ -20,12 +20,12 @@ export default function DomainPage({ params }: { params: { domain: string } }) {
   return (
     <div className="flex h-full flex-col">
       {/* Верхний бар: табы домена (спец. §3). */}
-      <header className="flex items-center gap-4 border-b border-ink-700 bg-ink-900 px-6 py-3">
+      <header className="flex shrink-0 flex-wrap items-center gap-2 border-b border-ink-700 bg-ink-900 px-4 py-3">
         <div className="flex items-center gap-2">
           <Icon className="h-5 w-5" style={{ color: domain.color }} />
           <h1 className="text-sm font-semibold">{domain.label}</h1>
         </div>
-        <nav className="flex gap-1 text-xs">
+        <nav className="flex max-w-full gap-1 overflow-x-auto text-xs">
           {domain.tabs.map((t, i) => (
             <button
               key={t}

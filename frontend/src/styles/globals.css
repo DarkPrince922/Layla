@@ -32,3 +32,34 @@ body {
   border-left: 1px solid theme("colors.ink.700");
   border-right: 1px solid theme("colors.ink.700");
 }
+
+/* Match the available workspace width, including the manual mobile layout. */
+.code-workspace {
+  container-type: inline-size;
+}
+.code-pane {
+  display: none;
+  width: 100%;
+}
+.code-pane.code-active {
+  display: flex;
+}
+@container (min-width: 1050px) {
+  .code-tabs {
+    display: none;
+  }
+  .code-pane {
+    display: flex;
+  }
+  .code-projects {
+    width: 220px;
+    flex-shrink: 0;
+  }
+  .code-editor {
+    width: auto;
+  }
+  .code-chat {
+    width: 380px;
+    flex-shrink: 0;
+  }
+}

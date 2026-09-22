@@ -116,6 +116,7 @@ export interface Persona {
   instructions?: string | null;
   is_builtin: boolean;
   hitl_required: boolean;
+  allowed_tools?: string[];
 }
 
 export interface ModelInfo {
@@ -125,6 +126,7 @@ export interface ModelInfo {
 }
 
 export interface Chat {
+  project_id?: string | null;
   id: string;
   domain: string;
   title?: string | null;
@@ -137,6 +139,9 @@ export interface ChatMessage {
   role: string;
   content: string;
   reasoning?: string;
+  tools?: ToolEvent[];
+  error?: string | null;
+  meta?: { reasoning?: string; tools?: ToolEvent[]; error?: string | null };
 }
 
 export interface ChatDetail extends Chat {
@@ -170,11 +175,51 @@ export interface FileNode {
   is_dir: boolean;
 }
 
+export interface FileContent {
+  path: string;
+  content: string;
+  sha256: string;
+}
+
+export interface FileChange {
+  path: string;
+  operation: "create" | "edit" | "delete";
+  diff: string;
+  before_sha256: string | null;
+  after_sha256: string | null;
+}
+
+export interface ToolEvent {
+  id: string;
+  name: string;
+  path: string;
+  status: "running" | "done" | "error";
+  error?: string;
+  change?: FileChange;
+}
+
+export async function downloadProject(project: Project): Promise<void> {
+  const res = await fetch(`${BASE}/projects/${project.id}/archive`, { credentials: "include" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new ApiError(res.status, body.detail || "Не удалось скачать проект");
+  }
+  const url = URL.createObjectURL(await res.blob());
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${project.name.replace(/[/\\]/g, "-")}.zip`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 interface StreamHandlers {
   onDelta: (text: string) => void;
   onReasoning?: (text: string) => void;
   onDone?: (messageId: string) => void;
   onError?: (message: string) => void;
+  onTool?: (tool: ToolEvent) => void;
 }
 
 // Стриминг ответа ассистента по SSE. Парсит события `data: {...}`.
@@ -183,40 +228,44 @@ export async function streamChat(
   content: string,
   model: string | undefined,
   handlers: StreamHandlers,
+  signal?: AbortSignal,
 ): Promise<void> {
   const res = await fetch(`${BASE}/chats/${chatId}/messages`, {
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content, model }),
+    signal,
   });
   if (!res.ok || !res.body) {
-    handlers.onError?.(`Ошибка ${res.status}`);
-    return;
+    const body = await res.json().catch(() => ({}));
+    throw new ApiError(res.status, typeof body.detail === "string" ? body.detail : `Ошибка ${res.status}`);
   }
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    let idx: number;
-    while ((idx = buf.indexOf("\n\n")) >= 0) {
-      const line = buf.slice(0, idx).trim();
-      buf = buf.slice(idx + 2);
-      if (!line.startsWith("data:")) continue;
-      const data = line.slice(5).trim();
-      try {
-        const evt = JSON.parse(data);
+  let finished = false;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const frame = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 2);
+        if (!frame.startsWith("data:")) continue;
+        const evt = JSON.parse(frame.slice(5).trim());
         if (evt.delta) handlers.onDelta(evt.delta);
+        else if (evt.tool) handlers.onTool?.(evt.tool);
         else if (evt.reasoning) handlers.onReasoning?.(evt.reasoning);
         else if (evt.error) handlers.onError?.(evt.error);
-        else if (evt.done) handlers.onDone?.(evt.message_id);
-      } catch {
-        /* игнорируем неполные чанки */
+        else if (evt.done) { finished = true; handlers.onDone?.(evt.message_id); }
       }
     }
+    if (!finished) throw new Error("Соединение прервано. Проверьте историю перед продолжением.");
+  } finally {
+    reader.releaseLock();
   }
 }
 

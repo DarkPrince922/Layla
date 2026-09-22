@@ -136,6 +136,14 @@ See [M3 usage, upgrade instructions and limits](docs/OSINT.md).
 - **Hardening**: Caddy security headers, refusal to start prod with default
   secrets (`Settings.validate_for_prod`).
 
+**Code workspace update**
+- Local projects from scratch, safe text file create/edit/delete, and ZIP downloads.
+- Project-bound chat with OpenAI-compatible / Anthropic file tools, persona access
+  checks, persisted diffs and chat history; no shell execution in this flow.
+- Editable files, stale-version conflict detection, and panels that fit mobile screens.
+- [Usage, API, migration and limits](docs/CODE_PROJECTS.md);
+  [proposed UI references](docs/UI_REFERENCES.md).
+
 All six milestones (M0–M6) are implemented. See
 [`docs/ROADMAP.md`](docs/ROADMAP.md) and [`docs/SECURITY.md`](docs/SECURITY.md).
 
