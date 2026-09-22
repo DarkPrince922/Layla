@@ -9,6 +9,7 @@ import {
   type ProviderKey,
 } from "@/lib/api";
 import { HttpKeyBanner } from "@/components/HttpKeyBanner";
+import { CombosManager } from "@/components/CombosManager";
 
 interface Provider {
   id: string;
@@ -195,10 +196,7 @@ export function AccountsLab() {
         </div>
       )}
 
-      <div className="mt-6 rounded-lg border border-dashed border-ink-700 p-4 text-xs text-neutral-600">
-        Combos router (preview) — маршрутизация с per-model lockout и circuit
-        breaker — появится во второй фазе.
-      </div>
+      <div className="mt-6 border-t border-ink-700 pt-5"><CombosManager /></div>
     </div>
   );
 }

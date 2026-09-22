@@ -22,13 +22,14 @@ personas (AI roles), sub-agent orchestration, MCP integrations, a knowledge base
 
 ---
 
-## Status — Milestones M0–M5
+## Status — All milestones M0–M6 ✅
 
 The UI ships in **Russian** (переключатель EN/RU запланирован на M6). This
 repository currently implements **M0** (skeleton), **M1** (providers & chat)
 and **M2** (Design + Knowledge + MCP + Telegram), **M3** (OSINT) and
 **M4** (Pentest core: scope/authorized gate, venue+egress, findings, Acunetix import)
-and **M5** (autonomous Pentest agent with HITL, budgets, gated execution).
+**M5** (autonomous Pentest agent with HITL, budgets, gated execution) and
+**M6** (Combos router, audit export, EN/RU i18n, mobile layout, hardening).
 Remaining M0–M2 spec gaps are tracked explicitly in [the roadmap](docs/ROADMAP.md).
 
 **Included now**
@@ -125,9 +126,18 @@ See [M3 usage, upgrade instructions and limits](docs/OSINT.md).
   (preset, role models, budgets, diagnostics). **CAI** wired as an optional
   engine strictly behind the gates.
 
-**Not yet built** (later milestone): polish — Combos router, audit export,
-mobile layout, EN/RU i18n switch, hardening (M6). See
-[`docs/ROADMAP.md`](docs/ROADMAP.md).
+**Added in M6**
+- **Combos router** (`app/services/combos.py`): candidate-model routing with
+  per-model lockout + circuit-breaker recovery — tested; managed in Accounts Lab.
+- **Audit export**: `/api/audit` list and CSV export of the operator's log.
+- **i18n EN/RU**: dictionary + language switch in Settings → General (shell,
+  navigation, domains, login localized; screen bodies extend incrementally).
+- **Layout toggle** desktop/mobile in General, plus responsive navigation.
+- **Hardening**: Caddy security headers, refusal to start prod with default
+  secrets (`Settings.validate_for_prod`).
+
+All six milestones (M0–M6) are implemented. See
+[`docs/ROADMAP.md`](docs/ROADMAP.md) and [`docs/SECURITY.md`](docs/SECURITY.md).
 
 ---
 

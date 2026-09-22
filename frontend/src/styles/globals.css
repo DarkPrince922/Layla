@@ -23,3 +23,12 @@ body {
 ::-webkit-scrollbar-thumb {
   @apply bg-ink-600 rounded;
 }
+
+/* Layout toggle (spec §4): mobile сужает основную область в одну колонку. */
+:root[data-layout="mobile"] .app-main {
+  max-width: 560px;
+  margin-left: auto;
+  margin-right: auto;
+  border-left: 1px solid theme("colors.ink.700");
+  border-right: 1px solid theme("colors.ink.700");
+}

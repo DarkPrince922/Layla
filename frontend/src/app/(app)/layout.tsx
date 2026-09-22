@@ -5,11 +5,14 @@ import { usePathname } from "next/navigation";
 import { Menu, X } from "lucide-react";
 import { Sidebar } from "@/components/Sidebar";
 import { AuthGate } from "@/components/AuthGate";
+import { useLayout } from "@/store/layout";
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   const [menu, setMenu] = useState(false);
   const pathname = usePathname();
+  const applyLayout = useLayout((s) => s.apply);
   useEffect(() => setMenu(false), [pathname]);
+  useEffect(() => applyLayout(), [applyLayout]);
   return (
     <AuthGate>
       <div className="flex h-dvh flex-col overflow-hidden">
@@ -21,7 +24,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         </div>
         <div className="flex min-h-0 flex-1">
           <div className={`${menu ? "block w-full" : "hidden"} md:block md:w-auto`}><Sidebar /></div>
-          <main className={`${menu ? "hidden md:block" : "block"} min-w-0 flex-1 overflow-y-auto`}>{children}</main>
+          <main className={`app-main ${menu ? "hidden md:block" : "block"} min-w-0 flex-1 overflow-y-auto`}>{children}</main>
         </div>
       </div>
     </AuthGate>

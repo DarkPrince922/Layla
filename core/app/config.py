@@ -45,6 +45,17 @@ class Settings(BaseSettings):
     def is_prod(self) -> bool:
         return self.env.lower() in {"prod", "production"}
 
+    def validate_for_prod(self) -> list[str]:
+        """Проверки безопасности для прод-режима (спец. §7.5, §7.6)."""
+        problems: list[str] = []
+        if not self.is_prod:
+            return problems
+        if not self.secret_key:
+            problems.append("LAYLA_SECRET_KEY обязателен в prod (шифрование секретов)")
+        if not self.jwt_secret or self.jwt_secret == "dev-insecure-jwt-secret":
+            problems.append("LAYLA_JWT_SECRET должен быть задан и не равен dev-значению")
+        return problems
+
 
 @lru_cache
 def get_settings() -> Settings:

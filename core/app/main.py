@@ -10,8 +10,10 @@ from fastapi.responses import JSONResponse
 
 from app.api import (
     agent,
+    audit,
     auth,
     chats,
+    combos,
     designs,
     engagements,
     findings,
@@ -32,6 +34,11 @@ from app.config import get_settings
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 
 settings = get_settings()
+
+# Прод-hardening: не стартуем с небезопасными дефолтами (спец. §7).
+_prod_problems = settings.validate_for_prod()
+if _prod_problems:
+    raise RuntimeError("Небезопасная конфигурация prod: " + "; ".join(_prod_problems))
 
 app = FastAPI(
     title="Layla Core",
@@ -83,6 +90,8 @@ app.include_router(engagements.router, prefix=api_prefix)
 app.include_router(servers.router, prefix=api_prefix)
 app.include_router(findings.router, prefix=api_prefix)
 app.include_router(agent.router, prefix=api_prefix)
+app.include_router(combos.router, prefix=api_prefix)
+app.include_router(audit.router, prefix=api_prefix)
 
 
 @app.get("/")

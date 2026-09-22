@@ -7,9 +7,11 @@ import { ArrowLeft, Menu, X } from "lucide-react";
 import clsx from "clsx";
 import { AuthGate } from "@/components/AuthGate";
 import { SETTINGS_SECTIONS } from "@/lib/settings-nav";
+import { useLocale } from "@/store/locale";
 
 export default function SettingsLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const t = useLocale((s) => s.t);
   const [menu, setMenu] = useState(false);
   useEffect(() => setMenu(false), [pathname]);
   return (
@@ -26,7 +28,7 @@ export default function SettingsLayout({ children }: { children: React.ReactNode
             href="/code"
             className="flex items-center gap-2 border-b border-ink-700 px-4 py-4 text-sm text-neutral-300 hover:text-white"
           >
-            <ArrowLeft className="h-4 w-4" /> Назад в приложение
+            <ArrowLeft className="h-4 w-4" /> {t("back.toApp")}
           </Link>
           <nav className="flex-1 overflow-y-auto p-2">
             {SETTINGS_SECTIONS.map((s) => {
@@ -40,7 +42,7 @@ export default function SettingsLayout({ children }: { children: React.ReactNode
                     active ? "bg-ink-700 text-white" : "text-neutral-300 hover:bg-ink-800"
                   )}
                 >
-                  {s.label}
+                  {t(`settings.${s.slug}`)}
                 </Link>
               );
             })}

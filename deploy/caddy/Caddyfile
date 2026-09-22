@@ -8,6 +8,17 @@
 {$LAYLA_PUBLIC_HOST:localhost} {
 	encode gzip
 
+	# --- Security headers (hardening, spec §7) ---
+	header {
+		# HSTS применяется браузером только по HTTPS (в dev по HTTP игнорируется).
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "geolocation=(), microphone=(), camera=()"
+		-Server
+	}
+
 	# API + WebSocket -> backend core
 	handle /api/* {
 		reverse_proxy layla-core:8000

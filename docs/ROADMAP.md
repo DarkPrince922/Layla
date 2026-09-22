@@ -24,8 +24,9 @@ Each milestone is a working application, verified before moving on (spec §9).
   (tokens/cost/time), and a venue executor where **every active command passes
   the scope/venue/egress gate before running** (tested). CAI wired as an
   optional engine behind those gates; no un-gated execution.
-- **M6 — Polish** — Combos router, audit export, mobile layout, RU i18n,
-  hardening, docs.
+- **M6 — Polish** ✅ — Combos router (per-model lockout + circuit breaker,
+  tested), audit-log CSV export, EN/RU i18n with a language switch, desktop/mobile
+  layout toggle, hardening (security headers, prod secret validation), docs.
 
 ## Gaps found while taking over from M2
 
