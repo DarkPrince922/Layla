@@ -85,7 +85,9 @@ services:
       - "80:80"
       - "443:443"
     environment:
-      LAYLA_PUBLIC_HOST: ${LAYLA_PUBLIC_HOST}
+      # Адрес сайта для Caddy. По умолчанию http://localhost — простой HTTP без
+      # авто-TLS и без редиректа. Для HTTPS укажите голый домен (example.com).
+      LAYLA_SITE_ADDRESS: ${LAYLA_SITE_ADDRESS:-http://localhost}
     volumes:
       - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddydata:/data

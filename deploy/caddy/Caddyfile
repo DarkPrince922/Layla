@@ -1,11 +1,14 @@
 # =====================================================================
-# Layla reverse proxy.
-# dev:  http://localhost  (plain HTTP; the app shows a key-entry banner)
-# prod: set LAYLA_PUBLIC_HOST to a real domain -> Caddy gets auto-HTTPS
-#       via Let's Encrypt. HTTPS is mandatory in prod (spec §7.6).
+# Layla reverse proxy. Адрес сайта задаётся LAYLA_SITE_ADDRESS:
+#   dev / HTTP:   http://localhost | http://<IP> | http://<домен> | :80
+#                 (простой HTTP, БЕЗ авто-TLS и БЕЗ редиректа на https)
+#   prod / HTTPS: <домен> без схемы, напр. example.com
+#                 (Caddy сам получит сертификат Let's Encrypt)
+# Важно: если указать голый домен (без http://), Caddy включает авто-HTTPS и
+# редиректит http→https. Для HTTP всегда пишите префикс http:// (или :80).
 # =====================================================================
 
-{$LAYLA_PUBLIC_HOST:localhost} {
+{$LAYLA_SITE_ADDRESS:http://localhost} {
 	# --- Security headers (hardening, spec §7) ---
 	header {
 		# HSTS применяется браузером только по HTTPS (в dev по HTTP игнорируется).
