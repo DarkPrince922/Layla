@@ -11,6 +11,22 @@ const active = (job?: Job | null) => !!job && ["queued", "running"].includes(job
 const read = (key: string) => { try { return localStorage.getItem(key); } catch { return null; } };
 const remember = (key: string, value: string) => { try { localStorage.setItem(key, value); } catch { /* Storage can be unavailable. */ } };
 
+// crypto.randomUUID есть только в защищённом контексте (HTTPS или localhost).
+// По обычному HTTP его нет, поэтому собираем UUID v4 из getRandomValues,
+// который доступен всегда; последний фолбэк — на случай совсем старых браузеров.
+const newRequestId = (): string => {
+  const source = globalThis.crypto;
+  if (typeof source?.randomUUID === "function") return source.randomUUID();
+  if (typeof source?.getRandomValues === "function") {
+    const bytes = source.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = [...bytes].map(b => b.toString(16).padStart(2, "0")).join("");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+  return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 14)}`;
+};
+
 export function ChatPanel({ domain, projectId, onFileChange, onOpenFile }: {
   domain: string; projectId?: string; onFileChange?: (change: FileChange) => void; onOpenFile?: (path: string) => void;
 }) {
@@ -99,7 +115,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile }: {
         id = chat.id;
         if (version === generation.current) { setChatId(id); remember(scope, id); }
       }
-      if (!request.current || request.current.content !== content || request.current.chat !== id) request.current = { content, chat: id, id: crypto.randomUUID() };
+      if (!request.current || request.current.content !== content || request.current.chat !== id) request.current = { content, chat: id, id: newRequestId() };
       await api.post<Job>(`/chats/${id}/run`, { content, model, request_id: request.current.id });
       remember(`${scope}:draft:${chatId || "new"}`, "");
       if (version === generation.current) setInput("");
