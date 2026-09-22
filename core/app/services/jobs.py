@@ -196,7 +196,8 @@ async def _finish(maker, job_id: str, status: str, error: str | None = None) -> 
                 meta = dict(msg.meta or {})
                 meta["error"] = error
                 meta["tools"] = [
-                    {**t, "status": "error", "error": error} if t.get("status") in ("running", "pending") else t
+                    {**{k: v for k, v in t.items() if k != "change"}, "status": "error", "error": error}
+                    if t.get("status") in ("running", "pending") else t
                     for t in meta.get("tools", [])
                 ]
                 msg.meta = meta

@@ -217,7 +217,8 @@ async def _build_messages(session: AsyncSession, chat: Chat) -> list[dict[str, s
     for m in history:
         if m.role in ("user", "assistant", "system"):
             content = m.content
-            changes = [t["change"] for t in (m.meta or {}).get("tools", []) if t.get("change")]
+            changes = [t["change"] for t in (m.meta or {}).get("tools", [])
+                       if t.get("change") and t.get("status") == "done"]
             if changes:
                 content += (
                     "\n[Applied project changes: "
@@ -532,7 +533,9 @@ async def run_chat(
         finally:
             for tool_id, tool in list(tools.items()):
                 if tool["status"] in ("running", "pending"):
-                    tools[tool_id] = {**tool, "status": "error", "error": error or "Вызов прерван"}
+                    # change у pending — это лишь превью, оно не было применено.
+                    cleaned = {k: v for k, v in tool.items() if k != "change"}
+                    tools[tool_id] = {**cleaned, "status": "error", "error": error or "Вызов прерван"}
             await persist()
 
     jobs.launch(maker, job.id, worker)

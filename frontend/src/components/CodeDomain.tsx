@@ -68,7 +68,15 @@ export function CodeDomain() {
   }, [projects, projectId, projectKey]);
   useEffect(() => { if (projectId) try { localStorage.setItem(projectKey, projectId); } catch {} }, [projectId, projectKey]);
   useEffect(() => {
-    const open = (event: Event) => { const target = (event as CustomEvent).detail; if (target.domain === "code" && canLeave()) { setProjectId(target.project_id || null); setPane("chat"); } };
+    const open = (event: Event) => {
+      const target = (event as CustomEvent).detail;
+      if (target.domain !== "code") return;
+      const id = target.project_id || null;
+      // Смена проекта должна сбрасывать открытый файл/черновик — иначе «Сохранить»
+      // ушло бы в новый проект (и незавершённый openPath показал бы чужой файл).
+      if (id && id !== projectId) selectProject(id);
+      setPane("chat");
+    };
     window.addEventListener("layla:open-chat", open);
     return () => window.removeEventListener("layla:open-chat", open);
   });

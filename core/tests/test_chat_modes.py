@@ -288,3 +288,20 @@ async def test_clear_history_releases_stuck_job(client, db_sessionmaker):
         await s.commit()
     r = await client.delete("/api/chats", params={"domain": "osint"})
     assert r.status_code == 200 and r.json() == {"deleted": 1, "skipped": 0}
+
+
+async def test_confirm_stop_before_approve_drops_preview(client, monkeypatch):
+    """Остановка до подтверждения не оставляет превью как «применённое» изменение."""
+    await _setup(client)
+    _script(monkeypatch, [[_write("draft.html", "<h1>draft</h1>")]])
+    chat, job = await _start(client, "confirm")
+    await _wait(client, job["id"], lambda b: (b["result"] or {}).get("approval"))
+    # Останавливаем задачу, не подтвердив изменение.
+    await client.post(f"/api/jobs/{job['id']}/cancel")
+    await _wait(client, job["id"], lambda b: b["status"] in ("done", "error", "cancelled"))
+    detail = (await client.get(f"/api/chats/{chat['id']}")).json()
+    tool = detail["messages"][-1]["meta"]["tools"][-1]
+    assert tool["status"] == "error"
+    assert "change" not in tool  # превью убрано — файл не считается созданным
+    root = Path(next(p for p in (await client.get("/api/projects")).json() if p["id"] == detail["project_id"])["path"])
+    assert not (root / "draft.html").exists()
