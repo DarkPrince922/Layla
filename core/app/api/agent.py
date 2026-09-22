@@ -11,12 +11,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db import get_session
+from app.db import get_session, get_sessionmaker
 from app.models.agent import AgentConfig, AgentRun, AgentStep
 from app.models.enums import AgentRunStatus, Domain, EgressRoute
+from app.models.job import Job
 from app.models.pentest import Engagement, Finding, Scope, Venue
 from app.models.persona import Persona
+from app.models.provider import Provider
 from app.models.user import User
+from app.schemas.job import JobOut
 from app.schemas.agent import (
     AgentConfigIn,
     AgentConfigOut,
@@ -26,7 +29,7 @@ from app.schemas.agent import (
     TriageRequest,
     TriageResult,
 )
-from app.services import audit, orchestrator, provider_client, venue_executor
+from app.services import audit, jobs, orchestrator, provider_client, venue_executor
 from app.services.auth import get_current_user
 from app.services.venue_gate import ActionBlocked
 from app.services.egress import EgressBlocked
@@ -287,6 +290,60 @@ async def triage_finding(
         raise HTTPException(status_code=502, detail=f"Ошибка триажа: {exc}") from exc
     await audit.record(session, actor=user.id, action="finding.triage", target=fid)
     return TriageResult(finding_id=fid, verdict=verdict.strip())
+
+
+@router.post("/engagements/{eid}/findings/{fid}/triage/bg", response_model=JobOut, status_code=202)
+async def triage_finding_bg(
+    eid: str,
+    fid: str,
+    body: TriageRequest,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+    maker=Depends(get_sessionmaker),
+) -> Job:
+    """Триаж находки в ФОНЕ: вердикт и размышление модели видны в панели «В работе»."""
+    await _engagement(session, user, eid)
+    f = await session.get(Finding, fid)
+    if f is None or f.engagement_id != eid:
+        raise HTTPException(status_code=404, detail="Находка не найдена")
+    model = await _pick_model(session, user, body.model)
+    provider = await provider_client.resolve_provider(session, user.id, model)
+    if provider is None:
+        raise HTTPException(status_code=400, detail="Нет активного провайдера")
+    provider_id = provider.id
+    sev = f.severity.value if hasattr(f.severity, "value") else str(f.severity)
+    messages = [
+        {"role": "system", "content": "Ты — аналитик безопасности. Кратко оцени находку: "
+         "вероятность истинного срабатывания, влияние и следующий безопасный шаг проверки. "
+         "Без активных действий."},
+        {"role": "user", "content": f"Находка: [{sev}] {f.type}\nURL: {f.method or ''} {f.url or ''}\n"
+         f"Параметр: {f.param or '-'}\nОписание: {f.description or '-'}"},
+    ]
+    owner_id = user.id
+    job = await jobs.create_job(
+        session, owner_id=owner_id, domain="pentest", kind="triage",
+        title=f"Триаж · {f.type}",
+    )
+
+    async def worker(h: jobs.JobHandle) -> None:
+        prov = await h.session.get(Provider, provider_id)
+        key = await provider_client.pick_key(h.session, prov)
+        await h.step("Анализирую находку", progress=0.3)
+        parts: list[str] = []
+        async for kind, text in provider_client.stream_chat(prov, key, model, messages):
+            if kind == "reasoning":
+                await h.reason(text)
+            else:
+                parts.append(text)
+        await h.reason("", flush=True)
+        verdict = "".join(parts).strip()
+        await h.set_result({"finding_id": fid, "verdict": verdict})
+        await audit.record(h.session, actor=owner_id, action="finding.triage", target=fid)
+        await h.session.commit()
+        await h.step("Готово", progress=1.0)
+
+    jobs.launch(maker, job.id, worker)
+    return job
 
 
 # ---------- настройки Ultracode ----------

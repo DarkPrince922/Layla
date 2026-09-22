@@ -19,11 +19,21 @@ from app.api.projects import _owned_project, _project_root
 from app.db import get_session, get_sessionmaker
 from app.models.chat import Chat, Message
 from app.models.enums import Domain
+from app.models.job import Job
 from app.models.persona import Persona
+from app.models.provider import Provider
 from app.models.user import User
 from app.schemas.chat import ChatCreate, ChatDetail, ChatOut, MessageOut, SendMessageRequest
-from app.services import audit, project_agent, provider_client
+from app.schemas.job import JobOut
+from app.services import audit, jobs, project_agent, provider_client
 from app.services.auth import get_current_user
+
+_TOOL_LABELS = {
+    "list_files": "Обзор папки",
+    "read_file": "Чтение",
+    "write_file": "Запись",
+    "delete_file": "Удаление",
+}
 
 router = APIRouter(prefix="/chats", tags=["chats"])
 
@@ -261,3 +271,99 @@ async def send_message(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.post("/{chat_id}/agent-run", response_model=JobOut, status_code=202)
+async def agent_run_bg(
+    chat_id: str,
+    body: SendMessageRequest,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+    maker: async_sessionmaker[AsyncSession] = Depends(get_sessionmaker),
+) -> Job:
+    """Запустить кодинг-агента в ФОНЕ для проектного чата.
+
+    Возвращает задачу сразу; агент создаёт/меняет файлы проекта в фоне, а его
+    шаги, размышление и дифы видны в панели «В работе». Ответ ассистента и
+    изменения сохраняются в историю чата.
+    """
+    chat = await _owned_chat(session, user, chat_id)
+    if not chat.project_id:
+        raise HTTPException(status_code=400, detail="Фоновый агент доступен только в чате проекта")
+    project = await _owned_project(session, user, chat.project_id)
+    if chat.domain != Domain.code:
+        raise HTTPException(status_code=400, detail="Файловые инструменты доступны в разделе Код")
+    root = _project_root(project)
+
+    permissions = None
+    if chat.persona_id:
+        persona = await session.get(Persona, chat.persona_id)
+        if persona is None or (not persona.is_builtin and persona.owner_id != user.id):
+            raise HTTPException(status_code=404, detail="Персона не найдена")
+        permissions = persona.allowed_tools or []
+
+    model = body.model or chat.model
+    if not model:
+        raise HTTPException(status_code=400, detail="Не выбрана модель")
+    provider = await provider_client.resolve_provider(session, user.id, model)
+    if provider is None:
+        raise HTTPException(status_code=400, detail="Модель недоступна: нет активного провайдера.")
+    provider_id = provider.id
+
+    session.add(Message(chat_id=chat_id, role="user", content=body.content))
+    await session.commit()
+    payload = await _build_messages(session, chat)
+    assistant = Message(chat_id=chat_id, role="assistant", content="", meta={})
+    session.add(assistant)
+    await session.commit()
+    msg_id = assistant.id
+
+    owner_id = user.id
+    project_id = chat.project_id
+    job = await jobs.create_job(
+        session, owner_id=owner_id, domain="code", kind="project.agent", title=body.content[:80]
+    )
+
+    async def worker(h: jobs.JobHandle) -> None:
+        prov = await h.session.get(Provider, provider_id)
+        key = await provider_client.pick_key(h.session, prov)
+        full: list[str] = []
+        reasoning_all: list[str] = []
+        tools: dict[str, dict] = {}
+
+        async def persist(change: dict | None = None) -> None:
+            msg = await h.session.get(Message, msg_id)
+            if msg is None:
+                return
+            msg.content = "".join(full)
+            msg.meta = {"reasoning": "".join(reasoning_all), "tools": list(tools.values()), "error": None}
+            if change:
+                await audit.record(
+                    h.session,
+                    actor=owner_id,
+                    action="project.agent." + change["operation"],
+                    target=project_id,
+                    meta={"path": change["path"]},
+                )
+            await h.session.commit()
+
+        await h.step("Агент анализирует задачу", progress=0.1)
+        async for event in project_agent.run(prov, key, model, payload, root, permissions):
+            if "delta" in event:
+                full.append(event["delta"])
+            elif "reasoning" in event:
+                reasoning_all.append(event["reasoning"])
+                await h.reason(event["reasoning"])
+            elif "tool" in event:
+                tool = event["tool"]
+                tools[tool["id"]] = tool
+                if tool["status"] != "running":
+                    label = _TOOL_LABELS.get(tool["name"], tool["name"])
+                    await h.step(f"{label}: {tool.get('path', '')}")
+                    await persist(tool.get("change"))
+        await persist()
+        await h.set_result({"chat_id": chat_id, "message_id": msg_id})
+        await h.step("Готово", progress=1.0)
+
+    jobs.launch(maker, job.id, worker)
+    return job

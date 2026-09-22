@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { Send, Bot, User as UserIcon, Square, Plus } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Send, Bot, User as UserIcon, Square, Plus, Moon } from "lucide-react";
 import {
   api,
   streamChat,
@@ -46,9 +46,11 @@ export function ChatPanel({
   const [busy, setBusy] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(!!projectId);
   const [error, setError] = useState<string | null>(null);
+  const [bgNote, setBgNote] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const historySequence = useRef(0);
+  const qc = useQueryClient();
 
   const { data: personas = [] } = useQuery({
     queryKey: ["personas"],
@@ -220,6 +222,28 @@ export function ChatPanel({
       }));
       setBusy(false);
       abortRef.current = null;
+    }
+  }
+
+  async function runBackground() {
+    const content = input.trim();
+    if (!content || busy || loadingHistory) return;
+    if (!model) {
+      setError("Добавьте и активируйте провайдера в настройках, чтобы выбрать модель.");
+      return;
+    }
+    setError(null);
+    setBgNote(null);
+    try {
+      const id = await ensureChat(content);
+      await api.post(`/chats/${id}/agent-run`, { content, model });
+      setInput("");
+      qc.invalidateQueries({ queryKey: ["jobs", "active"] });
+      setBgNote(
+        "Задача запущена в фоне — следите за прогрессом в панели «В работе» слева. Можно переключиться в другой домен; результат появится в этом чате по завершении.",
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось запустить фоновую задачу");
     }
   }
 
@@ -408,20 +432,38 @@ export function ChatPanel({
               <Square className="h-4 w-4" />
             </button>
           ) : (
-            <button
-              onClick={send}
-              disabled={!input.trim() || loadingHistory}
-              aria-label="Отправить"
-              className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-40"
-            >
-              <Send className="h-4 w-4" />
-            </button>
+            <>
+              {projectId && (
+                <button
+                  onClick={runBackground}
+                  disabled={!input.trim() || loadingHistory}
+                  title="Запустить агента в фоне"
+                  aria-label="Запустить в фоне"
+                  className="grid h-10 w-10 shrink-0 place-items-center rounded-lg border border-ink-600 text-neutral-300 hover:bg-ink-700 disabled:opacity-40"
+                >
+                  <Moon className="h-4 w-4" />
+                </button>
+              )}
+              <button
+                onClick={send}
+                disabled={!input.trim() || loadingHistory}
+                aria-label="Отправить"
+                className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-40"
+              >
+                <Send className="h-4 w-4" />
+              </button>
+            </>
           )}
         </div>
+        {bgNote && (
+          <p className="mt-2 rounded border border-indigo-500/30 bg-indigo-500/10 px-2 py-1.5 text-[10px] leading-relaxed text-indigo-200">
+            {bgNote}
+          </p>
+        )}
         {projectId && (
           <p className="mt-2 text-[10px] leading-relaxed text-neutral-500">
             {canWrite
-              ? "Изменения применяются к файлам проекта и сохраняются в истории чата."
+              ? "Луна — запустить агента в фоне; изменения применяются к файлам проекта и сохраняются в истории чата."
               : "Файловые действия ограничены правами выбранной персоны."}
           </p>
         )}

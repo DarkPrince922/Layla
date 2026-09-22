@@ -108,6 +108,7 @@ function JobDetail({ id, onClose }: { id: string; onClose: () => void }) {
   }
 
   const designId = job?.result?.design_id as string | undefined;
+  const verdict = job?.result?.verdict as string | undefined;
   const finished = job && job.status !== "running" && job.status !== "queued";
 
   return (
@@ -156,6 +157,15 @@ function JobDetail({ id, onClose }: { id: string; onClose: () => void }) {
               </div>
             </details>
           ) : null}
+
+          {verdict && (
+            <div>
+              <div className="mb-1 text-[11px] uppercase tracking-wide text-neutral-500">Вердикт</div>
+              <div className="whitespace-pre-wrap rounded-md border border-ink-700 bg-ink-950 p-2 text-xs text-neutral-300">
+                {verdict}
+              </div>
+            </div>
+          )}
 
           {job?.error && (
             <p className="rounded border border-red-500/30 bg-red-500/10 p-2 text-xs text-red-300">{job.error}</p>
