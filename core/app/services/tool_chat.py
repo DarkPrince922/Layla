@@ -11,7 +11,7 @@ import json
 
 import httpx
 
-from app.services.provider_client import _base, _headers, _is_anthropic_native
+from app.services.provider_client import _headers, _is_anthropic_native, endpoint
 
 MAX_TURN_BYTES = 4_000_000
 
@@ -35,6 +35,7 @@ def anthropic_messages(messages: list[dict]) -> tuple[str, list[dict]]:
                 }
             )
         else:
+            blocks.extend(message.get("_anthropic_thinking", []))
             if message.get("content"):
                 blocks.append({"type": "text", "text": message["content"]})
             for call in message.get("tool_calls", []):
@@ -74,23 +75,25 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
                 for t in tools
             ],
         }
-        url = f"{_base(provider)}/v1/messages"
+        url = endpoint(provider, "messages")
     else:
         payload = {
             "model": model,
-            "messages": [{k: v for k, v in m.items() if k != "is_error"} for m in messages],
+            "messages": [{k: v for k, v in m.items() if k != "is_error" and not k.startswith("_")} for m in messages],
             "stream": True,
             "tools": tools,
             "tool_choice": "auto",
             "max_tokens": 8192,
         }
-        url = f"{_base(provider)}/chat/completions"
+        url = endpoint(provider, "chat/completions")
 
     if not tools:
         payload.pop("tools", None)
         payload.pop("tool_choice", None)
 
     calls: dict[int, dict] = {}
+    initial_inputs: dict[int, dict] = {}
+    thinking: dict[int, dict] = {}
     finish = None
     stopped = False
     size = 0
@@ -123,7 +126,10 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
                     index = event.get("index", 0)
                     if kind == "content_block_start":
                         block = event.get("content_block", {})
+                        if block.get("type") in ("thinking", "redacted_thinking"):
+                            thinking[index] = dict(block)
                         if block.get("type") == "tool_use":
+                            initial_inputs[index] = block.get("input") or {}
                             calls[index] = {
                                 "id": block["id"],
                                 "type": "function",
@@ -136,7 +142,11 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
                         elif delta.get("text"):
                             yield "content", delta["text"]
                         elif delta.get("thinking"):
+                            block = thinking.setdefault(index, {"type": "thinking", "thinking": "", "signature": ""})
+                            block["thinking"] = block.get("thinking", "") + delta["thinking"]
                             yield "reasoning", delta["thinking"]
+                        elif delta.get("type") == "signature_delta" and index in thinking:
+                            thinking[index]["signature"] = thinking[index].get("signature", "") + delta.get("signature", "")
                     elif kind == "message_delta":
                         finish = event.get("delta", {}).get("stop_reason")
                     elif kind == "message_stop":
@@ -150,7 +160,7 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
                     finish = choice.get("finish_reason") or finish
                     delta = choice.get("delta") or {}
                     for part in delta.get("tool_calls") or []:
-                        index = part["index"]
+                        index = part.get("index", 0)
                         call = calls.setdefault(
                             index,
                             {
@@ -159,9 +169,15 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
                                 "function": {"name": "", "arguments": ""},
                             },
                         )
-                        call["id"] += part.get("id") or ""
-                        for field in ("name", "arguments"):
-                            call["function"][field] += part.get("function", {}).get(field) or ""
+                        # Some compatible gateways repeat id/name in every chunk.
+                        for target, field, value in (
+                            (call, "id", part.get("id") or ""),
+                            (call["function"], "name", part.get("function", {}).get("name") or ""),
+                        ):
+                            old = target[field]
+                            if value and value != old:
+                                target[field] = value if value.startswith(old) else old + value
+                        call["function"]["arguments"] += part.get("function", {}).get("arguments") or ""
                     if delta.get("content"):
                         yield "content", delta["content"]
                     reasoning = delta.get("reasoning_content") or delta.get("reasoning")
@@ -174,9 +190,14 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
         raise RuntimeError(
             "Ответ модели прерван или достиг лимита. Незавершённые вызовы не применены."
         )
+    if thinking:
+        yield "provider_context", {"_anthropic_thinking": [thinking[i] for i in sorted(thinking)]}
     if calls:
-        if finish != ("tool_use" if native else "tool_calls"):
+        if finish not in (("tool_use",) if native else ("tool_calls", "stop")):
             raise RuntimeError("Провайдер не завершил вызов инструментов")
+        for index, call in calls.items():
+            if not call["function"]["arguments"] and index in initial_inputs:
+                call["function"]["arguments"] = json.dumps(initial_inputs[index], ensure_ascii=False)
         result = [calls[i] for i in sorted(calls)]
         ids = [c["id"] for c in result]
         if len(set(ids)) != len(ids) or any(not i or len(i) > 200 for i in ids):

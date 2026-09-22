@@ -5,10 +5,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db import get_session
+from app.db import get_session, get_sessionmaker
 from app.models.job import Job
 from app.models.user import User
 from app.schemas.job import JobOut
+from app.services import jobs as job_service
 from app.services.auth import get_current_user
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -19,11 +20,14 @@ _ACTIVE = ("queued", "running")
 @router.get("", response_model=list[JobOut])
 async def list_jobs(
     active: bool = Query(default=False),
-    limit: int = Query(default=30, le=100),
+    limit: int = Query(default=100, ge=1, le=500),
+    chat_id: str | None = None,
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> list[Job]:
     query = select(Job).where(Job.owner_id == user.id)
+    if chat_id:
+        query = query.where(Job.chat_id == chat_id)
     if active:
         query = query.where(Job.status.in_(_ACTIVE))
     query = query.order_by(Job.created_at.desc()).limit(limit)
@@ -56,3 +60,17 @@ async def dismiss_job(
         raise HTTPException(status_code=409, detail="Нельзя убрать активную задачу")
     await session.delete(job)
     await session.commit()
+
+
+@router.post("/{job_id}/cancel", response_model=JobOut)
+async def cancel_job(job_id: str, user: User = Depends(get_current_user),
+                     session: AsyncSession = Depends(get_session),
+                     maker=Depends(get_sessionmaker)) -> Job:
+    job = await get_job(job_id, user, session)
+    if job.status in _ACTIVE:
+        await session.rollback()
+        if not await job_service.cancel(job_id, maker):
+            # A worker missing from this process is not silently reported as stopped.
+            raise HTTPException(status_code=409, detail="Задача уже завершается. Обновите её состояние.")
+        job = await session.get(Job, job_id, populate_existing=True)
+    return job

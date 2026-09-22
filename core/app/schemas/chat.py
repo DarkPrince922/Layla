@@ -3,6 +3,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from app.models.enums import Domain
+from app.schemas.job import JobOut
 
 
 class ChatCreate(BaseModel):
@@ -35,9 +36,11 @@ class MessageOut(BaseModel):
 
 
 class ChatDetail(ChatOut):
-    messages: list[MessageOut] = []
+    messages: list[MessageOut] = Field(default_factory=list)
+    last_job: JobOut | None = None
 
 
 class SendMessageRequest(BaseModel):
-    content: str = Field(min_length=1)
+    content: str = Field(min_length=1, max_length=100_000)
+    request_id: str | None = Field(default=None, min_length=1, max_length=64)
     model: str | None = None  # переопределяет модель чата на этот запрос

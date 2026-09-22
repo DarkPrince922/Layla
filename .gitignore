@@ -16,6 +16,7 @@ htmlcov/
 # --- Node / frontend ---
 node_modules/
 .next/
+*.tsbuildinfo
 out/
 dist/
 build/

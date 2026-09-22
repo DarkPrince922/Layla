@@ -11,6 +11,8 @@ def test_upgrade_legacy_chat_keeps_history(tmp_path):
         db.executescript("""
             CREATE TABLE alembic_version (version_num VARCHAR(32) PRIMARY KEY);
             INSERT INTO alembic_version VALUES ('0006_provmodels');
+            CREATE TABLE users (id VARCHAR(36) PRIMARY KEY);
+            CREATE TABLE personas (id VARCHAR(36) PRIMARY KEY, is_builtin BOOLEAN, kind VARCHAR(32), allowed_tools JSON);
             CREATE TABLE projects (id VARCHAR(36) PRIMARY KEY);
             CREATE TABLE chats (id VARCHAR(36) PRIMARY KEY, title VARCHAR(300));
             INSERT INTO chats VALUES ('existing', 'Keep this chat');

@@ -8,6 +8,7 @@ import { AccountsLab } from "@/components/AccountsLab";
 import { KnowledgeSettings } from "@/components/KnowledgeSettings";
 import { IntegrationsSettings } from "@/components/IntegrationsSettings";
 import { AgentSettings } from "@/components/AgentSettings";
+import { AppearanceSettings } from "@/components/AppearanceSettings";
 import { GeneralSettings } from "@/components/GeneralSettings";
 import { SecuritySettings } from "@/components/SecuritySettings";
 import { UsersSettings } from "@/components/UsersSettings";
@@ -22,6 +23,7 @@ export default function SettingsSectionPage({ params }: { params: { section: str
   if (section.slug === "knowledge") return <KnowledgeSettings />;
   if (section.slug === "integrations") return <IntegrationsSettings />;
   if (section.slug === "agent") return <AgentSettings />;
+  if (section.slug === "appearance") return <AppearanceSettings />;
   if (section.slug === "general") return <GeneralSettings />;
   if (section.slug === "security") return <SecuritySettings />;
   if (section.slug === "users") return <UsersSettings />;
@@ -31,10 +33,8 @@ export default function SettingsSectionPage({ params }: { params: { section: str
     <div>
       <h1 className="text-xl font-semibold">{section.label}</h1>
       <p className="mt-1 text-sm text-neutral-500">{section.blurb}</p>
-      <div className="mt-6 rounded-lg border border-dashed border-ink-700 p-8 text-center text-sm text-neutral-600">
-        Раздел «<span className="text-neutral-400">{section.label}</span>» входит в
-        оболочку Layla (M0). Его элементы управления подключаются на следующем
-        этапе.
+      <div className="surface-card mt-6 py-12 text-center text-sm text-neutral-400">
+        Настройки раздела «{section.label}» пока недоступны.
       </div>
     </div>
   );

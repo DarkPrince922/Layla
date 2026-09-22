@@ -1,9 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Sparkles, Monitor, Tablet, Smartphone, Code2, Eye } from "lucide-react";
-import { api, type Design, type Job, type ModelInfo } from "@/lib/api";
+import { ArrowLeft, Palette, Sparkles, Monitor, Tablet, Smartphone, Code2, Eye } from "lucide-react";
+import { api, type Design, type ModelInfo, type Job } from "@/lib/api";
 
 const STACKS = ["html", "react", "vue"];
 const ARTIFACTS = ["Landing", "Dashboard", "Pricing", "Mobile app", "Email", "Editorial", "Slides"];
@@ -19,6 +19,7 @@ const BREAKPOINTS = {
 
 export function DesignDomain() {
   const qc = useQueryClient();
+  const latest = useRef<string>();
   const [brief, setBrief] = useState({
     artifact_type: "Landing",
     direction: "Modern minimal",
@@ -34,8 +35,8 @@ export function DesignDomain() {
   const [active, setActive] = useState<Design | null>(null);
   const [view, setView] = useState<"preview" | "code">("preview");
   const [bp, setBp] = useState<keyof typeof BREAKPOINTS>("desktop");
+  const [showBrief, setShowBrief] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [note, setNote] = useState<string | null>(null);
 
   const { data: models = [] } = useQuery({
     queryKey: ["models"],
@@ -46,25 +47,33 @@ export function DesignDomain() {
     queryFn: () => api.get<Design[]>("/designs"),
   });
 
-  // Генерация идёт в ФОНЕ: можно уйти в другой домен, прогресс виден в панели
-  // «В работе». Готовый дизайн подтянется в историю по завершении задачи.
   const generate = useMutation({
     mutationFn: () =>
       api.post<Job>("/designs/generate", { stack, brief, model: model || undefined }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["jobs", "active"] });
+      qc.invalidateQueries({ queryKey: ["designs"] });
+      qc.invalidateQueries({ queryKey: ["jobs"] });
+      setShowBrief(false);
       setError(null);
-      setNote("Генерация запущена в фоне — следите за прогрессом в панели «В работе» слева. Можно переключиться в другой домен.");
     },
     onError: (e) => setError(e instanceof Error ? e.message : "Ошибка генерации"),
   });
 
+  useEffect(() => {
+    if (designs.length && latest.current !== designs[0].id) {
+      const linked = !latest.current && new URLSearchParams(window.location.search).get("design");
+      latest.current = designs[0].id;
+      setActive(designs.find(d => d.id === linked) || designs[0]); setShowBrief(false);
+    }
+  }, [designs]);
   const html = active?.files?.[0]?.content ?? "";
 
   return (
-    <div className="flex h-full">
+    <div className="domain-workspace flex h-full min-w-0 flex-col">
+      <header className="workspace-toolbar"><span className="grid h-10 w-10 place-items-center rounded-xl bg-accent-500/10 text-accent-300"><Palette className="h-5 w-5" /></span><div className="workspace-title"><h1>Дизайн</h1><p>Превратите идею в интерфейс</p></div><button className="secondary-button text-xs" onClick={() => setShowBrief(!showBrief)}>{showBrief ? "Результат" : "Изменить бриф"}</button></header>
+      <div className="domain-columns" data-detail={!showBrief}>
       {/* Левая колонка: бриф */}
-      <div className="flex w-80 shrink-0 flex-col overflow-y-auto border-r border-ink-700 bg-ink-900 p-4">
+      <div className="domain-list p-5">
         <h2 className="mb-3 text-sm font-semibold">Бриф дизайна</h2>
 
         <label className="mb-1 block text-[11px] uppercase text-neutral-500">Стек</label>
@@ -74,7 +83,7 @@ export function DesignDomain() {
               key={s}
               onClick={() => setStack(s)}
               className={`flex-1 rounded px-2 py-1 text-xs ${
-                stack === s ? "bg-indigo-600 text-white" : "bg-ink-800 text-neutral-400"
+                stack === s ? "bg-accent-600 text-white" : "bg-ink-800 text-neutral-400"
               }`}
             >
               {s === "html" ? "Plain HTML" : s === "react" ? "React" : "Vue"}
@@ -106,7 +115,7 @@ export function DesignDomain() {
           </select>
         </Field>
 
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <div className="grid grid-cols-2 gap-2">
           <Field label="Тема">
             <select
               value={brief.theme}
@@ -176,17 +185,11 @@ export function DesignDomain() {
         <button
           onClick={() => generate.mutate()}
           disabled={generate.isPending}
-          className="flex items-center justify-center gap-1.5 rounded-md bg-indigo-600 px-3 py-2 text-sm text-white hover:bg-indigo-500 disabled:opacity-50"
+          className="flex items-center justify-center gap-1.5 rounded-md bg-accent-600 px-3 py-2 text-sm text-white hover:bg-accent-500 disabled:opacity-50"
         >
           <Sparkles className="h-4 w-4" />
-          {generate.isPending ? "Запуск…" : "Сгенерировать в фоне"}
+          {generate.isPending ? "Генерация…" : "Сгенерировать"}
         </button>
-
-        {note && (
-          <p className="mt-2 rounded border border-indigo-500/30 bg-indigo-500/10 px-2 py-1.5 text-[11px] leading-relaxed text-indigo-200">
-            {note}
-          </p>
-        )}
 
         {designs.length > 0 && (
           <div className="mt-4">
@@ -195,7 +198,7 @@ export function DesignDomain() {
               {designs.map((d) => (
                 <button
                   key={d.id}
-                  onClick={() => setActive(d)}
+                  onClick={() => { setActive(d); setShowBrief(false); }}
                   className={`block w-full truncate rounded px-2 py-1 text-left text-xs ${
                     active?.id === d.id ? "bg-ink-700 text-white" : "text-neutral-400 hover:bg-ink-800"
                   }`}
@@ -209,36 +212,35 @@ export function DesignDomain() {
       </div>
 
       {/* Правая часть: превью / код */}
-      <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex items-center gap-2 border-b border-ink-700 bg-ink-900 px-4 py-2">
+      <div className="domain-detail">
+        <button className="domain-back items-center gap-2 px-4 py-3 text-sm text-neutral-400" onClick={() => setShowBrief(true)}><ArrowLeft className="h-4 w-4" />К брифу</button>
+        <div className="flex flex-wrap items-center gap-2 border-b border-ink-700/60 px-4 py-3">
           <div className="flex gap-1">
             <ToolbarBtn active={view === "preview"} onClick={() => setView("preview")}>
-              <Eye className="h-3.5 w-3.5" /> Preview
+              <Eye className="h-3.5 w-3.5" /> Превью
             </ToolbarBtn>
             <ToolbarBtn active={view === "code"} onClick={() => setView("code")}>
-              <Code2 className="h-3.5 w-3.5" /> Code
+              <Code2 className="h-3.5 w-3.5" /> Код
             </ToolbarBtn>
           </div>
           {view === "preview" && (
             <div className="ml-auto flex gap-1">
-              <ToolbarBtn active={bp === "desktop"} onClick={() => setBp("desktop")}>
+              <ToolbarBtn label="Компьютер" active={bp === "desktop"} onClick={() => setBp("desktop")}>
                 <Monitor className="h-3.5 w-3.5" />
               </ToolbarBtn>
-              <ToolbarBtn active={bp === "tablet"} onClick={() => setBp("tablet")}>
+              <ToolbarBtn label="Планшет" active={bp === "tablet"} onClick={() => setBp("tablet")}>
                 <Tablet className="h-3.5 w-3.5" />
               </ToolbarBtn>
-              <ToolbarBtn active={bp === "mobile"} onClick={() => setBp("mobile")}>
+              <ToolbarBtn label="Телефон" active={bp === "mobile"} onClick={() => setBp("mobile")}>
                 <Smartphone className="h-3.5 w-3.5" />
               </ToolbarBtn>
             </div>
           )}
         </div>
 
-        <div className="min-h-0 flex-1 overflow-auto bg-neutral-950 p-4">
+        <div className="min-h-0 flex-1 overflow-auto bg-ink-950/40 p-4">
           {!active ? (
-            <div className="grid h-full place-items-center text-sm text-neutral-600">
-              Заполните бриф и нажмите «Сгенерировать».
-            </div>
+            <div className="grid h-full place-items-center p-4 text-center"><div className="max-w-sm"><span className="empty-orb"><Palette className="h-6 w-6" /></span><h2 className="text-xl font-semibold">Каким будет ваш следующий проект?</h2><p className="mt-3 text-sm leading-7 text-neutral-400">Выберите стиль и расскажите об идее. Здесь появится готовый интерфейс.</p></div></div>
           ) : view === "preview" ? (
             <div className="mx-auto h-full bg-white" style={{ width: BREAKPOINTS[bp], maxWidth: "100%" }}>
               {/* Изолированный sandbox: скрипты выполняются, доступа к родителю нет. */}
@@ -255,6 +257,7 @@ export function DesignDomain() {
             </pre>
           )}
         </div>
+      </div>
       </div>
     </div>
   );
@@ -273,14 +276,18 @@ function ToolbarBtn({
   active,
   onClick,
   children,
+  label,
 }: {
   active: boolean;
+  label?: string;
   onClick: () => void;
   children: React.ReactNode;
 }) {
   return (
     <button
       onClick={onClick}
+      aria-label={label}
+      aria-pressed={active}
       className={`flex items-center gap-1 rounded px-2 py-1 text-xs ${
         active ? "bg-ink-700 text-white" : "text-neutral-400 hover:bg-ink-800"
       }`}

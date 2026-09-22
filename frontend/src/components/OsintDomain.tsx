@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ExternalLink, Globe2, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
 import {
@@ -11,7 +11,7 @@ import {
 import { ChatPanel } from "@/components/ChatPanel";
 
 const inputStyle = "w-full rounded-md border border-ink-700 bg-ink-800 px-3 py-2 text-sm disabled:opacity-40";
-const buttonStyle = "rounded-md bg-indigo-600 px-3 py-2 text-xs text-white disabled:opacity-40";
+const buttonStyle = "rounded-md bg-accent-600 px-3 py-2 text-xs text-white disabled:opacity-40";
 const subjectLabels: Record<SubjectType, string> = { domain: "Домен / IP", person: "Человек", company: "Компания" };
 const providerLabels: Record<string, string> = {
   shodan: "Shodan", virustotal: "VirusTotal", securitytrails: "SecurityTrails", urlscan: "urlscan.io", manual: "Вручную",
@@ -30,7 +30,7 @@ function SourceLink({ url, children }: { url: string; children?: React.ReactNode
   // Stored provider data remains untrusted even when displayed in an old case.
   if (!/^https?:\/\//i.test(url)) return <span>{children || url}</span>;
   return <a href={url} target="_blank" rel="noopener noreferrer"
-    className="inline-flex max-w-full items-center gap-1 break-all text-xs text-cyan-300 hover:underline">
+    className="inline-flex max-w-full items-center gap-1 break-all text-xs text-accent-300 hover:underline">
     {children || url} <ExternalLink className="h-3 w-3 shrink-0" />
   </a>;
 }
@@ -62,7 +62,7 @@ function Artifacts({ caseId }: { caseId: string }) {
       </p>}
     {items.map((a) => <article key={a.id} className="rounded-lg border border-ink-700 bg-ink-900 p-4">
       <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px] text-neutral-500">
-        <span className="rounded bg-cyan-500/10 px-2 py-0.5 text-cyan-300">{providerLabels[a.provider] || a.provider}</span>
+        <span className="rounded bg-accent-500/10 px-2 py-0.5 text-accent-300">{providerLabels[a.provider] || a.provider}</span>
         <span className="break-all">{a.target}</span><time className="ml-auto">Получено {date(a.created_at)}</time>
       </div>
       <h3 className="break-words text-sm font-medium">{a.title}</h3>
@@ -211,7 +211,7 @@ function CaseWorkspace({ item, onDelete }: { item: OsintCase; onDelete: () => vo
             className={`rounded-md px-3 py-1.5 text-xs ${tab === id ? "bg-ink-700 text-white" : "text-neutral-500 hover:text-white"}`}>{label}</button>)}
       </nav>
     </div>
-    <div className="min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
+    <div key={tab} className="pane-enter min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
       {tab === "artifacts" ? <Artifacts caseId={item.id} /> : tab === "lookups" ? <Timeline caseId={item.id} /> : <Sources caseId={item.id} />}
     </div>
   </div>;
@@ -226,7 +226,8 @@ function CasePanel({ id, onDelete }: { id: string; onDelete: () => void }) {
 
 export function OsintDomain() {
   const qc = useQueryClient();
-  const [view, setView] = useState("cases");
+  const [view, setView] = useState("chat");
+  useEffect(() => { const open = () => setView("chat"); window.addEventListener("layla:open-chat", open); return () => window.removeEventListener("layla:open-chat", open); }, []);
   const [selected, setSelected] = useState<string | null>(null);
   const [q, setQ] = useState("");
   const [filter, setFilter] = useState("");
@@ -245,16 +246,17 @@ export function OsintDomain() {
       setShowCreate(false); setForm({ subject: "", subject_type: "domain" }); setQ(""); setFilter("");
     },
   });
-  return <div className="flex h-full min-w-0 flex-col">
-    <header className="flex flex-wrap items-center gap-3 border-b border-ink-700 bg-ink-900 px-4 py-3 md:px-6">
-      <Search className="h-5 w-5 text-cyan-400" /><h1 className="text-sm font-semibold">OSINT</h1>
+  return <div className="domain-workspace flex h-full min-w-0 flex-col">
+    <header className="workspace-toolbar">
+      <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-accent-500/10 text-accent-300"><Search className="h-5 w-5" /></span><div className="workspace-title"><h1>OSINT</h1><p>Исследования по открытым источникам</p></div>
+      <nav className="segmented-control" aria-label="Режим OSINT">
       {[["cases", "Кейсы"], ["chat", "Чат"]].map(([id, label]) => <button key={id} onClick={() => setView(id)}
-        className={`rounded px-2.5 py-1 text-xs ${view === id ? "bg-ink-700 text-white" : "text-neutral-500"}`}>{label}</button>)}
-      <Link href="/settings/integrations" className="ml-auto text-xs text-neutral-400 hover:text-white">Настроить источники</Link>
+        className="segment" aria-pressed={view === id}>{label}</button>)}</nav>
+      <Link href="/settings/integrations" className="secondary-button text-xs">Источники</Link>
     </header>
     {view === "chat" ? <div className="min-h-0 flex-1"><ChatPanel domain="osint" /></div> :
-      <div className="flex min-h-0 flex-1">
-        <aside className={`${selected ? "hidden lg:flex" : "flex"} w-full shrink-0 flex-col border-r border-ink-700 bg-ink-900/40 lg:w-72`}>
+      <div className="domain-columns" data-detail={!!selected}>
+        <aside className="domain-list">
           <div className="space-y-3 border-b border-ink-700 p-4">
             <div className="flex items-center gap-2"><h2 className="text-sm font-medium">OSINT-кейсы</h2>
               <button onClick={() => qc.invalidateQueries({ queryKey: ["osint"] })} aria-label="Обновить кейсы"
@@ -285,7 +287,7 @@ export function OsintDomain() {
             {!query.isPending && !query.error && !cases.length && <p className="p-4 text-center text-xs leading-relaxed text-neutral-500">{q || filter ? "Кейсы не найдены." : "Кейсов пока нет. Создайте первый, чтобы собирать данные из открытых источников."}</p>}
             <ul className="space-y-1">{cases.map((item) => <li key={item.id}>
               <button onClick={() => setSelected(item.id)} aria-current={selected === item.id ? "true" : undefined}
-                className={`w-full rounded-lg border p-3 text-left ${selected === item.id ? "border-cyan-500/40 bg-cyan-500/10" : "border-transparent hover:bg-ink-800"}`}>
+                className={`w-full rounded-lg border p-3 text-left ${selected === item.id ? "border-accent-500/40 bg-accent-500/10" : "border-transparent hover:bg-ink-800"}`}>
                 <span className="block truncate text-sm">{item.subject}</span>
                 <span className="mt-1 block text-[11px] text-neutral-500">{subjectLabels[item.subject_type]} · {item.artifact_count} материалов</span>
               </button>
@@ -293,16 +295,16 @@ export function OsintDomain() {
             <More hasMore={query.hasNextPage} pending={query.isFetchingNextPage} load={() => query.fetchNextPage()} />
           </div>
         </aside>
-        <main className={`${selected ? "flex" : "hidden lg:flex"} min-w-0 flex-1 flex-col`}>
+        <div className="domain-detail">
           {selected ? <>
-            <button onClick={() => setSelected(null)} className="flex items-center gap-2 border-b border-ink-700 px-4 py-2 text-xs text-neutral-400 lg:hidden"><ArrowLeft className="h-4 w-4" /> К списку кейсов</button>
+            <button onClick={() => setSelected(null)} className="domain-back items-center gap-2 px-4 py-3 text-sm text-neutral-400"><ArrowLeft className="h-4 w-4" /> К списку кейсов</button>
             <div className="min-h-0 flex-1"><CasePanel key={selected} id={selected} onDelete={() => setSelected(null)} /></div>
           </> : <div className="grid h-full place-items-center p-8"><div className="max-w-md text-center">
-            <Globe2 className="mx-auto mb-4 h-10 w-10 text-cyan-400/70" />
+            <Globe2 className="mx-auto mb-4 h-10 w-10 text-accent-300/70" />
             <h2 className="text-lg font-medium">Исследование по открытым источникам</h2>
             <p className="mt-2 text-sm leading-relaxed text-neutral-500">Создайте или выберите кейс. Собирайте материалы, сравнивайте данные источников и сохраняйте историю запросов.</p>
           </div></div>}
-        </main>
+        </div>
       </div>}
   </div>;
 }

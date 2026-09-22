@@ -6,23 +6,31 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from collections.abc import AsyncIterator
+from contextlib import suppress
+from datetime import UTC, datetime
+from pathlib import Path
+from uuid import uuid4
 
 import anyio
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from starlette.concurrency import run_in_threadpool
 
-from app.api.projects import _owned_project, _project_root
+from app.api.projects import _default_workspace, _owned_project, _project_root
+from app.config import get_settings
 from app.db import get_session, get_sessionmaker
 from app.models.chat import Chat, Message
-from app.models.enums import Domain
 from app.models.job import Job
 from app.models.persona import Persona
 from app.models.provider import Provider
-from app.models.user import User
+from app.models.user import Project, User, Workspace
 from app.schemas.chat import ChatCreate, ChatDetail, ChatOut, MessageOut, SendMessageRequest
 from app.schemas.job import JobOut
 from app.services import audit, jobs, project_agent, provider_client
@@ -74,14 +82,14 @@ async def create_chat(
             raise HTTPException(status_code=404, detail="Персона не найдена")
     project = None
     if body.project_id:
-        if body.domain != Domain.code:
-            raise HTTPException(
-                status_code=400, detail="Файловые инструменты доступны в разделе Код"
-            )
         project = await _owned_project(session, user, body.project_id)
         _project_root(project)
         if body.workspace_id and body.workspace_id != project.workspace_id:
             raise HTTPException(status_code=400, detail="Проект из другого рабочего пространства")
+    if body.workspace_id and project is None:
+        workspace = await session.get(Workspace, body.workspace_id)
+        if workspace is None or workspace.owner_id != user.id:
+            raise HTTPException(status_code=404, detail="Рабочее пространство не найдено")
     chat = Chat(
         owner_id=user.id,
         domain=body.domain,
@@ -108,6 +116,8 @@ async def get_chat(
     )
     detail = ChatDetail.model_validate(chat)
     detail.messages = [MessageOut.model_validate(m) for m in msgs]
+    last_job = await session.scalar(select(Job).where(Job.chat_id == chat_id).order_by(Job.created_at.desc(), Job.id.desc()).limit(1))
+    detail.last_job = JobOut.model_validate(last_job) if last_job else None
     return detail
 
 
@@ -118,6 +128,9 @@ async def delete_chat(
     session: AsyncSession = Depends(get_session),
 ) -> None:
     chat = await _owned_chat(session, user, chat_id)
+    active = await session.scalar(select(Job.id).where(Job.chat_id == chat_id, Job.status.in_(jobs.ACTIVE)))
+    if active:
+        raise HTTPException(status_code=409, detail="Сначала остановите задачу этого чата")
     await session.delete(chat)
     await session.commit()
 
@@ -143,7 +156,10 @@ async def _build_messages(session: AsyncSession, chat: Chat) -> list[dict[str, s
                     + "]"
                 )
             if content:
-                out.append({"role": m.role, "content": content})
+                entry = {"role": m.role, "content": content}
+                if m.role == "assistant" and (m.meta or {}).get("reasoning"):
+                    entry["reasoning_content"] = m.meta["reasoning"]
+                out.append(entry)
     return out
 
 
@@ -171,10 +187,6 @@ async def send_message(
             permissions = persona.allowed_tools or []
         if chat.project_id:
             project = await _owned_project(session, user, chat.project_id)
-            if chat.domain != Domain.code:
-                raise HTTPException(
-                    status_code=400, detail="Файловые инструменты доступны в разделе Код"
-                )
             root = _project_root(project)
         model = body.model or chat.model
         if not model:
@@ -284,28 +296,25 @@ async def run_chat(
     session: AsyncSession = Depends(get_session),
     maker: async_sessionmaker[AsyncSession] = Depends(get_sessionmaker),
 ) -> Job:
-    """Запустить ответ ассистента в ФОНЕ (для ЛЮБОГО чата: код/osint/дизайн/пентест).
-
-    Возвращает задачу сразу; ответ и (для проектов) изменения файлов пишутся в
-    историю чата по мере выполнения. Можно закрыть панель и переключить домен —
-    задача продолжится, а прогресс/размышление видны в «В работе». Диалог
-    восстанавливается из истории при возврате.
-    """
-    chat = await _owned_chat(session, user, chat_id)
-
+    """One turn per chat, independent chats in parallel; all work is server-owned."""
+    chat = await session.scalar(select(Chat).where(Chat.id == chat_id, Chat.owner_id == user.id).with_for_update())
+    if chat is None:
+        raise HTTPException(status_code=404, detail="Чат не найден")
+    if body.request_id:
+        previous = await session.scalar(select(Job).where(Job.chat_id == chat_id, Job.request_id == body.request_id))
+        if previous:
+            return previous
+    active = await session.scalar(select(Job.id).where(Job.chat_id == chat_id, Job.status.in_(jobs.ACTIVE)))
+    if active:
+        raise HTTPException(status_code=409, detail="В этом чате уже выполняется задача. Можно открыть другой чат.")
+    if not body.content.strip():
+        raise HTTPException(status_code=400, detail="Сообщение не должно быть пустым")
     permissions = None
-    root = None
     if chat.persona_id:
         persona = await session.get(Persona, chat.persona_id)
         if persona is None or (not persona.is_builtin and persona.owner_id != user.id):
             raise HTTPException(status_code=404, detail="Персона не найдена")
         permissions = persona.allowed_tools or []
-    if chat.project_id:
-        project = await _owned_project(session, user, chat.project_id)
-        if chat.domain != Domain.code:
-            raise HTTPException(status_code=400, detail="Файловые инструменты доступны в разделе Код")
-        root = _project_root(project)
-
     model = body.model or chat.model
     if not model:
         raise HTTPException(status_code=400, detail="Не выбрана модель")
@@ -313,86 +322,116 @@ async def run_chat(
     if provider is None:
         raise HTTPException(status_code=400, detail="Модель недоступна: нет активного провайдера.")
     provider_id = provider.id
-
-    session.add(Message(chat_id=chat_id, role="user", content=body.content))
-    await session.commit()
-    payload = await _build_messages(session, chat)
-    assistant = Message(chat_id=chat_id, role="assistant", content="", meta={})
-    session.add(assistant)
-    await session.commit()
-    msg_id = assistant.id
-
     owner_id = user.id
-    project_id = chat.project_id
-    domain = chat.domain.value if hasattr(chat.domain, "value") else str(chat.domain)
-    job = await jobs.create_job(
-        session,
-        owner_id=owner_id,
-        domain=domain,
-        kind="project.agent" if root else "chat",
-        title=body.content[:80],
-    )
-    # chat_id виден сразу (ещё до завершения) — чтобы UI мог заново привязать
-    # активную задачу к чату при возврате в домен.
-    job.result = {"chat_id": chat_id, "message_id": msg_id}
-    await session.commit()
+    domain = chat.domain.value
+    created_root = None
+    if chat.project_id:
+        project = await _owned_project(session, user, chat.project_id)
+    else:
+        # OSINT, Design and Pentest also need an actual isolated output directory.
+        workspace = await _default_workspace(session, user)
+        if workspace is None:
+            raise HTTPException(status_code=400, detail="Нет рабочего пространства")
+        project_id = str(uuid4())
+        base = Path(workspace.projects_dir or get_settings().projects_dir).resolve()
+        created_root = base / project_id
+        await run_in_threadpool(lambda: created_root.mkdir(parents=True, mode=0o755))
+        project = Project(id=project_id, workspace_id=workspace.id,
+                          name=f"{domain.upper()} · {chat.title or body.content[:60]}"[:200], path=str(created_root))
+        session.add(project)
+        chat.project_id = project_id
+        chat.workspace_id = workspace.id
+    root = _project_root(project)
+    project_id = project.id
+    try:
+        chat.model = model
+        if not chat.title or chat.title == "Новый чат":
+            chat.title = body.content[:80]
+        user_message = Message(chat_id=chat_id, role="user", content=body.content,
+                               created_at=datetime.now(UTC))
+        session.add(user_message)
+        await session.flush()
+        payload = await _build_messages(session, chat)
+        assistant = Message(chat_id=chat_id, role="assistant", content="", meta={},
+                            created_at=datetime.now(UTC))
+        session.add(assistant)
+        await session.flush()
+        msg_id = assistant.id
+        job = Job(owner_id=owner_id, domain=domain, kind="project.agent", title=body.content[:80],
+                  chat_id=chat_id, request_id=body.request_id, status="queued",
+                  created_at=datetime.now(UTC),
+                  result={"chat_id": chat_id, "message_id": msg_id, "project_id": project_id})
+        session.add(job)
+        await session.commit()
+        await session.refresh(job)
+    except BaseException as exc:
+        await session.rollback()
+        if created_root:
+            with suppress(OSError):
+                created_root.rmdir()
+        if isinstance(exc, IntegrityError):
+            if body.request_id:
+                previous = await session.scalar(select(Job).where(Job.chat_id == chat_id, Job.request_id == body.request_id))
+                if previous:
+                    return previous
+            raise HTTPException(status_code=409, detail="В этом чате уже выполняется задача") from exc
+        raise
 
     async def worker(h: jobs.JobHandle) -> None:
-        prov = await h.session.get(Provider, provider_id)
-        key = await provider_client.pick_key(h.session, prov)
         full: list[str] = []
-        reasoning_all: list[str] = []
+        reasoning: list[str] = []
         tools: dict[str, dict] = {}
-        since_commit = 0
+        error = None
+        last_persist = 0.0
 
         async def persist(change: dict | None = None) -> None:
-            nonlocal since_commit
-            msg = await h.session.get(Message, msg_id)
-            if msg is None:
-                return
-            msg.content = "".join(full)
-            msg.meta = {"reasoning": "".join(reasoning_all), "tools": list(tools.values()), "error": None}
-            if change:
-                await audit.record(
-                    h.session,
-                    actor=owner_id,
-                    action="project.agent." + change["operation"],
-                    target=project_id,
-                    meta={"path": change["path"]},
-                )
-            await h.session.commit()
-            since_commit = 0
+            nonlocal last_persist
+            async with maker() as output_session:
+                msg = await output_session.get(Message, msg_id)
+                if msg is None:
+                    return
+                msg.content = "".join(full)
+                msg.meta = {"reasoning": "".join(reasoning), "tools": list(tools.values()), "error": error}
+                if change:
+                    await audit.record(output_session, actor=owner_id,
+                                       action="project.agent." + change["operation"],
+                                       target=project_id, meta={"path": change["path"]})
+                await output_session.commit()
+            last_persist = time.monotonic()
 
-        await h.step("Обрабатываю запрос", progress=0.1)
-        if root:
+        try:
+            prov = await h.session.get(Provider, provider_id)
+            if prov is None or not prov.enabled or not prov.active:
+                raise RuntimeError("Провайдер отключён или удалён. Выберите другую модель.")
+            key = await provider_client.pick_key(h.session, prov)
+            await h.step("Модель обрабатывает запрос", progress=0.05)
             async for event in project_agent.run(prov, key, model, payload, root, permissions):
                 if "delta" in event:
                     full.append(event["delta"])
                 elif "reasoning" in event:
-                    reasoning_all.append(event["reasoning"])
+                    reasoning.append(event["reasoning"])
                     await h.reason(event["reasoning"])
                 elif "tool" in event:
                     tool = event["tool"]
                     tools[tool["id"]] = tool
-                    if tool["status"] != "running":
-                        label = _TOOL_LABELS.get(tool["name"], tool["name"])
-                        await h.step(f"{label}: {tool.get('path', '')}")
-                        await persist(tool.get("change"))
-        else:
-            async for kind, text in provider_client.stream_chat(prov, key, model, payload):
-                if kind == "reasoning":
-                    reasoning_all.append(text)
-                    await h.reason(text)
-                else:
-                    full.append(text)
-                    since_commit += len(text)
-                    # Периодически сохраняем частичный ответ, чтобы он был виден
-                    # при опросе и не терялся при уходе со страницы.
-                    if since_commit >= 400:
-                        await persist()
-        await persist()
-        await h.set_result({"chat_id": chat_id, "message_id": msg_id})
-        await h.step("Готово", progress=1.0)
+                    label = _TOOL_LABELS.get(tool["name"], tool["name"])
+                    suffix = " — ошибка" if tool["status"] == "error" else " — готово" if tool["status"] == "done" else ""
+                    await h.step(f"{label}: {tool.get('path', '')}{suffix}")
+                    await persist(tool.get("change"))
+                if time.monotonic() - last_persist >= 0.7:
+                    await persist()
+            await h.step("Ответ сохранён", progress=1.0)
+        except asyncio.CancelledError:
+            error = "Задача остановлена. Выполненные изменения сохранены."
+            raise
+        except Exception as exc:
+            error = jobs.public_error(exc)
+            raise
+        finally:
+            for tool_id, tool in list(tools.items()):
+                if tool["status"] == "running":
+                    tools[tool_id] = {**tool, "status": "error", "error": error or "Вызов прерван"}
+            await persist()
 
     jobs.launch(maker, job.id, worker)
     return job

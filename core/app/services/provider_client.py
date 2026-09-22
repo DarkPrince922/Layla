@@ -31,8 +31,19 @@ def _base(provider: Provider) -> str:
     return base.rstrip("/")
 
 
+def endpoint(provider: Provider, resource: str) -> str:
+    base = _base(provider)
+    for suffix in ("/chat/completions", "/messages", "/models"):
+        if base.endswith(suffix):
+            base = base[:-len(suffix)]
+            break
+    if _is_anthropic_native(provider) and not base.endswith("/v1"):
+        base += "/v1"
+    return f"{base}/{resource}"
+
+
 def _is_anthropic_native(provider: Provider) -> bool:
-    return provider.kind == ProviderKind.anthropic and "anthropic.com" in _base(provider)
+    return provider.kind == ProviderKind.anthropic
 
 
 async def _keys_for(session: AsyncSession, provider: Provider) -> list[tuple[str, str]]:
@@ -72,8 +83,8 @@ async def resolve_provider(
         await session.scalars(
             select(Provider).where(
                 Provider.owner_id == owner_id,
-                Provider.enabled == True,  # noqa: E712
-                Provider.active == True,  # noqa: E712
+                Provider.enabled == True,
+                Provider.active == True,
             )
         )
     )
@@ -104,9 +115,9 @@ def _headers(provider: Provider, key: str | None) -> dict[str, str]:
 async def list_models(provider: Provider, key: str | None) -> list[str]:
     """Получить список моделей у провайдера (OpenAI-совместимый /models)."""
     if _is_anthropic_native(provider):
-        url = f"{_base(provider)}/v1/models"
+        url = endpoint(provider, "models")
     else:
-        url = f"{_base(provider)}/models"
+        url = endpoint(provider, "models")
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.get(url, headers=_headers(provider, key))
         resp.raise_for_status()
@@ -134,9 +145,9 @@ async def stream_chat(
         return
 
     payload = {"model": model, "messages": messages, "stream": True}
-    async with httpx.AsyncClient(timeout=None) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=15)) as client:  # noqa: SIM117
         async with client.stream(
-            "POST", f"{_base(provider)}/chat/completions",
+            "POST", endpoint(provider, "chat/completions"),
             headers=_headers(provider, key), json=payload,
         ) as resp:
             resp.raise_for_status()
@@ -150,7 +161,12 @@ async def stream_chat(
                     chunk = json.loads(data)
                 except json.JSONDecodeError:
                     continue
-                d = chunk.get("choices", [{}])[0].get("delta", {})
+                if chunk.get("error"):
+                    raise RuntimeError("Провайдер вернул ошибку ответа")
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                d = choices[0].get("delta") or {}
                 reasoning = d.get("reasoning_content") or d.get("reasoning")
                 if reasoning:
                     yield ("reasoning", reasoning)
@@ -169,12 +185,12 @@ async def _stream_anthropic(
         "model": model,
         "system": system or None,
         "messages": conv,
-        "max_tokens": 2048,
+        "max_tokens": 8192,
         "stream": True,
     }
-    async with httpx.AsyncClient(timeout=None) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=15)) as client:  # noqa: SIM117
         async with client.stream(
-            "POST", f"{_base(provider)}/v1/messages",
+            "POST", endpoint(provider, "messages"),
             headers=_headers(provider, key), json=payload,
         ) as resp:
             resp.raise_for_status()
@@ -186,6 +202,8 @@ async def _stream_anthropic(
                     evt = json.loads(data)
                 except json.JSONDecodeError:
                     continue
+                if evt.get("type") == "error":
+                    raise RuntimeError("Провайдер вернул ошибку ответа")
                 if evt.get("type") == "content_block_delta":
                     delta = evt.get("delta", {})
                     if delta.get("type") == "thinking_delta" and delta.get("thinking"):

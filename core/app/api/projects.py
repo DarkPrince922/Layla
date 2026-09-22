@@ -16,6 +16,8 @@ from starlette.concurrency import run_in_threadpool
 
 from app.config import get_settings
 from app.db import get_session
+from app.models.chat import Chat
+from app.models.job import Job
 from app.models.user import Project, User, Workspace
 from app.schemas.project import (
     FileChange,
@@ -272,5 +274,12 @@ async def delete_project(
     session: AsyncSession = Depends(get_session),
 ) -> None:
     project = await _owned_project(session, user, project_id)
+    active = await session.scalar(
+        select(Job.id).join(Chat, Job.chat_id == Chat.id).where(
+            Chat.project_id == project_id, Job.status.in_(("queued", "running"))
+        )
+    )
+    if active:
+        raise HTTPException(status_code=409, detail="В проекте выполняется задача. Сначала остановите её.")
     await session.delete(project)
     await session.commit()

@@ -30,9 +30,9 @@ export function PersonasSettings() {
       {isLoading ? (
         <p className="text-sm text-neutral-500">Загрузка…</p>
       ) : (
-        <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <ul className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           {personas.map((p) => (
-            <li key={p.id} className="rounded-lg border border-ink-700 bg-ink-900 p-4">
+            <li key={p.id} className="rounded-xl border border-ink-700/70 bg-ink-800/30 p-5">
               <div className="flex items-center gap-2">
                 <span
                   className="h-2.5 w-2.5 rounded-full"
@@ -40,12 +40,12 @@ export function PersonasSettings() {
                 />
                 <span className="text-sm font-medium">{p.name}</span>
                 {p.is_builtin && (
-                  <span className="rounded bg-ink-700 px-1.5 py-0.5 text-[10px] text-neutral-400">
+                  <span className="rounded bg-ink-700 px-1.5 py-0.5 text-[11px] text-neutral-400">
                     встроенная
                   </span>
                 )}
                 {p.hitl_required && (
-                  <span className="ml-auto rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] text-amber-300">
+                  <span className="ml-auto rounded bg-amber-500/20 px-1.5 py-0.5 text-[11px] text-amber-300">
                     HITL
                   </span>
                 )}

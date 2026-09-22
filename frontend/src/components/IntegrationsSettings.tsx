@@ -57,14 +57,14 @@ function McpRegistry() {
         <h2 className="text-sm font-semibold text-neutral-300">MCP-серверы</h2>
         <button
           onClick={() => setOpen((v) => !v)}
-          className="flex items-center gap-1 rounded-md bg-indigo-600 px-2.5 py-1 text-xs text-white"
+          className="flex items-center gap-1 rounded-md bg-accent-600 px-2.5 py-1 text-xs text-white"
         >
           <Plus className="h-3.5 w-3.5" /> Добавить
         </button>
       </div>
 
       {open && (
-        <div className="mb-3 space-y-2 rounded-lg border border-ink-700 bg-ink-900 p-3">
+        <div className="mb-3 space-y-2 rounded-xl border border-ink-700/70 bg-ink-800/30 p-5">
           <div className="flex gap-2">
             <input
               value={form.name}
@@ -99,7 +99,7 @@ function McpRegistry() {
           <button
             onClick={() => create.mutate()}
             disabled={!form.name || create.isPending}
-            className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs text-white disabled:opacity-50"
+            className="rounded-md bg-accent-600 px-3 py-1.5 text-xs text-white disabled:opacity-50"
           >
             Зарегистрировать
           </button>
@@ -115,11 +115,11 @@ function McpRegistry() {
           {servers.map((s) => {
             const res = testResults[s.id];
             return (
-              <li key={s.id} className="rounded-lg border border-ink-700 bg-ink-900 p-3">
+              <li key={s.id} className="rounded-xl border border-ink-700/70 bg-ink-800/30 p-5">
                 <div className="flex items-center gap-2">
                   <Plug className="h-4 w-4 text-neutral-500" />
                   <span className="text-sm font-medium">{s.name}</span>
-                  <span className="rounded bg-ink-700 px-1.5 py-0.5 text-[10px] text-neutral-400">
+                  <span className="rounded bg-ink-700 px-1.5 py-0.5 text-[11px] text-neutral-400">
                     {s.transport}
                   </span>
                   <label className="ml-auto flex items-center gap-1 text-[11px] text-neutral-400">
@@ -224,7 +224,7 @@ function TelegramIntegration() {
           Настроен: {cfg.token_masked} · chat_id {cfg.default_chat_id || "—"}
         </p>
       )}
-      <div className="space-y-2 rounded-lg border border-ink-700 bg-ink-900 p-3">
+      <div className="space-y-2 rounded-xl border border-ink-700/70 bg-ink-800/30 p-5">
         <input
           value={token}
           onChange={(e) => setToken(e.target.value)}
@@ -249,7 +249,7 @@ function TelegramIntegration() {
           <button
             onClick={() => save.mutate()}
             disabled={!token || save.isPending}
-            className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs text-white disabled:opacity-50"
+            className="rounded-md bg-accent-600 px-3 py-1.5 text-xs text-white disabled:opacity-50"
           >
             {save.isPending ? "Сохранение…" : "Сохранить"}
           </button>

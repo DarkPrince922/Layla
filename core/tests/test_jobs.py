@@ -216,11 +216,12 @@ async def test_plain_chat_runs_in_background_and_persists(client, monkeypatch):
     )
     chat = (await client.post("/api/chats", json={"domain": "osint", "model": "gpt-4o"})).json()
 
-    async def fake_stream(provider, key, model, messages):
-        yield ("reasoning", "ищу зацепки")
-        yield ("content", "Вот что нашлось по цели.")
+    from app.services import project_agent
+    async def fake_run(*args):
+        yield {"reasoning": "ищу зацепки"}
+        yield {"delta": "Вот что нашлось по цели."}
 
-    monkeypatch.setattr(pc, "stream_chat", fake_stream)
+    monkeypatch.setattr(project_agent, "run", fake_run)
     r = await client.post(
         f"/api/chats/{chat['id']}/run", json={"content": "Проверь домен example.com", "model": "gpt-4o"}
     )
@@ -235,3 +236,40 @@ async def test_plain_chat_runs_in_background_and_persists(client, monkeypatch):
     # Чат находится по домену (для восстановления панелью).
     listed = (await client.get("/api/chats?domain=osint")).json()
     assert any(c["id"] == chat["id"] for c in listed)
+
+
+async def test_parallel_chats_partial_failure_and_cancel(client, monkeypatch):
+    from app.services import project_agent
+    await _register(client, "parallel@example.com")
+    await client.post("/api/providers", json={"name": "M", "kind": "openai_compatible", "base_url": "http://p/v1", "default_model": "test", "active": True})
+    gate = asyncio.Event()
+    async def fake_run(*args):
+        yield {"delta": "Сохранённая часть ответа"}
+        await gate.wait()
+        raise RuntimeError("Проверочная ошибка провайдера")
+    monkeypatch.setattr(project_agent, "run", fake_run)
+    pending = []
+    for domain in ("code", "design", "pentest", "pentest", "osint"):
+        chat = (await client.post("/api/chats", json={"domain": domain, "model": "test"})).json()
+        result = await client.post(f"/api/chats/{chat['id']}/run", json={"content": "Work"})
+        assert result.status_code == 202, result.text
+        pending.append((chat["id"], result.json()["id"]))
+        await asyncio.sleep(.05)
+    assert len((await client.get("/api/jobs?active=true")).json()) == 5
+    chat_id, job_id = pending[0]
+    assert (await client.post(f"/api/chats/{chat_id}/run", json={"content": "duplicate"})).status_code == 409
+    assert (await client.delete(f"/api/chats/{chat_id}")).status_code == 409
+    detail = (await client.get(f"/api/chats/{chat_id}")).json()
+    assert detail["messages"][-1]["content"] == "Сохранённая часть ответа"
+    assert (await client.delete(f"/api/projects/{detail['project_id']}")).status_code == 409
+    cancel = await client.post(f"/api/jobs/{job_id}/cancel")
+    assert cancel.status_code == 200, cancel.text
+    assert cancel.json()["status"] == "cancelled"
+    gate.set()
+    for chat_id, job_id in pending[1:]:
+        state = await _wait_job(client, job_id)
+        assert state["status"] == "error"
+        detail = (await client.get(f"/api/chats/{chat_id}")).json()
+        assert detail["messages"][-1]["content"] == "Сохранённая часть ответа"
+        assert "Проверочная" in detail["messages"][-1]["meta"]["error"]
+        assert detail["last_job"]["status"] == "error"

@@ -20,7 +20,7 @@ interface Provider {
 
 function HealthTile({ label, value }: { label: string; value: number }) {
   return (
-    <div className="rounded-lg border border-ink-700 bg-ink-900 p-4">
+    <div className="rounded-xl border border-ink-700/70 bg-ink-800/30 p-5">
       <div className="text-2xl font-semibold">{value}</div>
       <div className="text-xs text-neutral-500">{label}</div>
     </div>
@@ -69,10 +69,10 @@ function KeyManager({ provider }: { provider: Provider }) {
   const keyBlocked = insecure && !ack;
 
   return (
-    <div className="rounded-lg border border-ink-700 bg-ink-900 p-4">
+    <div className="rounded-xl border border-ink-700/70 bg-ink-800/30 p-5">
       <div className="mb-2 flex items-center gap-2">
         <span className="text-sm font-medium">{provider.name}</span>
-        <span className="rounded bg-ink-700 px-1.5 py-0.5 text-[10px] text-neutral-400">
+        <span className="rounded bg-ink-700 px-1.5 py-0.5 text-[11px] text-neutral-400">
           {provider.kind}
         </span>
         <span className="ml-auto text-[11px] text-neutral-500">
@@ -86,7 +86,7 @@ function KeyManager({ provider }: { provider: Provider }) {
             <KeyRound className="h-3.5 w-3.5 text-neutral-500" />
             <span className="font-mono">{k.masked}</span>
             <span
-              className={`rounded px-1.5 py-0.5 text-[10px] ${
+              className={`rounded px-1.5 py-0.5 text-[11px] ${
                 k.status === "active"
                   ? "bg-emerald-500/20 text-emerald-300"
                   : "bg-amber-500/20 text-amber-300"
@@ -139,7 +139,7 @@ function KeyManager({ provider }: { provider: Provider }) {
         <button
           onClick={() => add.mutate()}
           disabled={!newKey || add.isPending}
-          className="flex items-center gap-1 rounded-md bg-indigo-600 px-2 py-1.5 text-xs text-white disabled:opacity-50"
+          className="flex items-center gap-1 rounded-md bg-accent-600 px-2 py-1.5 text-xs text-white disabled:opacity-50"
         >
           <Plus className="h-3.5 w-3.5" /> Добавить ключ
         </button>

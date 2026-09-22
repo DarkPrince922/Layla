@@ -59,7 +59,11 @@ async def lifespan(_app: FastAPI):
         await reap_stale(SessionLocal)
     except Exception:  # noqa: BLE001 — старт не должен падать из-за бутстрапа
         logging.getLogger("layla").exception("Бутстрап/очистка задач не выполнены")
-    yield
+    try:
+        yield
+    finally:
+        from app.services.jobs import shutdown
+        await shutdown()
 
 
 app = FastAPI(

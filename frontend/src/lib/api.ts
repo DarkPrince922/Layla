@@ -100,6 +100,9 @@ export interface JobStep {
 }
 
 export interface Job {
+  chat_id?: string | null;
+  created_at?: string;
+  updated_at?: string;
   id: string;
   domain: string;
   kind: string;
@@ -188,6 +191,7 @@ export interface ChatMessage {
 }
 
 export interface ChatDetail extends Chat {
+  last_job?: Job | null;
   messages: ChatMessage[];
 }
 

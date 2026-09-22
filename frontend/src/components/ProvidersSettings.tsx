@@ -77,7 +77,7 @@ export function ProvidersSettings() {
 
   return (
     <div>
-      <div className="mb-4 flex items-center justify-between">
+      <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-xl font-semibold">Провайдеры</h1>
           <p className="text-sm text-neutral-500">
@@ -87,7 +87,7 @@ export function ProvidersSettings() {
         </div>
         <button
           onClick={() => setOpen((v) => !v)}
-          className="flex items-center gap-1.5 rounded-md bg-indigo-600 px-3 py-1.5 text-sm text-white hover:bg-indigo-500"
+          className="flex items-center gap-1.5 rounded-md bg-accent-600 px-3 py-1.5 text-sm text-white hover:bg-accent-500"
         >
           <Plus className="h-4 w-4" /> Добавить
         </button>
@@ -98,8 +98,8 @@ export function ProvidersSettings() {
       </div>
 
       {open && (
-        <div className="mb-5 space-y-3 rounded-lg border border-ink-700 bg-ink-900 p-4">
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div className="mb-5 space-y-3 rounded-xl border border-ink-700/70 bg-ink-800/30 p-5">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <input
               className="rounded-md border border-ink-700 bg-ink-800 px-3 py-2 text-sm"
               placeholder="Название (напр. OpenAI)"
@@ -164,7 +164,7 @@ export function ProvidersSettings() {
             <button
               onClick={() => create.mutate()}
               disabled={!form.name || create.isPending}
-              className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm text-white disabled:opacity-50"
+              className="rounded-md bg-accent-600 px-3 py-1.5 text-sm text-white disabled:opacity-50"
             >
               {create.isPending ? "Сохранение…" : "Сохранить профиль"}
             </button>
@@ -183,19 +183,19 @@ export function ProvidersSettings() {
           {providers.map((p) => (
             <li key={p.id} className="px-4 py-3">
               <div className="flex items-center gap-3">
-                <div className="flex-1">
-                  <div className="flex items-center gap-2 text-sm">
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2 text-sm">
                     <span className="font-medium">{p.name}</span>
-                    <span className="rounded bg-ink-700 px-1.5 py-0.5 text-[10px] text-neutral-400">
+                    <span className="rounded bg-ink-700 px-1.5 py-0.5 text-[11px] text-neutral-400">
                       {p.kind}
                     </span>
                     {p.active && (
-                      <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[10px] text-emerald-300">
+                      <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[11px] text-emerald-300">
                         активен
                       </span>
                     )}
                     {p.has_secret && (
-                      <span className="flex items-center gap-1 text-[10px] text-neutral-500">
+                      <span className="flex items-center gap-1 text-[11px] text-neutral-500">
                         <KeyRound className="h-3 w-3" /> ключ задан
                       </span>
                     )}
@@ -265,7 +265,7 @@ function ProviderModels({ providerId }: { providerId: string }) {
         >
           {fetchModels.isPending ? "Загрузка…" : "Загрузить модели"}
         </button>
-        {msg && <span className="text-[10px] text-neutral-500">{msg}</span>}
+        {msg && <span className="text-[11px] text-neutral-500">{msg}</span>}
       </div>
       {models.length === 0 ? (
         <p className="text-[11px] text-neutral-600">
@@ -279,7 +279,7 @@ function ProviderModels({ providerId }: { providerId: string }) {
               key={m.name}
               className={`flex cursor-pointer items-center gap-1 rounded border px-2 py-0.5 text-[11px] ${
                 m.enabled
-                  ? "border-indigo-500/40 bg-indigo-500/10 text-indigo-200"
+                  ? "border-accent-500/40 bg-accent-500/10 text-accent-200"
                   : "border-ink-700 bg-ink-800 text-neutral-500"
               }`}
             >
