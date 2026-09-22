@@ -25,6 +25,14 @@ import app.models  # noqa: E402,F401  (register tables)
 from app.main import app  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _instant_retries(monkeypatch):
+    """Автоповтор к провайдеру в тестах — без реальных пауз 1–16 с."""
+    from app.services import provider_errors
+
+    monkeypatch.setattr(provider_errors, "RETRY_DELAYS", (0, 0, 0, 0, 0))
+
+
 @pytest_asyncio.fixture
 async def db_sessionmaker(tmp_path_factory):
     # Файловая SQLite (а не :memory:+StaticPool): у каждой параллельной фоновой

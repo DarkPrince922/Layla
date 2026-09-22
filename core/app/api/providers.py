@@ -220,7 +220,7 @@ async def get_provider_models(
     session: AsyncSession = Depends(get_session),
 ) -> list[ProviderModelInfo]:
     provider = await _owned_provider(session, user, provider_id)
-    return [ProviderModelInfo(**m) for m in (provider.models or [])]
+    return _with_caps(provider, provider.models or [])
 
 
 @router.post("/{provider_id}/fetch-models", response_model=list[ProviderModelInfo])
@@ -245,7 +245,7 @@ async def fetch_provider_models(
     merged = [{"name": n, "enabled": prev.get(n, True)} for n in names]
     provider.models = merged
     await session.commit()
-    return [ProviderModelInfo(**m) for m in merged]
+    return _with_caps(provider, merged)
 
 
 @router.put("/{provider_id}/models", response_model=list[ProviderModelInfo])
@@ -256,6 +256,19 @@ async def set_provider_models(
     session: AsyncSession = Depends(get_session),
 ) -> list[ProviderModelInfo]:
     provider = await _owned_provider(session, user, provider_id)
-    provider.models = [m.model_dump() for m in body.models]
+    provider.models = [{"name": m.name, "enabled": m.enabled} for m in body.models]
+    caps = dict(provider.model_caps or {})
+    for m in body.models:
+        caps[m.name] = {**(caps.get(m.name) or {}), "tools": m.tools}
+    provider.model_caps = caps
     await session.commit()
-    return body.models
+    return _with_caps(provider, provider.models)
+
+
+def _with_caps(provider: Provider, entries: list[dict]) -> list[ProviderModelInfo]:
+    caps = provider.model_caps or {}
+    return [
+        ProviderModelInfo(name=m["name"], enabled=bool(m.get("enabled", True)),
+                          tools=(caps.get(m["name"]) or {}).get("tools") is not False)
+        for m in entries
+    ]

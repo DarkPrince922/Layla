@@ -24,7 +24,7 @@ def _script(monkeypatch, turns: list[list[dict]], seen: list | None = None):
     """Подменить модель: каждый ход — список вызовов инструментов; пустой — финальный текст."""
     state = {"turn": 0}
 
-    async def stream_turn(provider, key, model, conversation, available):
+    async def stream_turn(provider, key, model, conversation, available, **kw):
         if seen is not None:
             seen.append({"tools": {t["function"]["name"] for t in available}, "conversation": list(conversation)})
         calls = turns[state["turn"]] if state["turn"] < len(turns) else []

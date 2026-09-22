@@ -1,6 +1,7 @@
 """Домен Design: генерация и хранение артефактов (спец. §5.6)."""
 from __future__ import annotations
 
+import asyncio
 import shutil
 from pathlib import Path
 from uuid import uuid4
@@ -19,7 +20,7 @@ from app.models.user import Project, User, Workspace
 from app.schemas.design import DesignCreate, DesignOut
 from app.schemas.job import JobOut
 from app.schemas.project import ProjectOut
-from app.services import audit, design_gen, jobs, provider_client
+from app.services import audit, design_gen, jobs, provider_client, provider_errors
 from app.services.auth import get_current_user
 from app.services.files import change_file
 
@@ -140,15 +141,28 @@ async def generate_design_bg(
         key = await provider_client.pick_key(h.session, prov)
         await h.step("Генерирую разметку", progress=0.25)
         parts: list[str] = []
-        started = False
-        async for kind, text in provider_client.stream_chat(prov, key, model, messages):
-            if kind == "reasoning":
-                await h.reason(text)
-            else:
-                if not started:
-                    started = True
-                    await h.step("Модель пишет код", progress=0.5)
-                parts.append(text)
+        attempt = 0
+        while True:
+            parts, started = [], False
+            try:
+                async for kind, text in provider_client.stream_chat(prov, key, model, messages):
+                    if kind == "reasoning":
+                        await h.reason(text)
+                    else:
+                        if not started:
+                            started = True
+                            await h.step("Модель пишет код", progress=0.5)
+                        parts.append(text)
+                break
+            except Exception as exc:
+                # Временный сбой — повтор с паузой (разметка собирается заново).
+                if not provider_errors.is_retryable(exc) or attempt >= len(provider_errors.RETRY_DELAYS):
+                    raise
+                attempt += 1
+                delay = provider_errors.retry_delay(exc, attempt)
+                await h.step(f"Нет связи с моделью — повтор {attempt} из "
+                             f"{len(provider_errors.RETRY_DELAYS)} через {delay:g} с")
+                await asyncio.sleep(delay)
         await h.reason("", flush=True)
         html = design_gen.extract_html("".join(parts))
         files = design_gen.to_files(html)

@@ -65,6 +65,9 @@ class ModelOut(BaseModel):
 class ProviderModelInfo(BaseModel):
     name: str
     enabled: bool = True
+    # Умеет ли модель вызывать инструменты (работа с файлами). Выключается само,
+    # если провайдер отклонил инструменты, и вручную — в настройках.
+    tools: bool = True
 
 
 class ProviderModelsUpdate(BaseModel):

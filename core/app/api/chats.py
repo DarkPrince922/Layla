@@ -51,6 +51,21 @@ from app.schemas.job import JobOut
 from app.services import audit, jobs, project_agent, provider_client
 from app.services.auth import get_current_user
 
+
+def _drop_tail(text: str, count: int) -> str:
+    return text[: max(0, len(text) - count)]
+
+
+def _learned_label(learned: dict) -> str:
+    if learned.get("tools") is False:
+        return "Модель не поддерживает инструменты — продолжаю без работы с файлами"
+    if "token_param" in learned:
+        return "Модель требует max_completion_tokens — запрос исправлен"
+    if learned.get("replay_reasoning") is False:
+        return "Провайдер не принимает размышления в истории — запрос исправлен"
+    return "Запрос подстроен под возможности модели"
+
+
 _TOOL_LABELS = {
     "list_files": "Обзор папки",
     "read_file": "Чтение",
@@ -105,12 +120,19 @@ async def create_chat(
         workspace = await session.get(Workspace, body.workspace_id)
         if workspace is None or workspace.owner_id != user.id:
             raise HTTPException(status_code=404, detail="Рабочее пространство не найдено")
+    provider_id = None
+    if body.provider_id:
+        provider = await session.get(Provider, body.provider_id)
+        if provider is None or provider.owner_id != user.id:
+            raise HTTPException(status_code=404, detail="Провайдер не найден")
+        provider_id = provider.id
     chat = Chat(
         owner_id=user.id,
         domain=body.domain,
         title=body.title or "Новый чат",
         persona_id=body.persona_id,
         model=body.model,
+        provider_id=provider_id,
         workspace_id=project.workspace_id if project else body.workspace_id,
         project_id=project.id if project else None,
     )
@@ -319,6 +341,8 @@ async def send_message(
             async for event in events():
                 if "delta" in event:
                     full.append(event["delta"])
+                elif "retract" in event:
+                    full[:] = [_drop_tail("".join(full), event["retract"])]
                 elif "reasoning" in event:
                     reasoning.append(event["reasoning"])
                 elif "tool" in event:
@@ -394,7 +418,8 @@ async def run_chat(
         raise HTTPException(status_code=400, detail="Не выбрана модель")
     # Выбор пользователя закрепляется за чатом: иначе при следующем открытии
     # подставлялась бы исходная модель чата и выбор «не держался».
-    if body.model and body.model != chat.model:
+    model_changed = bool(body.model and body.model != chat.model)
+    if model_changed:
         chat.model = body.model
     # Провайдер, указанный явно в пикере, важнее угадывания по имени модели:
     # одно и то же имя может быть у нескольких провайдеров.
@@ -403,11 +428,19 @@ async def run_chat(
         provider = await session.get(Provider, body.provider_id)
         if provider is None or provider.owner_id != user.id or not (provider.enabled and provider.active):
             raise HTTPException(status_code=400, detail="Выбранный провайдер недоступен")
+    elif chat.provider_id and not model_changed:
+        # Без явного выбора — провайдер, уже закреплённый за чатом (если он ещё работает).
+        saved = await session.get(Provider, chat.provider_id)
+        if saved is not None and saved.enabled and saved.active:
+            provider = saved
     if provider is None:
         provider = await provider_client.resolve_provider(session, user.id, model)
     if provider is None:
         raise HTTPException(status_code=400, detail="Модель недоступна: нет активного провайдера.")
     provider_id = provider.id
+    # Провайдер закрепляется за чатом, как и модель: иначе при одинаковых именах
+    # моделей у разных провайдеров после перезагрузки запрос ушёл бы к первому.
+    chat.provider_id = provider_id
     owner_id = user.id
     domain = chat.domain.value
     created_root = None
@@ -508,10 +541,26 @@ async def run_chat(
                 finally:
                     await h.set_result({"approval": None})
 
+            caps = dict((prov.model_caps or {}).get(model) or {})
             async for event in project_agent.run(prov, key, model, payload, root, permissions,
-                                                 mode=mode, approve=approve):
+                                                 mode=mode, approve=approve, caps=caps):
                 if "delta" in event:
                     full.append(event["delta"])
+                elif "retract" in event:
+                    # Ход повторяется — уже показанный кусок ответа убираем, чтобы не задвоился.
+                    full[:] = [_drop_tail("".join(full), event["retract"])]
+                    await persist()
+                elif "retry" in event:
+                    info = event["retry"]
+                    await h.step(f"Нет связи с моделью — повтор {info['attempt']} из {info['max']} "
+                                 f"через {info['delay']:g} с")
+                elif "learned" in event:
+                    # Запоминаем, чего модель не умеет, чтобы дальше сразу слать правильный запрос.
+                    known = dict(prov.model_caps or {})
+                    known[model] = {**(known.get(model) or {}), **event["learned"]}
+                    prov.model_caps = known
+                    await h.session.commit()
+                    await h.step(_learned_label(event["learned"]))
                 elif "reasoning" in event:
                     reasoning.append(event["reasoning"])
                     await h.reason(event["reasoning"])

@@ -113,10 +113,16 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
   useEffect(() => { onProject?.(chatId ? chatProject : null); }, [chatId, chatProject, onProject]);
   const savedPersona = detail.data?.persona_id;
   const savedModel = detail.data?.model;
+  const savedProvider = detail.data?.provider_id;
   const savedId = detail.data?.id;
   useEffect(() => {
-    if (savedId) { setPersonaId(savedPersona || ""); if (savedModel) setModel(savedModel); }
-  }, [savedId, savedModel, savedPersona]);
+    if (savedId) {
+      setPersonaId(savedPersona || "");
+      if (savedModel) setModel(savedModel);
+      // Провайдер тоже из чата: у разных провайдеров модели могут называться одинаково.
+      if (savedProvider) setProviderId(savedProvider);
+    }
+  }, [savedId, savedModel, savedPersona, savedProvider]);
   useEffect(() => { if (!model && models.length) { setModel(models[0].name); setProviderId(models[0].provider_id); } }, [model, models]);
   // Имя модели может встречаться у нескольких провайдеров, поэтому пикер хранит
   // пару «провайдер+модель». Если провайдер неизвестен (модель восстановлена из
@@ -153,7 +159,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
     let id = chatId;
     try {
       if (!id) {
-        const chat = await api.post<Chat>("/chats", { domain, project_id: projectId || null, title: content.slice(0, 80), persona_id: personaId || null, model });
+        const chat = await api.post<Chat>("/chats", { domain, project_id: projectId || null, title: content.slice(0, 80), persona_id: personaId || null, model, provider_id: selected?.provider_id || null });
         id = chat.id;
         if (version === generation.current) { setChatId(id); remember(scope, id); }
       }

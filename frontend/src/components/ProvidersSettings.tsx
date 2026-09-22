@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Trash2, KeyRound } from "lucide-react";
+import { Plus, Trash2, KeyRound, Wrench } from "lucide-react";
 import { api, type ProviderModel } from "@/lib/api";
 import { HttpKeyBanner } from "@/components/HttpKeyBanner";
 
@@ -246,8 +246,8 @@ function ProviderModels({ providerId }: { providerId: string }) {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["models"] }),
   });
 
-  function toggle(name: string, enabled: boolean) {
-    const next = models.map((m) => (m.name === name ? { ...m, enabled } : m));
+  function toggle(name: string, change: Partial<ProviderModel>) {
+    const next = models.map((m) => (m.name === name ? { ...m, ...change } : m));
     qc.setQueryData(["provider-models", providerId], next);
     save.mutate(next);
   }
@@ -286,10 +286,22 @@ function ProviderModels({ providerId }: { providerId: string }) {
               <input
                 type="checkbox"
                 checked={m.enabled}
-                onChange={(e) => toggle(m.name, e.target.checked)}
+                onChange={(e) => toggle(m.name, { enabled: e.target.checked })}
                 className="h-3 w-3"
               />
               {m.name}
+              <button
+                type="button"
+                onClick={(e) => { e.preventDefault(); toggle(m.name, { tools: !m.tools }); }}
+                aria-pressed={m.tools}
+                aria-label={`Инструменты для ${m.name}`}
+                title={m.tools
+                  ? "Работа с файлами включена. Выключите, если модель не поддерживает инструменты (Layla выключит сама при отказе провайдера)."
+                  : "Без инструментов: модель отвечает текстом, не трогая файлы. Нажмите, чтобы включить."}
+                className={`ml-0.5 rounded p-0.5 ${m.tools ? "text-accent-300" : "text-neutral-600 line-through"}`}
+              >
+                <Wrench className="h-3 w-3" />
+              </button>
             </label>
           ))}
         </div>

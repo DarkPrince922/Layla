@@ -12,6 +12,13 @@ import json
 import httpx
 
 from app.services.provider_client import _headers, _is_anthropic_native, endpoint
+from app.services.provider_errors import (
+    RETRYABLE_STATUS,
+    ProviderError,
+    classify_rejection,
+    retry_after,
+    transient_payload,
+)
 
 MAX_TURN_BYTES = 4_000_000
 
@@ -56,7 +63,12 @@ def anthropic_messages(messages: list[dict]) -> tuple[str, list[dict]]:
     return system, converted
 
 
-async def stream_turn(provider, key, model: str, messages: list[dict], tools: list[dict]):
+async def stream_turn(provider, key, model: str, messages: list[dict], tools: list[dict],
+                      caps: dict | None = None):
+    """caps — известные ограничения модели: tools=False, token_param, replay_reasoning=False."""
+    caps = caps or {}
+    if caps.get("tools") is False:
+        tools = []
     native = _is_anthropic_native(provider)
     if native:
         system, conversation = anthropic_messages(messages)
@@ -77,13 +89,15 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
         }
         url = endpoint(provider, "messages")
     else:
+        skip = {"is_error"} if caps.get("replay_reasoning", True) else {"is_error", "reasoning_content"}
         payload = {
             "model": model,
-            "messages": [{k: v for k, v in m.items() if k != "is_error" and not k.startswith("_")} for m in messages],
+            "messages": [{k: v for k, v in m.items() if k not in skip and not k.startswith("_")} for m in messages],
             "stream": True,
             "tools": tools,
             "tool_choice": "auto",
-            "max_tokens": 8192,
+            # o-серия и новые модели OpenAI принимают только max_completion_tokens.
+            caps.get("token_param") or "max_tokens": 8192,
         }
         url = endpoint(provider, "chat/completions")
 
@@ -102,8 +116,15 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
             "POST", url, headers=_headers(provider, key), json=payload
         ) as resp:
             if resp.is_error:
-                raise RuntimeError(
-                    f"Провайдер отклонил запрос инструментов (HTTP {resp.status_code})"
+                body = (await resp.aread())[:4000].decode("utf-8", "replace")
+                mismatch = classify_rejection(resp.status_code, body)
+                if mismatch:
+                    raise mismatch
+                raise ProviderError(
+                    f"Провайдер отклонил запрос инструментов (HTTP {resp.status_code})",
+                    retryable=resp.status_code in RETRYABLE_STATUS,
+                    retry_after=retry_after(resp.headers),
+                    status=resp.status_code,
                 )
             async for line in resp.aiter_lines():
                 size += len(line.encode("utf-8"))
@@ -120,7 +141,8 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
                 except json.JSONDecodeError as exc:
                     raise RuntimeError("Некорректный поток провайдера") from exc
                 if event.get("error") or event.get("type") == "error":
-                    raise RuntimeError("Провайдер вернул ошибку при работе с инструментами")
+                    raise ProviderError("Провайдер вернул ошибку при работе с инструментами",
+                                        retryable=transient_payload(event.get("error") or event))
                 if native:
                     kind = event.get("type")
                     index = event.get("index", 0)
@@ -186,6 +208,9 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
                 if len(calls) > 48:
                     raise RuntimeError("Провайдер запросил слишком много инструментов")
     allowed = ("tool_use", "end_turn", "stop_sequence") if native else ("tool_calls", "stop")
+    if not stopped and finish is None:
+        # Поток закончился без финала — это обрыв связи, такой ход можно повторить.
+        raise ProviderError("Связь с моделью оборвалась посреди ответа", retryable=True)
     if not stopped or finish not in allowed:
         raise RuntimeError(
             "Ответ модели прерван или достиг лимита. Незавершённые вызовы не применены."

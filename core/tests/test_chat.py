@@ -172,3 +172,33 @@ async def test_explicit_provider_wins_over_name_guess(client, monkeypatch):
         if used:
             break
     assert used.get("base") == "http://n.local/v1"
+
+
+@pytest.mark.asyncio
+async def test_provider_is_remembered_per_chat(client, monkeypatch):
+    """Выбранный провайдер закрепляется за чатом и используется дальше без явного выбора."""
+    import asyncio
+
+    from app.services import project_agent
+
+    await _register(client)
+    await _add_active_provider(client, model="shared")
+    second = await _add_second_provider(client, model="shared")
+    used: list[str] = []
+
+    async def fake_run(provider, key, model, payload, root, permissions, **kw):
+        used.append(provider.base_url)
+        yield {"delta": "ok"}
+
+    monkeypatch.setattr(project_agent, "run", fake_run)
+    chat = (await client.post("/api/chats", json={"domain": "osint", "model": "shared", "provider_id": second})).json()
+    assert chat["provider_id"] == second
+    for text in ("раз", "два"):  # второй ход — без provider_id в запросе
+        body = {"content": text, **({"provider_id": second} if text == "раз" else {})}
+        job = (await client.post(f"/api/chats/{chat['id']}/run", json=body)).json()
+        for _ in range(300):
+            await asyncio.sleep(0.02)
+            if (await client.get(f"/api/jobs/{job['id']}")).json()["status"] not in ("queued", "running"):
+                break
+    assert used == ["http://n.local/v1", "http://n.local/v1"]
+    assert (await client.get(f"/api/chats/{chat['id']}")).json()["provider_id"] == second

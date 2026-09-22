@@ -13,6 +13,7 @@ class ChatCreate(BaseModel):
     title: str | None = None
     persona_id: str | None = None
     model: str | None = None
+    provider_id: str | None = None
     workspace_id: str | None = None
     project_id: str | None = None
 
@@ -23,6 +24,7 @@ class ChatOut(BaseModel):
     title: str | None = None
     persona_id: str | None = None
     model: str | None = None
+    provider_id: str | None = None
     project_id: str | None = None
 
     model_config = {"from_attributes": True}

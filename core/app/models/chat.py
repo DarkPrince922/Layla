@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from sqlalchemy import ForeignKey, String, Text
+import datetime as dt
+
+from sqlalchemy import DateTime, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -25,6 +27,10 @@ class Chat(UUIDPk, Timestamps, Base):
     persona_id: Mapped[str | None] = mapped_column(ForeignKey("personas.id", ondelete="SET NULL"))
     title: Mapped[str | None] = mapped_column(String(300))
     model: Mapped[str | None] = mapped_column(String(200))
+    # Выбранный провайдер: имя модели бывает у нескольких провайдеров.
+    provider_id: Mapped[str | None] = mapped_column(ForeignKey("providers.id", ondelete="SET NULL"))
+    # Корзина: не пусто — чат удалён и через 7 дней будет стёрт окончательно.
+    deleted_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class Message(UUIDPk, Timestamps, Base):

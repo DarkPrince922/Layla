@@ -178,6 +178,7 @@ export interface Chat {
   title?: string | null;
   persona_id?: string | null;
   model?: string | null;
+  provider_id?: string | null;
 }
 
 export interface ChatMessage {
@@ -470,4 +471,6 @@ export interface AcunetixImportResult {
 export interface ProviderModel {
   name: string;
   enabled: boolean;
+  /** Умеет ли модель работать с файлами (инструментами). */
+  tools: boolean;
 }

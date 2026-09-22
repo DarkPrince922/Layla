@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 
 from app.schemas.project import FileWrite
-from app.services import files, tool_chat
+from app.services import files, provider_errors, tool_chat
 
 # Страховочные пределы, а не рабочие: на обычных задачах агент до них не доходит.
 # Достигнув предела, агент останавливается мягко (ответ сохраняется как обычный),
@@ -151,11 +151,69 @@ def preview(root: str, name: str, arguments: dict) -> dict | None:
         return None
 
 
+NO_TOOLS_NOTE = "\nFile tools are unavailable for this model: answer directly, without tool calls."
+MAX_ADJUSTMENTS = 3  # сколько раз за ход можно подстроиться под ограничения модели
+
+
+async def _turn(provider, key, model, conversation, available, caps):
+    """Один ход модели с автоповтором.
+
+    Временный сбой (обрыв, 429, 5xx) — повтор до len(RETRY_DELAYS) раз с паузой;
+    уже показанный текст хода откатывается событием retract. Отказ из-за
+    неподдерживаемой части запроса — сразу повтор без неё, событие learned.
+    Последним приходит ("done", (content, reasoning, context, calls)).
+    """
+    attempt = adjustments = 0
+    while True:
+        content, reasoning, context, calls = [], [], {}, []
+        shown = 0
+        try:
+            async for kind, value in tool_chat.stream_turn(
+                provider, key, model, conversation, available, caps=caps
+            ):
+                if kind == "tool_calls":
+                    calls = value
+                elif kind == "content":
+                    content.append(value)
+                    shown += len(value)
+                    yield "delta", value
+                elif kind == "provider_context":
+                    context.update(value)
+                elif kind == "reasoning":
+                    reasoning.append(value)
+                    yield "reasoning", value
+            yield "done", (content, reasoning, context, calls)
+            return
+        except provider_errors.CapabilityError as exc:
+            adjustments += 1
+            if adjustments > MAX_ADJUSTMENTS or caps.get(exc.capability) == exc.value:
+                raise
+            caps[exc.capability] = exc.value
+            if exc.capability == "tools":
+                conversation[0] = {**conversation[0], "content": conversation[0]["content"] + NO_TOOLS_NOTE}
+            if shown:
+                yield "retract", shown
+            yield "learned", {exc.capability: exc.value}
+        except Exception as exc:
+            if not provider_errors.is_retryable(exc) or attempt >= len(provider_errors.RETRY_DELAYS):
+                raise
+            attempt += 1
+            delay = provider_errors.retry_delay(exc, attempt)
+            if shown:
+                yield "retract", shown
+            yield "retry", {"attempt": attempt, "max": len(provider_errors.RETRY_DELAYS), "delay": delay}
+            await asyncio.sleep(delay)
+
+
 async def run(
     provider, key, model: str, messages: list[dict], root: str, permissions=None,
-    *, mode: str = "auto", approve=None,
+    *, mode: str = "auto", approve=None, caps: dict | None = None,
 ):
-    """approve(event) -> "approve" | "reject" | "approve_all" — только для режима confirm."""
+    """approve(event) -> "approve" | "reject" | "approve_all" — только для режима confirm.
+
+    caps — известные ограничения модели (меняются по ходу работы, см. _turn).
+    """
+    caps = caps if caps is not None else {}
     available = permitted_tools(permissions)
     if mode == "plan":
         available = [t for t in available if t["function"]["name"] not in MUTATING]
@@ -166,28 +224,19 @@ async def run(
         + ", ".join(sorted(allowed_names))
         + _MODE_PROMPTS.get(mode, "")
     )
+    if caps.get("tools") is False:
+        prompt += NO_TOOLS_NOTE
     ask = approve if mode == "confirm" else None
     conversation = [{"role": "system", "content": prompt}, *messages]
     used = 0
     async with asyncio.timeout(MAX_SECONDS):
         for round_number in range(MAX_ROUNDS):
-            content = []
-            reasoning = []
-            context = {}
-            calls = []
-            async for kind, value in tool_chat.stream_turn(
-                provider, key, model, conversation, available
-            ):
-                if kind == "tool_calls":
-                    calls = value
-                elif kind == "content":
-                    content.append(value)
-                    yield {"delta": value}
-                elif kind == "provider_context":
-                    context.update(value)
-                elif kind == "reasoning":
-                    reasoning.append(value)
-                    yield {"reasoning": value}
+            content, reasoning, context, calls = [], [], {}, []
+            async for kind, value in _turn(provider, key, model, conversation, available, caps):
+                if kind == "done":
+                    content, reasoning, context, calls = value
+                else:
+                    yield {kind: value}
             if not calls:
                 return
             if used + len(calls) > MAX_CALLS:
