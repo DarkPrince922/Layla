@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from urllib.parse import quote
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,10 +23,30 @@ class Settings(BaseSettings):
     jwt_ttl_minutes: int = Field(default=1440, alias="LAYLA_JWT_TTL_MINUTES")
 
     # --- Database ---
-    database_url: str = Field(
-        default="postgresql+asyncpg://layla:layla@localhost:5432/layla",
-        alias="DATABASE_URL",
-    )
+    # DATABASE_URL можно задать явно (напр. внешняя БД). Если он пуст — собирается
+    # из POSTGRES_* ниже, чтобы смена пароля не рассинхронизировалась с URL.
+    database_url: str = Field(default="", alias="DATABASE_URL")
+    postgres_user: str = Field(default="layla", alias="POSTGRES_USER")
+    postgres_password: str = Field(default="layla", alias="POSTGRES_PASSWORD")
+    postgres_db: str = Field(default="layla", alias="POSTGRES_DB")
+    postgres_host: str = Field(default="localhost", alias="POSTGRES_HOST")
+    postgres_port: int = Field(default=5432, alias="POSTGRES_PORT")
+
+    @model_validator(mode="after")
+    def _assemble_database_url(self) -> "Settings":
+        """Собрать DATABASE_URL из частей, если он не задан явно.
+
+        Логин/пароль URL-кодируются — иначе символы @ / : в пароле ломают строку
+        подключения. Явный DATABASE_URL (в т.ч. sqlite в тестах) имеет приоритет.
+        """
+        if not self.database_url:
+            user = quote(self.postgres_user, safe="")
+            password = quote(self.postgres_password, safe="")
+            self.database_url = (
+                f"postgresql+asyncpg://{user}:{password}"
+                f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+            )
+        return self
 
     # --- Redis ---
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")

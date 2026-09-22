@@ -54,6 +54,12 @@ services:
         condition: service_healthy
       litellm:
         condition: service_started
+    # Импортированные/созданные проекты и файлы агента должны переживать
+    # пересборку. projects_dir по умолчанию — ./data/projects, а WORKDIR=/app,
+    # т.е. /app/data/projects. Без этого тома проекты терялись при rebuild,
+    # а строки в БД оставались указывать на исчезнувшие каталоги.
+    volumes:
+      - projectsdata:/app/data/projects
     expose:
       - "8000"
     restart: unless-stopped
@@ -89,5 +95,6 @@ services:
 volumes:
   pgdata:
   redisdata:
+  projectsdata:
   caddydata:
   caddyconfig:

@@ -6,8 +6,6 @@
 # =====================================================================
 
 {$LAYLA_PUBLIC_HOST:localhost} {
-	encode gzip
-
 	# --- Security headers (hardening, spec §7) ---
 	header {
 		# HSTS применяется браузером только по HTTPS (в dev по HTTP игнорируется).
@@ -27,8 +25,11 @@
 		reverse_proxy layla-core:8000
 	}
 
-	# Everything else -> Next.js frontend
+	# Everything else -> Next.js frontend.
+	# gzip только здесь: сжимать статику/HTML полезно, но применять его к /api
+	# нельзя — компрессор буферизует SSE-стрим чата и «съедает» живой вывод.
 	handle {
+		encode gzip
 		reverse_proxy layla-frontend:3000
 	}
 }
