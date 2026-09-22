@@ -1,7 +1,7 @@
 """ORM models. Importing this package registers every table on ``Base.metadata``
 so Alembic autogeneration and metadata.create_all() see them all.
 """
-from app.models.agent import AgentRun
+from app.models.agent import AgentConfig, AgentRun, AgentStep
 from app.models.audit import AuditLog
 from app.models.chat import Chat, Message
 from app.models.design import Design
@@ -24,6 +24,8 @@ from app.models.user import Project, User, Workspace
 
 __all__ = [
     "AgentRun",
+    "AgentStep",
+    "AgentConfig",
     "AuditLog",
     "Chat",
     "Message",

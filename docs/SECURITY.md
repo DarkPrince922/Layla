@@ -40,3 +40,26 @@ on third-party systems.
 - Production requires HTTPS; Caddy provisions certificates automatically when
   `LAYLA_PUBLIC_HOST` is a real domain.
 - Session cookies are `httpOnly`, `SameSite=Lax`, and `Secure` in production.
+
+## M5 — автономный агент (границы безопасности)
+
+Автономный/интерактивный Pentest-агент управляем и не обходит гейты §7:
+
+- **Гейт на каждое активное действие.** Любая команда агента к цели проходит
+  `venue_executor.execute` → `venue_gate` (активная площадка + `authorized` +
+  подтверждённый scope + цель в allow-list) и `egress` (Tor/Proxy fail-closed).
+  В `analysis_only` активные действия запрещены полностью.
+- **HITL.** В `interactive`-режиме каждая команда ждёт подтверждения оператора;
+  в `autonomous` — как минимум опасные команды и всё, что требует персона
+  (`hitl_required`). Классификатор опасных команд — `venue_executor.is_dangerous`.
+- **Исполнитель не подключён по умолчанию.** Даже пройдя все гейты, команда не
+  выполняется, пока оператор осознанно не подключит исполнитель на attack box;
+  иначе шаг помечается «исполнитель не подключён».
+- **CAI** интегрируется только как движок за этими гейтами (`services/cai_engine.py`),
+  опционально; сам по себе ничего не запускает.
+- **Триаж** находок — только анализ моделью, без активных действий.
+- **Бюджеты** (токены/стоимость/время) ограничивают работу агента.
+
+Всё это покрыто тестами (`tests/test_agent_core.py`, `tests/test_agent_api.py`):
+блокировка вне scope, без авторизации, в analysis_only, при сбое Tor, а также
+паузы HITL.

@@ -7,6 +7,7 @@ import { PersonasSettings } from "@/components/PersonasSettings";
 import { AccountsLab } from "@/components/AccountsLab";
 import { KnowledgeSettings } from "@/components/KnowledgeSettings";
 import { IntegrationsSettings } from "@/components/IntegrationsSettings";
+import { AgentSettings } from "@/components/AgentSettings";
 
 export default function SettingsSectionPage({ params }: { params: { section: string } }) {
   const section = SETTINGS_SECTIONS.find((s) => s.slug === params.section);
@@ -17,6 +18,7 @@ export default function SettingsSectionPage({ params }: { params: { section: str
   if (section.slug === "accounts-lab") return <AccountsLab />;
   if (section.slug === "knowledge") return <KnowledgeSettings />;
   if (section.slug === "integrations") return <IntegrationsSettings />;
+  if (section.slug === "agent") return <AgentSettings />;
 
   // Заглушка для разделов, реализуемых в следующих этапах.
   return (

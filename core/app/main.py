@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api import (
+    agent,
     auth,
     chats,
     designs,
@@ -81,6 +82,7 @@ app.include_router(osint.router, prefix=api_prefix)
 app.include_router(engagements.router, prefix=api_prefix)
 app.include_router(servers.router, prefix=api_prefix)
 app.include_router(findings.router, prefix=api_prefix)
+app.include_router(agent.router, prefix=api_prefix)
 
 
 @app.get("/")

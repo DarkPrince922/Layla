@@ -22,12 +22,13 @@ personas (AI roles), sub-agent orchestration, MCP integrations, a knowledge base
 
 ---
 
-## Status — Milestones M0–M4
+## Status — Milestones M0–M5
 
 The UI ships in **Russian** (переключатель EN/RU запланирован на M6). This
 repository currently implements **M0** (skeleton), **M1** (providers & chat)
 and **M2** (Design + Knowledge + MCP + Telegram), **M3** (OSINT) and
-**M4** (Pentest core: scope/authorized gate, venue+egress, findings, Acunetix import).
+**M4** (Pentest core: scope/authorized gate, venue+egress, findings, Acunetix import)
+and **M5** (autonomous Pentest agent with HITL, budgets, gated execution).
 Remaining M0–M2 spec gaps are tracked explicitly in [the roadmap](docs/ROADMAP.md).
 
 **Included now**
@@ -111,8 +112,21 @@ See [M3 usage, upgrade instructions and limits](docs/OSINT.md).
   failure blocks traffic, never falls back to Direct — and the active-action
   gate (`venue_gate.py`). Changing scope revokes authorization.
 
-**Not yet built** (later milestones): CAI autonomous agent + Ultracode
-orchestration (M5); polish, EN/RU i18n switch, combos (M6). See
+**Added in M5**
+- **Ultracode orchestrator**: LLM decomposes a task into role-tagged steps
+  (explorer/reviewer/implementer); plan parsing and HITL policy are pure & tested.
+- **Pentest agent** (tab in the Pentest domain): step log, **HITL** approve/deny,
+  interactive/autonomous modes, finding **triage** (safe analysis, no active actions).
+- **Gated execution** (`app/services/venue_executor.py`): every active command
+  passes scope + venue + egress checks before running; without a configured
+  attack-box executor a gated command is reported blocked, never executed —
+  all covered by tests.
+- **Budgets** (tokens/turn, cost, sub-agent minutes) and **Settings → Agent**
+  (preset, role models, budgets, diagnostics). **CAI** wired as an optional
+  engine strictly behind the gates.
+
+**Not yet built** (later milestone): polish — Combos router, audit export,
+mobile layout, EN/RU i18n switch, hardening (M6). See
 [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ---

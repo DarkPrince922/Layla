@@ -19,8 +19,11 @@ Each milestone is a working application, verified before moving on (spec §9).
   import with dedup + SHA-256, markdown report generation. **Scope-enforcement
   and egress fail-closed shipped with tests** (`app/services/scope.py`,
   `egress.py`, `venue_gate.py`).
-- **M5 — Autonomous agent** — CAI integrated as an MCP engine, Pentest Agent
-  (live log, HITL, finding triage), Ultracode sub-agent orchestration, budgets.
+- **M5 — Autonomous agent** ✅ — Ultracode orchestrator (LLM plan → roles),
+  Pentest Agent (step log, **HITL** approve/deny, finding triage), budgets
+  (tokens/cost/time), and a venue executor where **every active command passes
+  the scope/venue/egress gate before running** (tested). CAI wired as an
+  optional engine behind those gates; no un-gated execution.
 - **M6 — Polish** — Combos router, audit export, mobile layout, RU i18n,
   hardening, docs.
 

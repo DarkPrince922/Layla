@@ -327,3 +327,36 @@ export interface PentestServer {
   egress_route: string;
   has_key: boolean;
 }
+
+// ---- Типы M5 (Agent) ----
+export interface AgentStep {
+  id: string;
+  ordinal: number;
+  role: string;
+  kind: string;
+  status: string;
+  requires_hitl: boolean;
+  target?: string | null;
+  command?: string | null;
+  summary?: string | null;
+  output?: string | null;
+}
+
+export interface AgentRun {
+  id: string;
+  engagement_id?: string | null;
+  task: string;
+  mode: string;
+  model?: string | null;
+  status: string;
+  budget_used: Record<string, unknown>;
+  steps: AgentStep[];
+}
+
+export interface AgentConfig {
+  preset: string;
+  role_models: Record<string, string>;
+  budgets: Record<string, number>;
+  diagnostics: Record<string, unknown>;
+  context: Record<string, unknown>;
+}
