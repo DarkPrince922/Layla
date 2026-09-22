@@ -75,3 +75,76 @@ async def test_generate_without_model_rejected(client):
     )
     r = await client.post("/api/designs", json={"stack": "html", "brief": {}})
     assert r.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_design_becomes_project(client, monkeypatch):
+    """Макет передаётся в домен «Код»: файлы оказываются в проекте."""
+    await _register_with_active_provider(client)
+
+    async def fake_complete(provider, key, model, messages, **kw):
+        return "```html\n<!doctype html><title>Лендинг</title>\n```"
+
+    monkeypatch.setattr(pc, "complete", fake_complete)
+    design = (
+        await client.post("/api/designs", json={"stack": "html", "brief": {"artifact_type": "Landing"}})
+    ).json()
+
+    r = await client.post(f"/api/designs/{design['id']}/project")
+    assert r.status_code == 201, r.text
+    project = r.json()
+
+    tree = (await client.get(f"/api/projects/{project['id']}/files")).json()
+    assert [f["name"] for f in tree] == ["index.html"]
+    content = (await client.get(f"/api/projects/{project['id']}/file?path=index.html")).json()
+    assert "Лендинг" in content["content"]
+    # Ссылка сохранена: макет знает свой проект.
+    assert (await client.get(f"/api/designs/{design['id']}")).json()["project_id"] == project["id"]
+
+
+@pytest.mark.asyncio
+async def test_design_to_project_is_idempotent(client, monkeypatch):
+    """Повторная передача не плодит проекты, а возвращает прежний."""
+    await _register_with_active_provider(client)
+
+    async def fake_complete(provider, key, model, messages, **kw):
+        return "<h1>x</h1>"
+
+    monkeypatch.setattr(pc, "complete", fake_complete)
+    design = (await client.post("/api/designs", json={"stack": "html", "brief": {}})).json()
+
+    first = (await client.post(f"/api/designs/{design['id']}/project")).json()
+    second = (await client.post(f"/api/designs/{design['id']}/project")).json()
+    assert first["id"] == second["id"]
+    assert len((await client.get("/api/projects")).json()) == 1
+
+
+@pytest.mark.asyncio
+async def test_cannot_hand_over_foreign_design(client, monkeypatch):
+    """Чужой макет в свой проект не передать."""
+    await _register_with_active_provider(client)
+
+    async def fake_complete(provider, key, model, messages, **kw):
+        return "<h1>x</h1>"
+
+    monkeypatch.setattr(pc, "complete", fake_complete)
+    design = (await client.post("/api/designs", json={"stack": "html", "brief": {}})).json()
+    await client.post("/api/auth/logout")
+    await client.post(
+        "/api/auth/register", json={"email": "other@example.com", "password": "hunter2hunter2"}
+    )
+    assert (await client.post(f"/api/designs/{design['id']}/project")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_design(client, monkeypatch):
+    """Версию из истории можно удалить."""
+    await _register_with_active_provider(client)
+
+    async def fake_complete(provider, key, model, messages, **kw):
+        return "<h1>x</h1>"
+
+    monkeypatch.setattr(pc, "complete", fake_complete)
+    design = (await client.post("/api/designs", json={"stack": "html", "brief": {}})).json()
+    assert (await client.delete(f"/api/designs/{design['id']}")).status_code == 204
+    assert (await client.get("/api/designs")).json() == []

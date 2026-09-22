@@ -27,8 +27,9 @@ const newRequestId = (): string => {
   return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 14)}`;
 };
 
-export function ChatPanel({ domain, projectId, onFileChange, onOpenFile }: {
+export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProject }: {
   domain: string; projectId?: string; onFileChange?: (change: FileChange) => void; onOpenFile?: (path: string) => void;
+  onProject?: (projectId: string | null) => void;
 }) {
   const owner = useAuth(s => s.user?.id);
   const qc = useQueryClient();
@@ -89,6 +90,10 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile }: {
     return () => window.removeEventListener("layla:open-chat", open);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [domain, projectId, scope]);
+  const chatProject = detail.data?.project_id ?? null;
+  // Каждый чат работает в своём каталоге на диске: сообщаем его наружу,
+  // чтобы домен мог показать результат (превью) и открыть тот же проект в «Коде».
+  useEffect(() => { onProject?.(chatId ? chatProject : null); }, [chatId, chatProject, onProject]);
   const savedPersona = detail.data?.persona_id;
   const savedModel = detail.data?.model;
   const savedId = detail.data?.id;

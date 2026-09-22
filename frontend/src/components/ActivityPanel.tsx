@@ -46,7 +46,7 @@ export function ActivityPanel() {
     }
     if (typeof project === "string") query.set("project", project);
     router.push(`/${job.domain}?${query}`);
-    if (!chat) window.dispatchEvent(new CustomEvent("layla:open-workspace", { detail: { domain: job.domain } }));
+    if (!chat) window.dispatchEvent(new CustomEvent("layla:open-workspace", { detail: { domain: job.domain, design_id: job.result.design_id } }));
     if (chat) window.dispatchEvent(new CustomEvent("layla:open-chat", { detail: { id: chat, project_id: project, domain: job.domain } }));
   }
   return <details ref={menu} className="relative">

@@ -15,6 +15,6 @@ export default function DomainPage({ params }: { params: { domain: string } }) {
   if (!domain) notFound();
   if (domain.slug === "code") return <CodeDomain />;
   if (domain.slug === "osint") return <OsintDomain />;
-  if (domain.slug === "pentest") return <DomainChatWorkspace domain="pentest"><PentestDomain /></DomainChatWorkspace>;
-  return <DomainChatWorkspace domain="design"><DesignDomain /></DomainChatWorkspace>;
+  if (domain.slug === "design") return <DesignDomain />;
+  return <DomainChatWorkspace domain="pentest"><PentestDomain /></DomainChatWorkspace>;
 }

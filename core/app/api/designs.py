@@ -1,19 +1,27 @@
 """Домен Design: генерация и хранение артефактов (спец. §5.6)."""
 from __future__ import annotations
 
+import shutil
+from pathlib import Path
+from uuid import uuid4
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
+from app.config import get_settings
 from app.db import get_session, get_sessionmaker
 from app.models.design import Design
 from app.models.job import Job
 from app.models.provider import Provider
-from app.models.user import User
+from app.models.user import Project, User, Workspace
 from app.schemas.design import DesignCreate, DesignOut
 from app.schemas.job import JobOut
+from app.schemas.project import ProjectOut
 from app.services import audit, design_gen, jobs, provider_client
 from app.services.auth import get_current_user
+from app.services.files import change_file
 
 router = APIRouter(prefix="/designs", tags=["design"])
 
@@ -154,6 +162,55 @@ async def generate_design_bg(
 
     jobs.launch(sessionmaker, job.id, worker)
     return job
+
+
+@router.post("/{design_id}/project", response_model=ProjectOut, status_code=201)
+async def design_to_project(
+    design_id: str,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> Project:
+    """Передать макет в разработку: файлы макета становятся проектом домена «Код».
+
+    Дальше с ним работает обычный кодинг-агент — можно развивать макет в сайт.
+    Повторный вызов возвращает уже созданный проект, а не плодит копии.
+    """
+    design = await session.get(Design, design_id)
+    if design is None or design.owner_id != user.id:
+        raise HTTPException(status_code=404, detail="Дизайн не найден")
+    if design.project_id:
+        existing = await session.get(Project, design.project_id)
+        if existing is not None:
+            return existing
+
+    workspace = await session.scalar(
+        select(Workspace).where(Workspace.owner_id == user.id).limit(1)
+    )
+    if workspace is None:
+        raise HTTPException(status_code=400, detail="Нет рабочего пространства")
+
+    project_id = str(uuid4())
+    base = Path(workspace.projects_dir or get_settings().projects_dir).resolve()
+    dest = base / project_id
+    await run_in_threadpool(lambda: dest.mkdir(parents=True, mode=0o755))
+    try:
+        for item in design.files or []:
+            name = str(item.get("name") or "index.html")
+            await run_in_threadpool(change_file, dest, name, item.get("content") or "", None)
+        brief = design.brief or {}
+        name = f"Дизайн · {brief.get('artifact_type') or design.stack.value}"
+        project = Project(id=project_id, workspace_id=workspace.id, name=name[:200], path=str(dest))
+        session.add(project)
+        design.project_id = project_id
+        await audit.record(session, actor=user.id, action="design.to_project", target=design_id)
+        await session.commit()
+    except HTTPException:
+        raise
+    except Exception as exc:  # каталог создали мы — не оставляем мусор на диске
+        await session.rollback()
+        await run_in_threadpool(lambda: shutil.rmtree(dest, ignore_errors=True))
+        raise HTTPException(status_code=400, detail="Не удалось создать проект из макета") from exc
+    return project
 
 
 @router.delete("/{design_id}", status_code=204)

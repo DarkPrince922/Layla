@@ -329,6 +329,7 @@ export interface Design {
   brief: Record<string, unknown>;
   files: DesignFile[];
   design_system_ref?: string | null;
+  project_id?: string | null;
 }
 
 export interface KnowledgeDoc {

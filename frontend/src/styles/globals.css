@@ -98,10 +98,11 @@
 .domain-columns { display: flex; min-height: 0; flex: 1; gap: 16px; padding: 0 20px 20px; }
 .domain-list { display: flex; width: 300px; flex-shrink: 0; flex-direction: column; overflow-y: auto; border: 1px solid theme("colors.ink.700 / .7"); border-radius: 24px; background: theme("colors.ink.800 / .3"); }
 .domain-detail { display: flex; min-width: 0; min-height: 0; flex: 1; flex-direction: column; overflow-y: auto; border: 1px solid theme("colors.ink.700 / .7"); border-radius: 24px; background: theme("colors.ink.950 / .2"); }
+.domain-list.is-chat { width: 420px; overflow: hidden; }
 .domain-back { display: none; }
 @container (max-width: 760px) {
   .domain-columns { padding: 0 12px 12px; gap: 0; }
-  .domain-list { width: 100%; }
+  .domain-list, .domain-list.is-chat { width: 100%; }
   .domain-columns[data-detail="true"] > .domain-list { display: none; }
   .domain-columns[data-detail="false"] > .domain-detail { display: none; }
   .domain-back { display: inline-flex; }

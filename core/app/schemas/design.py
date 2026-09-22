@@ -34,5 +34,6 @@ class DesignOut(BaseModel):
     brief: dict = {}
     files: list = []
     design_system_ref: str | None = None
+    project_id: str | None = None  # проект домена «Код», если макет отдан в разработку
 
     model_config = {"from_attributes": True}
