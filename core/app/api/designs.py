@@ -201,6 +201,7 @@ async def design_to_project(
         name = f"Дизайн · {brief.get('artifact_type') or design.stack.value}"
         project = Project(id=project_id, workspace_id=workspace.id, name=name[:200], path=str(dest))
         session.add(project)
+        await session.flush()  # проект в БД раньше ссылки на него (внешний ключ в Postgres)
         design.project_id = project_id
         await audit.record(session, actor=user.id, action="design.to_project", target=design_id)
         await session.commit()

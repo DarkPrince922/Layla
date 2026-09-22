@@ -35,6 +35,16 @@ async def db_sessionmaker(tmp_path_factory):
         f"sqlite+aiosqlite:///{db_file}",
         connect_args={"timeout": 30, "check_same_thread": False},
     )
+    # Проверка внешних ключей, как в Postgres: без неё SQLite молча пропускал
+    # ссылки на ещё не записанные строки, и такие баги всплывали только на сервере.
+    from sqlalchemy import event
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _foreign_keys(dbapi_connection, _record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
     async with engine.begin() as conn:
         await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
         await conn.exec_driver_sql("PRAGMA busy_timeout=30000")

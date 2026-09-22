@@ -425,6 +425,9 @@ async def run_chat(
         project = Project(id=project_id, workspace_id=workspace.id,
                           name=f"{domain.upper()} · {chat.title or body.content[:60]}"[:200], path=str(created_root))
         session.add(project)
+        # Сначала INSERT проекта, потом ссылка на него: без связи в ORM Postgres
+        # иначе получал UPDATE chats раньше INSERT projects и отклонял внешний ключ.
+        await session.flush()
         chat.project_id = project_id
         chat.workspace_id = workspace.id
     root = _project_root(project)
