@@ -369,3 +369,8 @@ export interface AcunetixImportResult {
   sha256_source?: string | null;
   status: string;
 }
+
+export interface ProviderModel {
+  name: string;
+  enabled: boolean;
+}

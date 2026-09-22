@@ -204,3 +204,58 @@ async def accounts_health(
         oauth_accounts=0,  # OAuth-подписки — вторая фаза (спец. §5.1)
         quota_limited=quota_limited,
     )
+
+
+# ---------------------------------------------------------------------------
+# Модели провайдера: загрузка списка и включение/выключение (Settings→Providers)
+# ---------------------------------------------------------------------------
+from app.schemas.provider import ProviderModelInfo, ProviderModelsUpdate  # noqa: E402
+from app.services import provider_client  # noqa: E402
+
+
+@router.get("/{provider_id}/models", response_model=list[ProviderModelInfo])
+async def get_provider_models(
+    provider_id: str,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> list[ProviderModelInfo]:
+    provider = await _owned_provider(session, user, provider_id)
+    return [ProviderModelInfo(**m) for m in (provider.models or [])]
+
+
+@router.post("/{provider_id}/fetch-models", response_model=list[ProviderModelInfo])
+async def fetch_provider_models(
+    provider_id: str,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> list[ProviderModelInfo]:
+    """Запросить список моделей у провайдера (GET /models) и сохранить его.
+
+    Уже известные модели сохраняют свой флаг enabled; новые добавляются как
+    включённые. Так в пикере чата видны только выбранные модели.
+    """
+    provider = await _owned_provider(session, user, provider_id)
+    key = await provider_client.pick_key(session, provider)
+    try:
+        names = await provider_client.list_models(provider, key)
+    except Exception as exc:  # сеть/провайдер
+        raise HTTPException(status_code=502, detail=f"Не удалось загрузить модели: {exc}") from exc
+
+    prev = {m["name"]: bool(m.get("enabled", True)) for m in (provider.models or [])}
+    merged = [{"name": n, "enabled": prev.get(n, True)} for n in names]
+    provider.models = merged
+    await session.commit()
+    return [ProviderModelInfo(**m) for m in merged]
+
+
+@router.put("/{provider_id}/models", response_model=list[ProviderModelInfo])
+async def set_provider_models(
+    provider_id: str,
+    body: ProviderModelsUpdate,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> list[ProviderModelInfo]:
+    provider = await _owned_provider(session, user, provider_id)
+    provider.models = [m.model_dump() for m in body.models]
+    await session.commit()
+    return body.models

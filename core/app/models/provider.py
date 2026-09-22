@@ -11,6 +11,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.db import Base
 from app.models.base import Timestamps, UUIDPk
 from app.models.enums import KeyStatus, ProviderKind
+from app.models.types import JSONList
 
 
 class Provider(UUIDPk, Timestamps, Base):
@@ -26,6 +27,8 @@ class Provider(UUIDPk, Timestamps, Base):
     sort_order: Mapped[int] = mapped_column(default=0)
     # Optional single-key convenience; multi-key rotation uses ProviderKey rows.
     secret_ref: Mapped[str | None] = mapped_column(Text)
+    # Кэш моделей провайдера: [{"name": str, "enabled": bool}] (Settings→Providers).
+    models: Mapped[list] = mapped_column(JSONList, default=list)
 
 
 class ProviderKey(UUIDPk, Timestamps, Base):

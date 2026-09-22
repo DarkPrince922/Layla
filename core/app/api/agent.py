@@ -46,13 +46,22 @@ async def _pick_model(session: AsyncSession, user: User, requested: str | None) 
     if requested:
         return requested
     from app.models.provider import Provider
-    from app.services.litellm import active_model_names
+    from app.api.models import enabled_models
 
-    providers = list(await session.scalars(select(Provider).where(Provider.owner_id == user.id)))
-    names = active_model_names(providers)
-    if not names:
-        raise HTTPException(status_code=400, detail="Нет активной модели для агента")
-    return names[0]
+    providers = list(
+        await session.scalars(
+            select(Provider).where(
+                Provider.owner_id == user.id,
+                Provider.enabled == True,  # noqa: E712
+                Provider.active == True,  # noqa: E712
+            )
+        )
+    )
+    for p in providers:
+        names = enabled_models(p)
+        if names:
+            return names[0]
+    raise HTTPException(status_code=400, detail="Нет активной модели. Включите модель в настройках провайдера.")
 
 
 async def _run_out(session: AsyncSession, run: AgentRun) -> AgentRunOut:

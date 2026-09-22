@@ -77,11 +77,16 @@ async def resolve_provider(
             )
         )
     )
-    # Точное совпадение с default_model / именем профиля.
+    # 1) Провайдер, у которого модель есть в списке моделей.
+    for p in providers:
+        names = [m["name"] for m in (p.models or [])]
+        if model in names:
+            return p
+    # 2) Совпадение с default_model / именем профиля.
     for p in providers:
         if (p.default_model or p.name) == model or p.name == model:
             return p
-    # Иначе — первый активный (единственный агрегатор).
+    # 3) Иначе — первый активный (единственный агрегатор).
     return providers[0] if providers else None
 
 

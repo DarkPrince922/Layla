@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2, KeyRound } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, type ProviderModel } from "@/lib/api";
 import { HttpKeyBanner } from "@/components/HttpKeyBanner";
 
 interface Provider {
@@ -181,38 +181,118 @@ export function ProvidersSettings() {
       ) : (
         <ul className="divide-y divide-ink-700 rounded-lg border border-ink-700">
           {providers.map((p) => (
-            <li key={p.id} className="flex items-center gap-3 px-4 py-3">
-              <div className="flex-1">
-                <div className="flex items-center gap-2 text-sm">
-                  <span className="font-medium">{p.name}</span>
-                  <span className="rounded bg-ink-700 px-1.5 py-0.5 text-[10px] text-neutral-400">
-                    {p.kind}
-                  </span>
-                  {p.active && (
-                    <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[10px] text-emerald-300">
-                      активен
+            <li key={p.id} className="px-4 py-3">
+              <div className="flex items-center gap-3">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 text-sm">
+                    <span className="font-medium">{p.name}</span>
+                    <span className="rounded bg-ink-700 px-1.5 py-0.5 text-[10px] text-neutral-400">
+                      {p.kind}
                     </span>
-                  )}
-                  {p.has_secret && (
-                    <span className="flex items-center gap-1 text-[10px] text-neutral-500">
-                      <KeyRound className="h-3 w-3" /> ключ задан
-                    </span>
-                  )}
+                    {p.active && (
+                      <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[10px] text-emerald-300">
+                        активен
+                      </span>
+                    )}
+                    {p.has_secret && (
+                      <span className="flex items-center gap-1 text-[10px] text-neutral-500">
+                        <KeyRound className="h-3 w-3" /> ключ задан
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-xs text-neutral-500">
+                    {p.base_url || "—"} · {p.default_model || "нет модели по умолчанию"}
+                  </div>
                 </div>
-                <div className="text-xs text-neutral-500">
-                  {p.base_url || "—"} · {p.default_model || "нет модели по умолчанию"}
-                </div>
+                <button
+                  onClick={() => remove.mutate(p.id)}
+                  className="text-neutral-500 hover:text-red-400"
+                  aria-label="Удалить провайдера"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </button>
               </div>
-              <button
-                onClick={() => remove.mutate(p.id)}
-                className="text-neutral-500 hover:text-red-400"
-                aria-label="Удалить провайдера"
-              >
-                <Trash2 className="h-4 w-4" />
-              </button>
+              <ProviderModels providerId={p.id} />
             </li>
           ))}
         </ul>
+      )}
+    </div>
+  );
+}
+
+function ProviderModels({ providerId }: { providerId: string }) {
+  const qc = useQueryClient();
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const { data: models = [] } = useQuery({
+    queryKey: ["provider-models", providerId],
+    queryFn: () => api.get<ProviderModel[]>(`/providers/${providerId}/models`),
+  });
+
+  const fetchModels = useMutation({
+    mutationFn: () => api.post<ProviderModel[]>(`/providers/${providerId}/fetch-models`),
+    onSuccess: (list) => {
+      qc.setQueryData(["provider-models", providerId], list);
+      qc.invalidateQueries({ queryKey: ["models"] });
+      setMsg(`Загружено моделей: ${list.length}`);
+    },
+    onError: (e) => setMsg(e instanceof Error ? e.message : "Ошибка загрузки"),
+  });
+
+  const save = useMutation({
+    mutationFn: (next: ProviderModel[]) =>
+      api.put(`/providers/${providerId}/models`, { models: next }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["models"] }),
+  });
+
+  function toggle(name: string, enabled: boolean) {
+    const next = models.map((m) => (m.name === name ? { ...m, enabled } : m));
+    qc.setQueryData(["provider-models", providerId], next);
+    save.mutate(next);
+  }
+
+  return (
+    <div className="mt-2 rounded-md border border-ink-800 bg-ink-950/40 p-2">
+      <div className="mb-1 flex items-center gap-2">
+        <span className="text-[11px] font-semibold uppercase tracking-wide text-neutral-500">
+          Модели
+        </span>
+        <button
+          onClick={() => fetchModels.mutate()}
+          disabled={fetchModels.isPending}
+          className="rounded bg-ink-700 px-2 py-0.5 text-[11px] text-neutral-200 hover:bg-ink-600 disabled:opacity-50"
+        >
+          {fetchModels.isPending ? "Загрузка…" : "Загрузить модели"}
+        </button>
+        {msg && <span className="text-[10px] text-neutral-500">{msg}</span>}
+      </div>
+      {models.length === 0 ? (
+        <p className="text-[11px] text-neutral-600">
+          Список пуст — нажмите «Загрузить модели» (используется /models провайдера).
+          Пока список пуст, в пикере используется модель по умолчанию.
+        </p>
+      ) : (
+        <div className="flex flex-wrap gap-1.5">
+          {models.map((m) => (
+            <label
+              key={m.name}
+              className={`flex cursor-pointer items-center gap-1 rounded border px-2 py-0.5 text-[11px] ${
+                m.enabled
+                  ? "border-indigo-500/40 bg-indigo-500/10 text-indigo-200"
+                  : "border-ink-700 bg-ink-800 text-neutral-500"
+              }`}
+            >
+              <input
+                type="checkbox"
+                checked={m.enabled}
+                onChange={(e) => toggle(m.name, e.target.checked)}
+                className="h-3 w-3"
+              />
+              {m.name}
+            </label>
+          ))}
+        </div>
       )}
     </div>
   );

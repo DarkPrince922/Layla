@@ -60,3 +60,12 @@ class ModelOut(BaseModel):
     name: str
     provider: str
     provider_id: str
+
+
+class ProviderModelInfo(BaseModel):
+    name: str
+    enabled: bool = True
+
+
+class ProviderModelsUpdate(BaseModel):
+    models: list[ProviderModelInfo]
