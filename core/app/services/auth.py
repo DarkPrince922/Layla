@@ -73,7 +73,7 @@ async def ensure_admin_bootstrapped(session: AsyncSession) -> None:
         return
 
     # Свежая установка: создаём админа со случайным паролем.
-    email = get_settings().admin_email
+    email = get_settings().admin_email.lower().strip()
     password = generate_password()
     admin = User(
         email=email,

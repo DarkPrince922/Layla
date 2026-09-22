@@ -111,6 +111,19 @@ async def test_cannot_demote_last_admin(db_sessionmaker, client):
 
 
 @pytest.mark.asyncio
+async def test_login_is_case_insensitive(client):
+    await client.post(
+        "/api/auth/register",
+        json={"email": "Mixed@Example.com", "password": "hunter2hunter2"},
+    )
+    await client.post("/api/auth/logout")
+    r = await client.post(
+        "/api/auth/login", json={"email": "MIXED@example.COM", "password": "hunter2hunter2"}
+    )
+    assert r.status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_change_password_flow(client):
     await client.post(
         "/api/auth/register",

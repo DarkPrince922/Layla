@@ -100,7 +100,10 @@ async def login(
     response: Response,
     session: AsyncSession = Depends(get_session),
 ) -> User:
-    user = await session.scalar(select(User).where(User.email == body.email))
+    # Регистрация/создание приводят e-mail к нижнему регистру — вход тоже, иначе
+    # «Login@Example.com» не найдёт пользователя «login@example.com».
+    email = body.email.lower().strip()
+    user = await session.scalar(select(User).where(User.email == email))
     if user is None or not verify_password(body.password, user.pw_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Неверная почта или пароль"
