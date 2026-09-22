@@ -23,15 +23,30 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.concurrency import run_in_threadpool
 
-from app.api.projects import _default_workspace, _owned_project, _project_root
+from app.api.projects import (
+    _default_workspace,
+    _owned_project,
+    _project_root,
+    purge_dirs,
+    remove_project,
+)
 from app.config import get_settings
 from app.db import get_session, get_sessionmaker
 from app.models.chat import Chat, Message
+from app.models.design import Design
+from app.models.enums import Domain
 from app.models.job import Job
 from app.models.persona import Persona
 from app.models.provider import Provider
 from app.models.user import Project, User, Workspace
-from app.schemas.chat import ChatCreate, ChatDetail, ChatOut, MessageOut, SendMessageRequest
+from app.schemas.chat import (
+    ChatCreate,
+    ChatDetail,
+    ChatOut,
+    ClearChatsOut,
+    MessageOut,
+    SendMessageRequest,
+)
 from app.schemas.job import JobOut
 from app.services import audit, jobs, project_agent, provider_client
 from app.services.auth import get_current_user
@@ -131,8 +146,58 @@ async def delete_chat(
     active = await session.scalar(select(Job.id).where(Job.chat_id == chat_id, Job.status.in_(jobs.ACTIVE)))
     if active:
         raise HTTPException(status_code=409, detail="Сначала остановите задачу этого чата")
-    await session.delete(chat)
+    folder = await _delete_chat(session, chat)
     await session.commit()
+    if folder:
+        await purge_dirs([folder])
+
+
+@router.delete("", response_model=ClearChatsOut)
+async def clear_chats(
+    domain: Domain,
+    project_id: str | None = None,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> ClearChatsOut:
+    """Очистить историю раздела (или проекта в «Коде»). Работающие чаты не трогаем."""
+    query = select(Chat).where(Chat.owner_id == user.id, Chat.domain == domain)
+    if project_id:
+        await _owned_project(session, user, project_id)
+        query = query.where(Chat.project_id == project_id)
+    busy = set(await session.scalars(
+        select(Job.chat_id).where(Job.owner_id == user.id, Job.chat_id.is_not(None), Job.status.in_(jobs.ACTIVE))
+    ))
+    deleted, skipped, folders = 0, 0, []
+    for chat in list(await session.scalars(query)):
+        if chat.id in busy:
+            skipped += 1
+            continue
+        folder = await _delete_chat(session, chat)
+        deleted += 1
+        if folder:
+            folders.append(folder)
+    await audit.record(session, actor=user.id, action="chat.clear", target=domain.value,
+                       meta={"deleted": deleted, "skipped": skipped})
+    await session.commit()
+    await purge_dirs(folders)
+    return ClearChatsOut(deleted=deleted, skipped=skipped)
+
+
+async def _delete_chat(session: AsyncSession, chat: Chat) -> Path | None:
+    """Удалить чат. Вне «Кода» у чата своя рабочая папка-проект: если она больше
+    никому не нужна (нет других чатов и макетов), удаляем и её, иначе такие
+    проекты копились бы в списке «Кода»."""
+    if chat.project_id and chat.domain != Domain.code:
+        project = await session.get(Project, chat.project_id)
+        if project is not None and not project.repo_url:
+            other = await session.scalar(
+                select(Chat.id).where(Chat.project_id == project.id, Chat.id != chat.id).limit(1)
+            )
+            linked = await session.scalar(select(Design.id).where(Design.project_id == project.id).limit(1))
+            if other is None and linked is None:
+                return await remove_project(session, project)
+    await session.delete(chat)
+    return None
 
 
 async def _build_messages(session: AsyncSession, chat: Chat) -> list[dict[str, str]]:
@@ -304,8 +369,12 @@ async def run_chat(
         previous = await session.scalar(select(Job).where(Job.chat_id == chat_id, Job.request_id == body.request_id))
         if previous:
             return previous
-    active = await session.scalar(select(Job.id).where(Job.chat_id == chat_id, Job.status.in_(jobs.ACTIVE)))
-    if active:
+    active = await session.scalar(select(Job).where(Job.chat_id == chat_id, Job.status.in_(jobs.ACTIVE)))
+    if active is not None and jobs.is_orphaned(active):
+        # Задача числится активной, но её воркер умер — не держим чат запертым.
+        await jobs.release_orphan(maker, active.id)
+        active = None
+    if active is not None:
         raise HTTPException(status_code=409, detail="В этом чате уже выполняется задача. Можно открыть другой чат.")
     if not body.content.strip():
         raise HTTPException(status_code=400, detail="Сообщение не должно быть пустым")
@@ -355,6 +424,7 @@ async def run_chat(
         chat.workspace_id = workspace.id
     root = _project_root(project)
     project_id = project.id
+    mode = body.mode
     try:
         chat.model = model
         if not chat.title or chat.title == "Новый чат":
@@ -372,7 +442,8 @@ async def run_chat(
         job = Job(owner_id=owner_id, domain=domain, kind="project.agent", title=body.content[:80],
                   chat_id=chat_id, request_id=body.request_id, status="queued",
                   created_at=datetime.now(UTC),
-                  result={"chat_id": chat_id, "message_id": msg_id, "project_id": project_id})
+                  result={"chat_id": chat_id, "message_id": msg_id, "project_id": project_id,
+                          "mode": mode})
         session.add(job)
         await session.commit()
         await session.refresh(job)
@@ -403,7 +474,8 @@ async def run_chat(
                 if msg is None:
                     return
                 msg.content = "".join(full)
-                msg.meta = {"reasoning": "".join(reasoning), "tools": list(tools.values()), "error": error}
+                msg.meta = {"reasoning": "".join(reasoning), "tools": list(tools.values()), "error": error,
+                            "mode": mode}
                 if change:
                     await audit.record(output_session, actor=owner_id,
                                        action="project.agent." + change["operation"],
@@ -417,7 +489,19 @@ async def run_chat(
                 raise RuntimeError("Провайдер отключён или удалён. Выберите другую модель.")
             key = await provider_client.pick_key(h.session, prov)
             await h.step("Модель обрабатывает запрос", progress=0.05)
-            async for event in project_agent.run(prov, key, model, payload, root, permissions):
+            async def approve(pending: dict) -> str:
+                """Режим «С подтверждением»: ждём решения пользователя по изменению."""
+                label = _TOOL_LABELS.get(pending["name"], pending["name"])
+                await h.set_result({"approval": {"id": pending["id"], "name": pending["name"],
+                                                 "path": pending.get("path", "")}})
+                await h.step(f"Ждёт подтверждения — {label}: {pending.get('path', '')}")
+                try:
+                    return await jobs.wait_decision(h.job.id, pending["id"])
+                finally:
+                    await h.set_result({"approval": None})
+
+            async for event in project_agent.run(prov, key, model, payload, root, permissions,
+                                                 mode=mode, approve=approve):
                 if "delta" in event:
                     full.append(event["delta"])
                 elif "reasoning" in event:
@@ -427,9 +511,11 @@ async def run_chat(
                     tool = event["tool"]
                     tools[tool["id"]] = tool
                     label = _TOOL_LABELS.get(tool["name"], tool["name"])
-                    suffix = " — ошибка" if tool["status"] == "error" else " — готово" if tool["status"] == "done" else ""
-                    await h.step(f"{label}: {tool.get('path', '')}{suffix}")
-                    await persist(tool.get("change"))
+                    suffix = {"error": " — ошибка", "done": " — готово", "rejected": " — отклонено"}.get(tool["status"], "")
+                    if tool["status"] != "pending":
+                        await h.step(f"{label}: {tool.get('path', '')}{suffix}")
+                    # В аудит — только применённые изменения, не превью на подтверждение.
+                    await persist(tool.get("change") if tool["status"] == "done" else None)
                 if time.monotonic() - last_persist >= 0.7:
                     await persist()
             await h.step("Ответ сохранён", progress=1.0)
@@ -441,7 +527,7 @@ async def run_chat(
             raise
         finally:
             for tool_id, tool in list(tools.items()):
-                if tool["status"] == "running":
+                if tool["status"] in ("running", "pending"):
                     tools[tool_id] = {**tool, "status": "error", "error": error or "Вызов прерван"}
             await persist()
 

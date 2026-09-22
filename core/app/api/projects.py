@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote
@@ -46,6 +47,33 @@ async def _owned_project(session: AsyncSession, user: User, project_id: str) -> 
     if ws is None or ws.owner_id != user.id:
         raise HTTPException(status_code=404, detail="Проект не найден")
     return project
+
+
+def _disposable_dir(project: Project, workspace: Workspace | None) -> Path | None:
+    """Каталог проекта, который безопасно стереть: строго внутри каталога проектов."""
+    if not project.path:
+        return None
+    base = Path((workspace.projects_dir if workspace else None) or get_settings().projects_dir).resolve()
+    target = Path(project.path).resolve()
+    if target == base or base not in target.parents:
+        return None
+    return target
+
+
+async def remove_project(session: AsyncSession, project: Project) -> Path | None:
+    """Удалить проект вместе с его чатами. Возвращает каталог, который нужно
+    стереть после commit (сначала БД — чтобы сбой не оставил записи без файлов)."""
+    workspace = await session.get(Workspace, project.workspace_id)
+    folder = _disposable_dir(project, workspace)
+    for chat in list(await session.scalars(select(Chat).where(Chat.project_id == project.id))):
+        await session.delete(chat)
+    await session.delete(project)
+    return folder
+
+
+async def purge_dirs(folders: list[Path]) -> None:
+    for folder in folders:
+        await run_in_threadpool(shutil.rmtree, folder, True)
 
 
 def _project_root(project: Project) -> str:
@@ -281,5 +309,9 @@ async def delete_project(
     )
     if active:
         raise HTTPException(status_code=409, detail="В проекте выполняется задача. Сначала остановите её.")
-    await session.delete(project)
+    folder = await remove_project(session, project)
+    await audit.record(session, actor=user.id, action="project.delete", target=project_id)
     await session.commit()
+    # Раньше удалялась только запись, а файлы копились на диске.
+    if folder:
+        await purge_dirs([folder])

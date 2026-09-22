@@ -187,7 +187,7 @@ export interface ChatMessage {
   reasoning?: string;
   tools?: ToolEvent[];
   error?: string | null;
-  meta?: { reasoning?: string; tools?: ToolEvent[]; error?: string | null };
+  meta?: { reasoning?: string; tools?: ToolEvent[]; error?: string | null; mode?: "auto" | "confirm" | "plan" };
 }
 
 export interface ChatDetail extends Chat {
@@ -240,7 +240,7 @@ export interface ToolEvent {
   id: string;
   name: string;
   path: string;
-  status: "running" | "done" | "error";
+  status: "running" | "pending" | "done" | "error" | "rejected";
   error?: string;
   change?: FileChange;
 }

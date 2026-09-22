@@ -134,7 +134,7 @@ async def test_selected_model_sticks_to_chat(client, monkeypatch):
 
     from app.services import project_agent
 
-    async def fake_run(provider, key, model, payload, root, permissions):
+    async def fake_run(provider, key, model, payload, root, permissions, **kw):
         yield {"delta": "ok"}
 
     monkeypatch.setattr(project_agent, "run", fake_run)
@@ -156,7 +156,7 @@ async def test_explicit_provider_wins_over_name_guess(client, monkeypatch):
     second = await _add_second_provider(client, model="shared")
     used: dict[str, str] = {}
 
-    async def fake_run(provider, key, model, payload, root, permissions):
+    async def fake_run(provider, key, model, payload, root, permissions, **kw):
         used["base"] = provider.base_url
         yield {"delta": "ok"}
 

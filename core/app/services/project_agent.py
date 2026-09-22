@@ -1,4 +1,6 @@
-"""Bounded code-chat loop with project-scoped file tools, no shell execution."""
+"""Code-chat loop with project-scoped file tools, no shell execution.
+
+Modes: auto / confirm / plan (see MODES)."""
 
 from __future__ import annotations
 
@@ -11,9 +13,34 @@ from starlette.concurrency import run_in_threadpool
 from app.schemas.project import FileWrite
 from app.services import files, tool_chat
 
-MAX_ROUNDS = 12
-MAX_CALLS = 48
-MAX_SECONDS = 300
+# Страховочные пределы, а не рабочие: на обычных задачах агент до них не доходит.
+# Достигнув предела, агент останавливается мягко (ответ сохраняется как обычный),
+# а не падает ошибкой — пользователь просто пишет «продолжай».
+MAX_ROUNDS = 80
+MAX_CALLS = 400
+MAX_SECONDS = 3000
+
+# Режимы работы чата:
+#  auto    — агент сам применяет изменения;
+#  confirm — каждое изменение файла ждёт подтверждения пользователя;
+#  plan    — только чтение: агент изучает проект и предлагает план, ничего не меняя.
+MODES = ("auto", "confirm", "plan")
+MUTATING = frozenset({"write_file", "delete_file"})
+LIMIT_NOTE = (
+    "\n\n_Остановился на страховочном лимите шагов. Изменения сохранены — "
+    "напишите «продолжай», и я продолжу с этого места._"
+)
+_MODE_PROMPTS = {
+    "plan": (
+        "\nPLAN MODE: you may only inspect the project (list_files, read_file). Do not try to "
+        "modify anything. Reply with a concise numbered plan: which files you will create or "
+        "change and what exactly. Finish by saying the plan is ready to execute."
+    ),
+    "confirm": (
+        "\nThe user reviews every file change before it is applied. If a change is rejected, "
+        "do not repeat it blindly: adapt or ask what to change."
+    ),
+}
 
 SYSTEM_PROMPT = """You are Layla, the assistant for this conversation's isolated project. Follow the user's domain and task. Use list_files,
 read_file, write_file and delete_file to actually implement the user's request.
@@ -114,14 +141,32 @@ def permitted_tools(permissions: list[str] | None) -> list[dict]:
     return [t for t in TOOLS if required[t["function"]["name"]] in permissions]
 
 
-async def run(provider, key, model: str, messages: list[dict], root: str, permissions=None):
+def preview(root: str, name: str, arguments: dict) -> dict | None:
+    """Diff будущего изменения — показать пользователю до применения."""
+    try:
+        args = _ARGUMENTS[name].model_validate(arguments)
+        content = args.content if isinstance(args, FileWrite) else None
+        return files.preview_change(root, args.path, content)
+    except Exception:  # noqa: BLE001 — нет превью, но решение всё равно за пользователем
+        return None
+
+
+async def run(
+    provider, key, model: str, messages: list[dict], root: str, permissions=None,
+    *, mode: str = "auto", approve=None,
+):
+    """approve(event) -> "approve" | "reject" | "approve_all" — только для режима confirm."""
     available = permitted_tools(permissions)
+    if mode == "plan":
+        available = [t for t in available if t["function"]["name"] not in MUTATING]
     allowed_names = {t["function"]["name"] for t in available}
     prompt = (
         SYSTEM_PROMPT
         + "\nOnly these tools are permitted for your persona: "
         + ", ".join(sorted(allowed_names))
+        + _MODE_PROMPTS.get(mode, "")
     )
+    ask = approve if mode == "confirm" else None
     conversation = [{"role": "system", "content": prompt}, *messages]
     used = 0
     async with asyncio.timeout(MAX_SECONDS):
@@ -146,9 +191,9 @@ async def run(provider, key, model: str, messages: list[dict], root: str, permis
             if not calls:
                 return
             if used + len(calls) > MAX_CALLS:
-                raise RuntimeError(
-                    "Достигнут лимит файловых операций. Продолжите следующим сообщением."
-                )
+                # Лишний пакет не выполняется; ответ завершается штатно.
+                yield {"delta": LIMIT_NOTE}
+                return
             assistant = {"role": "assistant", "content": "".join(content), "tool_calls": calls, **context}
             if reasoning:
                 assistant["reasoning_content"] = "".join(reasoning)
@@ -164,6 +209,29 @@ async def run(provider, key, model: str, messages: list[dict], root: str, permis
                     "status": "running",
                 }
                 yield {"tool": event}
+                if ask is not None and name in MUTATING and name in allowed_names:
+                    change = await run_in_threadpool(preview, root, name, arguments)
+                    pending = {**event, "status": "pending"}
+                    if change:
+                        pending["change"] = change
+                    yield {"tool": pending}
+                    decision = await ask(pending)
+                    if decision == "approve_all":
+                        ask = None
+                    elif decision != "approve":
+                        rejected = {**event, "status": "rejected", "error": "Отклонено пользователем"}
+                        if change:
+                            rejected["preview"] = change
+                        conversation.append({
+                            "role": "tool",
+                            "tool_call_id": call["id"],
+                            "content": json.dumps(
+                                {"error": "Пользователь отклонил это изменение."}, ensure_ascii=False
+                            ),
+                            "is_error": True,
+                        })
+                        yield {"tool": rejected}
+                        continue
                 result = await run_in_threadpool(execute, root, name, arguments, allowed_names)
                 event = {**event, "status": "error" if "error" in result else "done"}
                 if "error" in result:
@@ -185,6 +253,4 @@ async def run(provider, key, model: str, messages: list[dict], root: str, permis
                     }
                 )
                 yield {"tool": event}
-        raise RuntimeError(
-            "Достигнут лимит шагов агента. Изменения сохранены; продолжите следующим сообщением."
-        )
+        yield {"delta": LIMIT_NOTE}

@@ -180,7 +180,7 @@ async def test_coding_agent_runs_in_background(client, tmp_path, monkeypatch):
         "/api/chats", json={"project_id": project["id"], "model": "gpt-4o"}
     )).json()
 
-    async def fake_run(provider, key, model, payload, root, permissions):
+    async def fake_run(provider, key, model, payload, root, permissions, **kw):
         yield {"reasoning": "планирую структуру"}
         yield {"tool": {"id": "t1", "name": "write_file", "path": "index.html",
                         "status": "done",
@@ -217,7 +217,7 @@ async def test_plain_chat_runs_in_background_and_persists(client, monkeypatch):
     chat = (await client.post("/api/chats", json={"domain": "osint", "model": "gpt-4o"})).json()
 
     from app.services import project_agent
-    async def fake_run(*args):
+    async def fake_run(*args, **kw):
         yield {"reasoning": "ищу зацепки"}
         yield {"delta": "Вот что нашлось по цели."}
 
@@ -243,7 +243,7 @@ async def test_parallel_chats_partial_failure_and_cancel(client, monkeypatch):
     await _register(client, "parallel@example.com")
     await client.post("/api/providers", json={"name": "M", "kind": "openai_compatible", "base_url": "http://p/v1", "default_model": "test", "active": True})
     gate = asyncio.Event()
-    async def fake_run(*args):
+    async def fake_run(*args, **kw):
         yield {"delta": "Сохранённая часть ответа"}
         await gate.wait()
         raise RuntimeError("Проверочная ошибка провайдера")

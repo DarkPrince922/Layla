@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from app.models.enums import Domain
@@ -45,3 +47,16 @@ class SendMessageRequest(BaseModel):
     request_id: str | None = Field(default=None, min_length=1, max_length=64)
     model: str | None = None  # выбранная модель; закрепляется за чатом
     provider_id: str | None = None  # явный провайдер из пикера (имена моделей могут совпадать)
+    # auto — агент сам применяет изменения; confirm — каждое изменение ждёт «Применить»;
+    # plan — только чтение и план, без изменений.
+    mode: Literal["auto", "confirm", "plan"] = "auto"
+
+
+class DecisionRequest(BaseModel):
+    approval_id: str = Field(min_length=1, max_length=200)
+    decision: Literal["approve", "reject", "approve_all"]
+
+
+class ClearChatsOut(BaseModel):
+    deleted: int
+    skipped: int  # чаты с работающей задачей не удаляются

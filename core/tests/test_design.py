@@ -148,3 +148,20 @@ async def test_delete_design(client, monkeypatch):
     design = (await client.post("/api/designs", json={"stack": "html", "brief": {}})).json()
     assert (await client.delete(f"/api/designs/{design['id']}")).status_code == 204
     assert (await client.get("/api/designs")).json() == []
+
+
+@pytest.mark.asyncio
+async def test_clear_all_versions_keeps_projects(client, monkeypatch):
+    """«Удалить все версии» чистит историю, но проекты из макетов остаются."""
+    await _register_with_active_provider(client)
+
+    async def fake_complete(provider, key, model, messages, **kw):
+        return "<h1>x</h1>"
+
+    monkeypatch.setattr(pc, "complete", fake_complete)
+    first = (await client.post("/api/designs", json={"stack": "html", "brief": {}})).json()
+    await client.post("/api/designs", json={"stack": "html", "brief": {}})
+    project = (await client.post(f"/api/designs/{first['id']}/project")).json()
+    assert (await client.delete("/api/designs")).status_code == 204
+    assert (await client.get("/api/designs")).json() == []
+    assert any(p["id"] == project["id"] for p in (await client.get("/api/projects")).json())

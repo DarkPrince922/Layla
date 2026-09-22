@@ -98,6 +98,35 @@ export function CodeDomain() {
     setStale(false);
     setError(null);
   }
+  // Удаляет проект целиком: файлы на сервере и чаты проекта (бэкенд стирает папку).
+  async function removeProject(target: Project) {
+    if (pending) return;
+    if (target.id === projectId && !canLeave()) return;
+    if (!window.confirm(`Удалить проект «${target.name}»? Файлы проекта и его чаты будут удалены с сервера безвозвратно. Если нужна копия — сначала скачайте ZIP.`)) return;
+    setPending(true);
+    setError(null);
+    try {
+      await api.del(`/projects/${target.id}`);
+      qc.setQueryData<Project[]>(["projects"], (old = []) => old.filter((p) => p.id !== target.id));
+      if (target.id === projectId) {
+        openSequence.current++;
+        setProjectId(null);
+        setOpenFile(null);
+        setDraft("");
+        setChange(null);
+        setStale(false);
+        try { localStorage.removeItem(projectKey); } catch {}
+      }
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["projects"] }),
+        qc.invalidateQueries({ queryKey: ["chats"] }),
+      ]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось удалить проект");
+    } finally {
+      setPending(false);
+    }
+  }
   async function createProject() {
     if (!canLeave()) return;
     setPending(true);
@@ -319,19 +348,29 @@ export function CodeDomain() {
           )}
           <div className="max-h-48 shrink-0 overflow-y-auto border-b border-ink-700/60 px-3 pb-3">
             {projects.map((p) => (
-              <button
-                key={p.id}
-                disabled={pending}
-                onClick={() => selectProject(p.id)}
-                className={`flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-xs ${projectId === p.id ? "bg-accent-500/15 text-accent-200" : "text-neutral-300 hover:bg-ink-800"}`}
-              >
-                {p.repo_url ? (
-                  <FolderGit2 className="h-4 w-4 shrink-0" />
-                ) : (
-                  <Folder className="h-4 w-4 shrink-0" />
-                )}
-                <span className="truncate">{p.name}</span>
-              </button>
+              <div key={p.id} className={`group flex items-center rounded-lg ${projectId === p.id ? "bg-accent-500/15 text-accent-200" : "text-neutral-300 hover:bg-ink-800"}`}>
+                <button
+                  disabled={pending}
+                  onClick={() => selectProject(p.id)}
+                  className="flex min-w-0 flex-1 items-center gap-2 px-2 py-2 text-left text-xs"
+                >
+                  {p.repo_url ? (
+                    <FolderGit2 className="h-4 w-4 shrink-0" />
+                  ) : (
+                    <Folder className="h-4 w-4 shrink-0" />
+                  )}
+                  <span className="truncate">{p.name}</span>
+                </button>
+                <button
+                  aria-label={`Удалить проект ${p.name}`}
+                  title="Удалить проект"
+                  disabled={pending}
+                  onClick={() => removeProject(p)}
+                  className="mr-1 shrink-0 rounded p-1.5 text-neutral-500 opacity-60 hover:bg-red-500/15 hover:text-red-300 group-hover:opacity-100"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
             ))}
           </div>
           {projectId && (

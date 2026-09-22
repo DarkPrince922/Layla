@@ -213,6 +213,18 @@ async def design_to_project(
     return project
 
 
+@router.delete("", status_code=204)
+async def clear_designs(
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    """Удалить все версии пользователя. Проекты, созданные из них, остаются."""
+    for design in list(await session.scalars(select(Design).where(Design.owner_id == user.id))):
+        await session.delete(design)
+    await audit.record(session, actor=user.id, action="design.clear", target=user.id)
+    await session.commit()
+
+
 @router.delete("/{design_id}", status_code=204)
 async def delete_design(
     design_id: str,

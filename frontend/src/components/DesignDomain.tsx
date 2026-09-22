@@ -1,10 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import {
-  ArrowLeft, ArrowRight, ChevronDown, Code2, Eye, Monitor, Palette, Smartphone,
+  ArrowLeft, ArrowRight, ChevronDown, Code2, Eye, History, Monitor, Palette, Smartphone,
   Sparkles, Tablet, Trash2,
 } from "lucide-react";
 import { ChatPanel } from "@/components/ChatPanel";
@@ -43,6 +43,7 @@ export function DesignDomain() {
   const [bp, setBp] = useState<keyof typeof BREAKPOINTS>("desktop");
   const [pane, setPane] = useState<"chat" | "result">("chat");
   const [busy, setBusy] = useState(false);
+  const versionsMenu = useRef<HTMLDetailsElement>(null);
   const [error, setError] = useState<string | null>(null);
   // id верхней версии на момент запуска генерации: новая версия появится выше неё.
   const [awaiting, setAwaiting] = useState<string | null>(null);
@@ -116,7 +117,28 @@ export function DesignDomain() {
   // Пока чат не создал страницу, показывать нечего — тогда видна последняя версия брифа.
   const version = picked || (page ? null : designs[0] || null);
   const html = version ? version.files?.[0]?.content ?? "" : live.data?.content ?? "";
-  const choice = version?.id ?? "";
+
+  const versionLabel = (d: Design) => {
+    const i = designs.findIndex(x => x.id === d.id);
+    return `Версия ${designs.length - i} · ${String((d.brief as Record<string, string>)?.artifact_type || "Design")} · ${d.stack}`;
+  };
+  function choose(next: Source) {
+    setSource(next);
+    if (versionsMenu.current) versionsMenu.current.open = false;
+  }
+  async function clearVersions() {
+    if (!designs.length || !window.confirm(`Удалить все версии (${designs.length})? Проекты, созданные из них в «Коде», останутся.`)) return;
+    setBusy(true);
+    try {
+      await api.del("/designs");
+      setSource({ kind: "chat" });
+      await qc.invalidateQueries({ queryKey: ["designs"] });
+      if (versionsMenu.current) versionsMenu.current.open = false;
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось удалить версии");
+    } finally { setBusy(false); }
+  }
 
   async function removeVersion(id: string) {
     if (!window.confirm("Удалить эту версию макета? Проект, созданный из неё, останется.")) return;
@@ -241,24 +263,35 @@ export function DesignDomain() {
               <ToolbarBtn active={view === "preview"} onClick={() => setView("preview")}><Eye className="h-3.5 w-3.5" /> Превью</ToolbarBtn>
               <ToolbarBtn active={view === "code"} onClick={() => setView("code")}><Code2 className="h-3.5 w-3.5" /> Код</ToolbarBtn>
             </div>
-            <select
-              aria-label="Источник превью"
-              value={choice}
-              onChange={e => setSource(e.target.value ? { kind: "design", id: e.target.value } : { kind: "chat" })}
-              className="min-w-0 max-w-[45%] rounded-lg bg-ink-900 px-2 py-1.5 text-xs"
-            >
-              <option value="" disabled={!page}>{page ? `Файлы чата · ${page.name}` : "Файлы чата — пока пусто"}</option>
-              {designs.map((d, i) => (
-                <option key={d.id} value={d.id}>
-                  {`Версия ${designs.length - i} · ${String((d.brief as Record<string, string>)?.artifact_type || "Design")} · ${d.stack}`}
-                </option>
-              ))}
-            </select>
-            {version && (
-              <button onClick={() => removeVersion(version.id)} disabled={busy} aria-label="Удалить версию" title="Удалить версию" className="icon-button hover:bg-red-500/15 hover:text-red-300">
-                <Trash2 className="h-4 w-4" />
-              </button>
-            )}
+            {/* Версии: выбор для превью и удаление — у каждой своя корзина. */}
+            <details ref={versionsMenu} className="relative min-w-0">
+              <summary aria-label="Версии и источник превью" className="flex cursor-pointer list-none items-center gap-1.5 rounded-lg bg-ink-900 px-2.5 py-1.5 text-xs [&::-webkit-details-marker]:hidden">
+                <History className="h-3.5 w-3.5 shrink-0 text-accent-300" />
+                <span className="max-w-[14rem] truncate">{version ? versionLabel(version) : page ? `Файлы чата · ${page.name}` : "Файлы чата"}</span>
+                <span className="shrink-0 text-neutral-500">{designs.length ? `· ${designs.length}` : ""}</span>
+                <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+              </summary>
+              <div className="absolute left-0 top-full z-20 mt-2 w-72 max-w-[calc(100vw-48px)] rounded-xl border border-ink-600 bg-ink-900 p-1.5 shadow-floating">
+                <button disabled={!page} onClick={() => choose({ kind: "chat" })} className={`block w-full truncate rounded-lg px-2 py-1.5 text-left text-xs disabled:opacity-50 ${!version ? "bg-ink-800 text-white" : "hover:bg-ink-800"}`}>
+                  {page ? `Файлы чата · ${page.name}` : "Файлы чата — пока пусто"}
+                </button>
+                <p className="px-2 pb-1 pt-2 text-[11px] uppercase text-neutral-500">Версии по брифу</p>
+                {!designs.length && <p className="px-2 py-1 text-xs text-neutral-500">Пока нет — сгенерируйте по брифу.</p>}
+                <div className="max-h-64 overflow-y-auto">
+                  {designs.map(d => (
+                    <div key={d.id} className={`flex items-center rounded-lg ${version?.id === d.id ? "bg-ink-800 text-white" : "hover:bg-ink-800"}`}>
+                      <button onClick={() => choose({ kind: "design", id: d.id })} className="min-w-0 flex-1 truncate px-2 py-1.5 text-left text-xs">{versionLabel(d)}</button>
+                      <button onClick={() => removeVersion(d.id)} disabled={busy} aria-label={`Удалить ${versionLabel(d)}`} title="Удалить версию" className="shrink-0 rounded p-1.5 text-neutral-500 hover:bg-red-500/15 hover:text-red-300">
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                {designs.length > 1 && (
+                  <button onClick={clearVersions} disabled={busy} className="mt-1 w-full rounded-lg px-2 py-1.5 text-left text-xs text-red-300 hover:bg-red-500/10">Удалить все версии</button>
+                )}
+              </div>
+            </details>
             {view === "preview" && (
               <div className="ml-auto flex gap-1">
                 <ToolbarBtn label="Компьютер" active={bp === "desktop"} onClick={() => setBp("desktop")}><Monitor className="h-3.5 w-3.5" /></ToolbarBtn>

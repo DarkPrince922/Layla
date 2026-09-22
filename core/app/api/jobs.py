@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_session, get_sessionmaker
 from app.models.job import Job
 from app.models.user import User
+from app.schemas.chat import DecisionRequest
 from app.schemas.job import JobOut
 from app.services import jobs as job_service
 from app.services.auth import get_current_user
@@ -73,4 +74,14 @@ async def cancel_job(job_id: str, user: User = Depends(get_current_user),
             # A worker missing from this process is not silently reported as stopped.
             raise HTTPException(status_code=409, detail="Задача уже завершается. Обновите её состояние.")
         job = await session.get(Job, job_id, populate_existing=True)
+    return job
+
+
+@router.post("/{job_id}/decision", response_model=JobOut)
+async def decide(job_id: str, body: DecisionRequest, user: User = Depends(get_current_user),
+                 session: AsyncSession = Depends(get_session)) -> Job:
+    """Решение по изменению в режиме «С подтверждением»: применить / отклонить / применять всё."""
+    job = await get_job(job_id, user, session)
+    if not job_service.decide(job_id, body.approval_id, body.decision):
+        raise HTTPException(status_code=409, detail="Это изменение уже не ждёт решения. Обновите чат.")
     return job
