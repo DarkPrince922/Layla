@@ -32,8 +32,13 @@ def upgrade() -> None:
     # Only these built-ins gain scoped document output. Read-only/custom personas stay unchanged.
     personas = sa.table("personas", sa.column("id"), sa.column("is_builtin", sa.Boolean),
                         sa.column("kind"), sa.column("allowed_tools", sa.JSON))
-    rows = bind.execute(sa.select(personas).where(personas.c.is_builtin.is_(True),
-                        personas.c.kind.in_(["pentest", "osint"]))).mappings()
+    # personas.kind — нативный ENUM в Postgres; сравнение с VARCHAR там падает
+    # («operator does not exist: personakind = character varying»). Приводим к
+    # тексту — работает и в Postgres, и в SQLite.
+    rows = bind.execute(sa.select(personas).where(
+        personas.c.is_builtin.is_(True),
+        sa.cast(personas.c.kind, sa.Text).in_(["pentest", "osint"]),
+    )).mappings()
     for row in rows:
         permissions = list(dict.fromkeys([*(row["allowed_tools"] or []), "files.read", "files.write"]))
         bind.execute(personas.update().where(personas.c.id == row["id"]).values(allowed_tools=permissions))
