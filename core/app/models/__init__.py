@@ -6,6 +6,7 @@ from app.models.audit import AuditLog
 from app.models.chat import Chat, Message
 from app.models.combo import Combo
 from app.models.design import Design
+from app.models.job import Job
 from app.models.knowledge import KnowledgeChunk, KnowledgeDoc
 from app.models.mcp import IntelKey, McpServer
 from app.models.telegram import TelegramConfig
@@ -32,6 +33,7 @@ __all__ = [
     "Message",
     "Combo",
     "Design",
+    "Job",
     "KnowledgeChunk",
     "KnowledgeDoc",
     "IntelKey",

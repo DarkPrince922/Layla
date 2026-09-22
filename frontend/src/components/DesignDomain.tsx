@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Sparkles, Monitor, Tablet, Smartphone, Code2, Eye } from "lucide-react";
-import { api, type Design, type ModelInfo } from "@/lib/api";
+import { api, type Design, type Job, type ModelInfo } from "@/lib/api";
 
 const STACKS = ["html", "react", "vue"];
 const ARTIFACTS = ["Landing", "Dashboard", "Pricing", "Mobile app", "Email", "Editorial", "Slides"];
@@ -35,6 +35,7 @@ export function DesignDomain() {
   const [view, setView] = useState<"preview" | "code">("preview");
   const [bp, setBp] = useState<keyof typeof BREAKPOINTS>("desktop");
   const [error, setError] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
 
   const { data: models = [] } = useQuery({
     queryKey: ["models"],
@@ -45,13 +46,15 @@ export function DesignDomain() {
     queryFn: () => api.get<Design[]>("/designs"),
   });
 
+  // Генерация идёт в ФОНЕ: можно уйти в другой домен, прогресс виден в панели
+  // «В работе». Готовый дизайн подтянется в историю по завершении задачи.
   const generate = useMutation({
     mutationFn: () =>
-      api.post<Design>("/designs", { stack, brief, model: model || undefined }),
-    onSuccess: (d) => {
-      qc.invalidateQueries({ queryKey: ["designs"] });
-      setActive(d);
+      api.post<Job>("/designs/generate", { stack, brief, model: model || undefined }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["jobs", "active"] });
       setError(null);
+      setNote("Генерация запущена в фоне — следите за прогрессом в панели «В работе» слева. Можно переключиться в другой домен.");
     },
     onError: (e) => setError(e instanceof Error ? e.message : "Ошибка генерации"),
   });
@@ -176,8 +179,14 @@ export function DesignDomain() {
           className="flex items-center justify-center gap-1.5 rounded-md bg-indigo-600 px-3 py-2 text-sm text-white hover:bg-indigo-500 disabled:opacity-50"
         >
           <Sparkles className="h-4 w-4" />
-          {generate.isPending ? "Генерация…" : "Сгенерировать"}
+          {generate.isPending ? "Запуск…" : "Сгенерировать в фоне"}
         </button>
+
+        {note && (
+          <p className="mt-2 rounded border border-indigo-500/30 bg-indigo-500/10 px-2 py-1.5 text-[11px] leading-relaxed text-indigo-200">
+            {note}
+          </p>
+        )}
 
         {designs.length > 0 && (
           <div className="mt-4">

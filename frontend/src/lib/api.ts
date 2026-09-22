@@ -94,6 +94,24 @@ export interface OsintSource {
   artifact_count: number;
 }
 
+export interface JobStep {
+  text: string;
+  at?: string | null;
+}
+
+export interface Job {
+  id: string;
+  domain: string;
+  kind: string;
+  title: string;
+  status: "queued" | "running" | "done" | "error" | "cancelled";
+  progress: number;
+  reasoning: string;
+  steps: JobStep[];
+  result: Record<string, unknown>;
+  error?: string | null;
+}
+
 export interface Me {
   id: string;
   email: string;

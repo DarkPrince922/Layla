@@ -21,6 +21,7 @@ from app.api import (
     findings,
     health,
     intelligence,
+    jobs,
     knowledge,
     mcp,
     models,
@@ -49,12 +50,15 @@ async def lifespan(_app: FastAPI):
     # или повысить существующего). Не валим старт, если БД ещё недоступна.
     from app.db import SessionLocal
     from app.services.auth import ensure_admin_bootstrapped
+    from app.services.jobs import reap_stale
 
     try:
         async with SessionLocal() as session:
             await ensure_admin_bootstrapped(session)
+        # Задачи, зависшие в running после прошлого запуска, помечаем прерванными.
+        await reap_stale(SessionLocal)
     except Exception:  # noqa: BLE001 — старт не должен падать из-за бутстрапа
-        logging.getLogger("layla").exception("Бутстрап администратора не выполнен")
+        logging.getLogger("layla").exception("Бутстрап/очистка задач не выполнены")
     yield
 
 
@@ -101,6 +105,7 @@ app.include_router(models.router, prefix=api_prefix)
 app.include_router(chats.router, prefix=api_prefix)
 app.include_router(projects.router, prefix=api_prefix)
 app.include_router(designs.router, prefix=api_prefix)
+app.include_router(jobs.router, prefix=api_prefix)
 app.include_router(knowledge.router, prefix=api_prefix)
 app.include_router(mcp.router, prefix=api_prefix)
 app.include_router(telegram.router, prefix=api_prefix)

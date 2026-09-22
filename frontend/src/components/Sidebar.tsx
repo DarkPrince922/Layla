@@ -2,11 +2,12 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Settings, Search, FolderTree, MessageSquare, Activity } from "lucide-react";
+import { Settings, Search, FolderTree, MessageSquare } from "lucide-react";
 import clsx from "clsx";
 import { DOMAINS } from "@/lib/domains";
 import { useAuth } from "@/store/auth";
 import { useLocale } from "@/store/locale";
+import { JobsPanel } from "@/components/JobsPanel";
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -65,9 +66,7 @@ export function Sidebar() {
         </Section>
 
         <Section title={t("nav.working")}>
-          <div className="px-3 py-2 text-xs text-neutral-500 flex items-center gap-2">
-            <Activity className="h-3.5 w-3.5" /> {t("nav.noTasks")}
-          </div>
+          <JobsPanel />
         </Section>
 
         <Section title={t("nav.workspace")}>
