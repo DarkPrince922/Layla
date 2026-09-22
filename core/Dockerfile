@@ -6,7 +6,12 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# System deps for asyncpg / cryptography wheels are prebuilt; keep image lean.
+# git нужен для импорта проектов из репозиториев (POST /projects/import).
+# asyncpg / cryptography ставятся из prebuilt-колёс, компиляторы не нужны.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY pyproject.toml ./
 RUN pip install --upgrade pip && pip install .
 

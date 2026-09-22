@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from pathlib import Path
 from urllib.parse import urlparse
@@ -38,11 +39,20 @@ async def clone(url: str, dest: str | Path, *, timeout: float = 300.0) -> None:
     """Поверхностно клонировать репозиторий в dest. Бросает RuntimeError при ошибке."""
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    proc = await asyncio.create_subprocess_exec(
-        "git", "clone", "--depth", "1", url, str(dest),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    # GIT_TERMINAL_PROMPT=0 — не зависать на приватных репозиториях, ожидая
+    # ввод логина/пароля; вместо этого git сразу завершится с ошибкой.
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": ""}
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "clone", "--depth", "1", url, str(dest),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "git не установлен на сервере — импорт из репозитория недоступен"
+        ) from exc
     try:
         _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError as exc:

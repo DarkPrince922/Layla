@@ -1,6 +1,8 @@
 """Тесты безопасной работы с файлами и валидации импорта репо (спец. §5.7)."""
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from app.services import files, repo
@@ -87,6 +89,38 @@ async def test_project_files_api_and_traversal_blocked(client, tmp_path, monkeyp
     # Обход путей через API → 400.
     r = await client.get(f"/api/projects/{proj['id']}/file?path=../../etc/passwd")
     assert r.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_clone_missing_git_raises_clear_error(tmp_path, monkeypatch):
+    """Если git не установлен, clone() даёт понятный RuntimeError, а не 500."""
+
+    async def _boom(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory: 'git'")
+
+    monkeypatch.setattr(repo.asyncio, "create_subprocess_exec", _boom)
+    with pytest.raises(RuntimeError, match="git не установлен"):
+        await repo.clone("https://github.com/a/b.git", tmp_path / "out")
+
+
+@pytest.mark.asyncio
+async def test_clone_disables_credential_prompt(tmp_path, monkeypatch):
+    """Клон не должен зависать на приватных репо, ожидая ввод логина/пароля."""
+    captured: dict = {}
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+    async def _fake_exec(*args, **kwargs):
+        captured["env"] = kwargs.get("env", {})
+        return _Proc()
+
+    monkeypatch.setattr(repo.asyncio, "create_subprocess_exec", _fake_exec)
+    await repo.clone("https://github.com/a/b.git", tmp_path / "out")
+    assert captured["env"].get("GIT_TERMINAL_PROMPT") == "0"
 
 
 @pytest.mark.asyncio
