@@ -514,7 +514,8 @@ async def run_chat(
             prov = await h.session.get(Provider, provider_id)
             if prov is None or not prov.enabled or not prov.active:
                 raise RuntimeError("Провайдер отключён или удалён. Выберите другую модель.")
-            key = await provider_client.pick_key(h.session, prov)
+            # Все ключи провайдера: если один отклонён, ход повторится со следующим.
+            key = await provider_client.key_ring(h.session, prov)
             await h.step("Модель обрабатывает запрос", progress=0.05)
             async def approve(pending: dict) -> str:
                 """Режим «С подтверждением»: ждём решения пользователя по изменению."""
@@ -543,6 +544,8 @@ async def run_chat(
                     info = event["retry"]
                     await h.step(f"Нет связи с моделью — повтор {info['attempt']} из {info['max']} "
                                  f"через {info['delay']:g} с")
+                elif "key" in event:
+                    await h.step(project_agent.key_label(event["key"]))
                 elif "learned" in event:
                     # Запоминаем, чего модель не умеет, чтобы дальше сразу слать правильный запрос.
                     known = dict(prov.model_caps or {})

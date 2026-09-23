@@ -8,18 +8,21 @@ The internal conversation uses OpenAI messages; Anthropic conversion is explicit
 from __future__ import annotations
 
 import json
+import logging
 
 import httpx
 
 from app.services.provider_client import _headers, _is_anthropic_native, endpoint
 from app.services.provider_errors import (
-    RETRYABLE_STATUS,
     OutputLimitError,
     ProviderError,
     classify_rejection,
-    retry_after,
+    http_error,
+    provider_message,
     transient_payload,
 )
+
+logger = logging.getLogger("layla.provider")
 
 MAX_TURN_BYTES = 4_000_000
 # Стартовый лимит длины одного хода. Если ответ в него не влез, _turn в project_agent
@@ -39,6 +42,17 @@ def normalize_finish(value) -> str | None:
         return None
     reason = str(value).strip().lower()
     return _FINISH_ALIASES.get(reason, reason)
+
+
+def _wire(message: dict, skip: set[str], empty=None) -> dict:
+    out = {k: v for k, v in message.items() if k not in skip and not k.startswith("_")}
+    if out.get("role") == "assistant" and out.get("tool_calls") and not out.get("content"):
+        # Ход только с вызовом инструмента: по спецификации OpenAI content = null. Пустую строку
+        # шлюзы к Claude (OpenRouter, LiteLLM, Bedrock) превращают в пустой текстовый блок и
+        # отклоняют весь запрос — «через раз», на каждом ходе после вызова инструмента.
+        # Серверу, который требует строку, шлём "" (caps["tool_content"], запоминается само).
+        out["content"] = empty
+    return out
 
 
 def anthropic_messages(messages: list[dict]) -> tuple[str, list[dict]]:
@@ -111,7 +125,7 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
         skip = {"is_error"} if caps.get("replay_reasoning", True) else {"is_error", "reasoning_content"}
         payload = {
             "model": model,
-            "messages": [{k: v for k, v in m.items() if k not in skip and not k.startswith("_")} for m in messages],
+            "messages": [_wire(m, skip, caps.get("tool_content")) for m in messages],
             "stream": True,
             "tools": tools,
             "tool_choice": "auto",
@@ -143,15 +157,13 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
         ) as resp:
             if resp.is_error:
                 body = (await resp.aread())[:4000].decode("utf-8", "replace")
+                # Полная причина — в лог сервера (docker compose logs layla-core).
+                logger.warning("Провайдер %s отклонил запрос к %s: HTTP %s %s", getattr(provider, "name", ""),
+                               model, resp.status_code, provider_message(body, 1000, raw=True, secret=key))
                 mismatch = classify_rejection(resp.status_code, body)
                 if mismatch:
                     raise mismatch
-                raise ProviderError(
-                    f"Провайдер отклонил запрос инструментов (HTTP {resp.status_code})",
-                    retryable=resp.status_code in RETRYABLE_STATUS,
-                    retry_after=retry_after(resp.headers),
-                    status=resp.status_code,
-                )
+                raise http_error(resp.status_code, body, resp.headers, tools=bool(tools), secret=key)
             async for line in resp.aiter_lines():
                 size += len(line.encode("utf-8"))
                 if size > MAX_TURN_BYTES:
@@ -167,7 +179,10 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
                 except json.JSONDecodeError as exc:
                     raise RuntimeError("Некорректный поток провайдера") from exc
                 if event.get("error") or event.get("type") == "error":
-                    raise ProviderError("Провайдер вернул ошибку при работе с инструментами",
+                    reason = provider_message(json.dumps(event, ensure_ascii=False), secret=key)
+                    logger.warning("Провайдер прислал ошибку посреди ответа %s: %s", model, reason)
+                    raise ProviderError(f"Провайдер прервал ответ ошибкой: {reason}" if reason
+                                        else "Провайдер прервал ответ ошибкой",
                                         retryable=transient_payload(event.get("error") or event))
                 if native:
                     kind = event.get("type")

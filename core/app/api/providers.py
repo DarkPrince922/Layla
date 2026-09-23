@@ -6,6 +6,8 @@ flag and, on demand, a masked form.
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -119,6 +121,7 @@ async def list_keys(
     await _owned_provider(session, user, provider_id)
     rows = await session.scalars(
         select(ProviderKey).where(ProviderKey.provider_id == provider_id)
+        .order_by(ProviderKey.created_at, ProviderKey.id)  # в этом порядке ключи и используются
     )
     return [_key_out(k) for k in rows]
 
@@ -136,6 +139,8 @@ async def add_key(
         label=body.label,
         secret_ref=crypto.encrypt(body.api_key),
         status=KeyStatus.active,
+        # Точное время: по нему ключи берутся по порядку (func.now() в SQLite — до секунды).
+        created_at=datetime.now(UTC),
     )
     session.add(key)
     await session.flush()

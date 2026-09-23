@@ -149,7 +149,7 @@ async def generate_design_bg(
     async def worker(h: jobs.JobHandle) -> None:
         await h.step("Составляю бриф", progress=0.05)
         prov = await h.session.get(Provider, provider_id)
-        key = await provider_client.pick_key(h.session, prov)
+        key = await provider_client.key_ring(h.session, prov)
         # Настройки модели из «Провайдеры» (длина ответа, температура, размышления…)
         # действуют и здесь; креативность брифа задаёт температуру этой генерации.
         caps = design_gen.design_caps((prov.model_caps or {}).get(model), brief)
@@ -183,6 +183,8 @@ async def generate_design_bg(
             elif kind == "retry":
                 await h.step(f"Нет связи с моделью — повтор {value['attempt']} из {value['max']} "
                              f"через {value['delay']:g} с")
+            elif kind == "key":
+                await h.step(project_agent.key_label(value))
             elif kind == "learned":
                 # Запоминаем, чего модель не умеет, — так же, как в чатах.
                 known = dict(prov.model_caps or {})

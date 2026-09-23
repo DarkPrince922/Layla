@@ -8,13 +8,17 @@ reasoning_content): такой запрос можно сразу повтори
 
 from __future__ import annotations
 
+import json
 import re
 
 import httpx
 
 RETRY_DELAYS = (1, 2, 4, 8, 16)
-MAX_RETRY_DELAY = 30
+MAX_RETRY_DELAY = 60  # Retry-After больше минуты не ждём
 RETRYABLE_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 524, 529})
+# Отказ из-за ключа: неверный, без денег, без доступа, упёрся в лимит частоты.
+# Если у провайдера несколько ключей, такой запрос сразу повторяем с другим.
+KEY_STATUS = frozenset({401, 402, 403, 429})
 
 # Модель не умеет вызывать инструменты (Ollama, vLLM без --enable-auto-tool-choice,
 # OpenRouter без подходящих эндпоинтов и т. п.).
@@ -38,20 +42,33 @@ _CONTEXT_SIZE = re.compile(r"(?:maximum context length|context (?:length|window)
 TUNABLE_PARAMS = ("temperature", "reasoning_effort")
 _UNSUPPORTED_WORDS = ("unsupported", "not supported", "does not support", "only the default",
                       "unrecognized", "unknown", "extra inputs", "not permitted", "not allowed", "invalid")
+# Сервер требует строку в content и не принимает null у хода только с вызовом инструмента.
+_NULL_CONTENT = re.compile(
+    r"content\W[^.]{0,60}(null|none|valid string|must be (a )?string|expected (a )?string|str type expected)",
+    re.IGNORECASE,
+)
 _MAX_TOKENS = re.compile(r"max_(completion_)?tokens|max_output_tokens", re.IGNORECASE)
 _TOO_LARGE_WORDS = ("too large", "less than or equal", "maximum", "exceed", "at most", "<=",
                     "range", "must be", "too big", "cannot be greater")
-_TRANSIENT_WORDS = ("overload", "rate", "timeout", "unavailable", "server_error", "internal",
-                    "capacity", "busy", "try again", "temporarily")
+# Временный сбой по тексту ошибки. Шлюзы вроде OpenRouter отвечают 400 «Provider returned
+# error», когда упал выбранный ими апстрим, — повтор уходит на другой и обычно проходит.
+_TRANSIENT = re.compile(
+    r"provider returned error|upstream|overload|temporar|try again|timed? ?out|timeout"
+    r"|rate.?limit|too many requests|capacity|unavailable|server_error|internal (server )?error|\bbusy\b",
+    re.IGNORECASE,
+)
+# Всё, похожее на ключ или токен, из текста ошибки убираем.
+_SECRET = re.compile(r"\b(?:sk|pk|rk)-[A-Za-z0-9_\-]{8,}|Bearer\s+\S+|\b[A-Za-z0-9]{32,}\b")
 
 
 class ProviderError(RuntimeError):
     def __init__(self, message: str, *, retryable: bool = False, retry_after: float | None = None,
-                 status: int | None = None) -> None:
+                 status: int | None = None, key_failed: bool = False) -> None:
         super().__init__(message)
         self.retryable = retryable
         self.retry_after = retry_after
         self.status = status
+        self.key_failed = key_failed  # поможет другой ключ того же провайдера
 
 
 class OutputLimitError(ProviderError):
@@ -94,10 +111,87 @@ def classify_rejection(status: int, body: str) -> CapabilityError | None:
     if "reasoning_content" in text:
         return CapabilityError("Провайдер не принимает reasoning_content", capability="replay_reasoning",
                                value=False, status=status)
+    if _NULL_CONTENT.search(body):
+        return CapabilityError("Провайдер требует строку в content", capability="tool_content",
+                               value="", status=status)
     if _NO_TOOLS.search(body):
         return CapabilityError("Модель не поддерживает инструменты", capability="tools",
                                value=False, status=status)
     return None
+
+
+def provider_message(body: str, limit: int = 300, *, raw: bool = False, secret: str | None = None) -> str:
+    """Причина отказа из ответа провайдера (OpenAI, Anthropic, OpenRouter, LiteLLM) — без секретов.
+
+    Пользователю показываем только поле сообщения из JSON-ошибки API. Произвольный
+    текст или HTML (страница прокси, мусор) — только в лог сервера (raw=True).
+    """
+    text = ""
+    try:
+        data = json.loads(body)
+    except (TypeError, ValueError):
+        data = None
+    if isinstance(data, dict):
+        error = data.get("error", data)
+        if isinstance(error, dict):
+            text = str(error.get("message") or error.get("detail") or error.get("msg") or "")
+            meta = error.get("metadata")
+            if isinstance(meta, dict):
+                # OpenRouter кладёт настоящую причину апстрима в metadata.raw.
+                raw = meta.get("raw")
+                inner = (provider_message(raw if isinstance(raw, str) else json.dumps(raw), limit, raw=True,
+                                          secret=secret) if raw else "")
+                if inner and inner not in text:
+                    text = f"{text}: {inner}" if text else inner
+                if meta.get("provider_name"):
+                    text = f"{text} [{meta['provider_name']}]"
+        elif error:
+            text = str(error)
+        if not text and data.get("detail"):
+            text = str(data["detail"])
+    if not text and body and raw:
+        text = re.sub(r"<[^>]+>", " ", str(body))  # HTML-страница ошибки прокси
+    if secret and len(secret) >= 6:
+        text = text.replace(secret, "…")
+    text = _SECRET.sub("…", " ".join(text.split()))
+    return text[:limit] + ("…" if len(text) > limit else "")
+
+
+def http_error(status: int, body: str, headers: httpx.Headers | None = None, *,
+               tools: bool = False, secret: str | None = None) -> ProviderError:
+    """Понятная ошибка по коду ответа и причине от провайдера."""
+    reason = provider_message(body, secret=secret)
+    suffix = f": {reason}" if reason else ""
+    retry = status in RETRYABLE_STATUS or bool(_TRANSIENT.search(body or ""))
+    if status == 401:
+        message = f"Провайдер не принял ключ (HTTP 401){suffix}. Проверьте ключ в «Настройки → Провайдеры»."
+        retry = False
+    elif status == 402:
+        message = f"У провайдера закончились средства или квота (HTTP 402){suffix}"
+        retry = False
+    elif status == 403:
+        message = f"Провайдер отказал в доступе (HTTP 403){suffix}"
+        retry = False
+    elif status == 429:
+        wait = retry_after(headers) if headers else None
+        if wait and wait > 300:
+            # Исчерпана дневная/месячная квота — ждать внутри задачи бессмысленно.
+            message = (f"Провайдер исчерпал лимит запросов (HTTP 429){suffix}. "
+                       f"Снова будет доступен примерно через {round(wait / 60)} мин — или добавьте ещё один ключ.")
+            retry = False
+        else:
+            message = (f"Провайдер ограничил частоту запросов (HTTP 429){suffix}. "
+                       "Подождите минуту или добавьте ещё один ключ.")
+    elif status == 404:
+        message = f"Провайдер не нашёл модель или адрес (HTTP 404){suffix}. Проверьте имя модели и адрес API."
+    elif status >= 500:
+        message = f"Сбой на стороне провайдера (HTTP {status}){suffix}"
+        retry = status not in (501, 505)
+    else:
+        what = "запрос с инструментами" if tools else "запрос"
+        message = f"Провайдер отклонил {what} (HTTP {status}){suffix}"
+    return ProviderError(message, retryable=retry, retry_after=retry_after(headers) if headers else None,
+                         status=status, key_failed=status in KEY_STATUS)
 
 
 def retry_after(headers: httpx.Headers) -> float | None:
@@ -109,7 +203,7 @@ def retry_after(headers: httpx.Headers) -> float | None:
 
 
 def transient_payload(payload) -> bool:
-    return any(word in str(payload).lower() for word in _TRANSIENT_WORDS)
+    return bool(_TRANSIENT.search(str(payload)))
 
 
 def is_retryable(exc: BaseException) -> bool:

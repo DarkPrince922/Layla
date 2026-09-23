@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 
 from app.schemas.project import FileWrite
-from app.services import files, provider_errors, tool_chat
+from app.services import files, provider_client, provider_errors, tool_chat
 
 # Страховочные пределы, а не рабочие: на обычных задачах агент до них не доходит.
 # Достигнув предела, агент останавливается мягко (ответ сохраняется как обычный),
@@ -159,6 +159,11 @@ LENGTH_NOTE = (
 )
 
 
+def key_label(info: dict) -> str:
+    """Подпись шага «В работе» для события key из _turn."""
+    return f"Провайдер отклонил ключ (HTTP {info.get('status')}) — пробую {info.get('label')}"
+
+
 def learned_label(learned: dict) -> str:
     """Подпись шага «В работе» для события learned из _turn."""
     if "context" in learned:
@@ -225,8 +230,11 @@ async def _turn(provider, key, model, conversation, available, caps, anchor=None
     Временный сбой (обрыв, 429, 5xx) — повтор до len(RETRY_DELAYS) раз с паузой;
     уже показанный текст хода откатывается событием retract. Отказ из-за
     неподдерживаемой части запроса — сразу повтор без неё, событие learned.
+    key — строка или KeyRing: отказ из-за ключа (401/402/403/429) сразу повторяется
+    со следующим ключом провайдера, событие key.
     Последним приходит ("done", (content, reasoning, context, calls)).
     """
+    ring = key if isinstance(key, provider_client.KeyRing) else None
     attempt = adjustments = 0
     while True:
         content, reasoning, context, calls = [], [], {}, []
@@ -237,7 +245,7 @@ async def _turn(provider, key, model, conversation, available, caps, anchor=None
                 yield "trimmed", trimmed
         try:
             async for kind, value in tool_chat.stream_turn(
-                provider, key, model, conversation, available, caps=caps
+                provider, ring.current if ring else key, model, conversation, available, caps=caps
             ):
                 if kind == "tool_calls":
                     calls = value
@@ -318,6 +326,11 @@ async def _turn(provider, key, model, conversation, available, caps, anchor=None
                 yield "retract", shown
             yield "learned", {exc.capability: exc.value}
         except Exception as exc:
+            if ring and getattr(exc, "key_failed", False) and ring.rotate(getattr(exc, "retry_after", None)):
+                if shown:
+                    yield "retract", shown
+                yield "key", {"status": exc.status, "label": ring.label}
+                continue
             if not provider_errors.is_retryable(exc) or attempt >= len(provider_errors.RETRY_DELAYS):
                 raise
             attempt += 1
