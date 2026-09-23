@@ -168,17 +168,16 @@ async def test_rejection_body_becomes_capability_error(monkeypatch):
 
 async def test_design_generation_retries(client, monkeypatch):
     await _setup(client)
-    import app.services.provider_client as pc
-
     attempts = {"n": 0}
 
-    async def flaky(provider, key, model, messages, **kw):
+    async def flaky(provider, key, model, messages, tools, caps=None):
         attempts["n"] += 1
         if attempts["n"] == 1:
+            yield ("content", "```html\n<h1>об")
             raise httpx.ConnectError("down")
         yield ("content", "```html\n<h1>ok</h1>\n```")
 
-    monkeypatch.setattr(pc, "stream_chat", flaky)
+    monkeypatch.setattr(tool_chat, "stream_turn", flaky)
     job = (await client.post("/api/designs/generate", json={"stack": "html", "brief": {}})).json()
     for _ in range(300):
         await asyncio.sleep(0.02)
@@ -187,7 +186,9 @@ async def test_design_generation_retries(client, monkeypatch):
             break
     assert state["status"] == "done", state
     assert attempts["n"] == 2
-    assert "<h1>ok</h1>" in (await client.get("/api/designs")).json()[0]["files"][0]["content"]
+    content = (await client.get("/api/designs")).json()[0]["files"][0]["content"]
+    assert content == "<h1>ok</h1>"  # кусок оборванной попытки не задвоился
+    assert any("повтор 1 из 5" in s["text"] for s in state["steps"])
 
 
 # --- Лимит длины и причины завершения -----------------------------------------

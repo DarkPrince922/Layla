@@ -159,6 +159,25 @@ LENGTH_NOTE = (
 )
 
 
+def learned_label(learned: dict) -> str:
+    """Подпись шага «В работе» для события learned из _turn."""
+    if "context" in learned:
+        return f"История не помещается в контекст модели — отправляю последнее (до {learned['context']} токенов)"
+    if "drop" in learned:
+        return f"Модель не принимает {', '.join(learned['drop'])} — отправляю без этого"
+    if "max_output_cap" in learned:
+        return f"Провайдер ограничивает длину ответа {learned['max_output_cap']} токенами — лимит исправлен"
+    if "max_output" in learned:
+        return f"Ответ не поместился — лимит длины увеличен до {learned['max_output']} токенов, повторяю"
+    if learned.get("tools") is False:
+        return "Модель не поддерживает инструменты — продолжаю без работы с файлами"
+    if "token_param" in learned:
+        return "Модель требует max_completion_tokens — запрос исправлен"
+    if learned.get("replay_reasoning") is False:
+        return "Провайдер не принимает размышления в истории — запрос исправлен"
+    return "Запрос подстроен под возможности модели"
+
+
 def _tokens(message: dict) -> int:
     """Грубая оценка токенов сообщения (≈3 символа на токен, с запасом для кириллицы и кода)."""
     size = len(str(message.get("content") or ""))

@@ -112,11 +112,13 @@ async def test_design_generate_runs_in_background(client, monkeypatch):
         },
     )
 
-    async def fake_stream(provider, key, model, messages):
+    from app.services import tool_chat
+
+    async def fake_stream(provider, key, model, messages, tools, caps=None):
         yield ("reasoning", "продумываю секции")
         yield ("content", "```html\n<h1>BG</h1>\n```")
 
-    monkeypatch.setattr(pc, "stream_chat", fake_stream)
+    monkeypatch.setattr(tool_chat, "stream_turn", fake_stream)
 
     r = await client.post(
         "/api/designs/generate",

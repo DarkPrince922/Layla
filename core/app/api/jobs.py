@@ -19,6 +19,14 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 _ACTIVE = ("queued", "running")
 
 
+def _brief(job: Job) -> JobOut:
+    """Для списка черновик генерации не нужен: он большой и есть в GET /jobs/{id}."""
+    out = JobOut.model_validate(job)
+    if "draft" in out.result:
+        out.result = {k: v for k, v in out.result.items() if k != "draft"}
+    return out
+
+
 @router.get("", response_model=list[JobOut])
 async def list_jobs(
     active: bool = Query(default=False),
@@ -26,7 +34,7 @@ async def list_jobs(
     chat_id: str | None = None,
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
-) -> list[Job]:
+) -> list[JobOut]:
     # Задачи чатов из корзины не показываем: их чат открыть уже нельзя.
     trashed = select(Chat.id).where(Chat.owner_id == user.id, Chat.deleted_at.is_not(None))
     query = select(Job).where(Job.owner_id == user.id,
@@ -36,7 +44,7 @@ async def list_jobs(
     if active:
         query = query.where(Job.status.in_(_ACTIVE))
     query = query.order_by(Job.created_at.desc()).limit(limit)
-    return list(await session.scalars(query))
+    return [_brief(job) for job in await session.scalars(query)]
 
 
 @router.get("/{job_id}", response_model=JobOut)

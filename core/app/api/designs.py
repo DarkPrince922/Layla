@@ -1,8 +1,9 @@
 """Домен Design: генерация и хранение артефактов (спец. §5.6)."""
 from __future__ import annotations
 
-import asyncio
+import math
 import shutil
+import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -20,11 +21,21 @@ from app.models.user import Project, User, Workspace
 from app.schemas.design import DesignCreate, DesignOut
 from app.schemas.job import JobOut
 from app.schemas.project import ProjectOut
-from app.services import audit, design_gen, jobs, provider_client, provider_errors
+from app.services import audit, design_gen, jobs, project_agent, provider_client
 from app.services.auth import get_current_user
 from app.services.files import change_file
 
 router = APIRouter(prefix="/designs", tags=["design"])
+
+
+DRAFT_INTERVAL = 0.5  # как часто сохранять черновик для живого просмотра, с
+
+
+async def _push_draft(h: jobs.JobHandle, text: str) -> None:
+    # Прогресс по объёму: итоговая длина заранее неизвестна, поэтому кривая с насыщением.
+    progress = 0.3 + 0.6 * (1 - math.exp(-len(text) / 24000))
+    h.job.progress = round(progress, 3)
+    await h.set_result({"draft": text})
 
 
 async def _pick_model(session: AsyncSession, user: User, requested: str | None) -> str:
@@ -130,48 +141,72 @@ async def generate_design_bg(
     owner_id = user.id
     provider_id = provider.id
     messages = design_gen.build_prompt(brief, stack.value)
-    title = f"Design · {brief.get('artifact_type') or stack.value}"
+    title = f"Дизайн · {brief.get('artifact_type') or stack.value}"
     job = await jobs.create_job(
         session, owner_id=owner_id, domain="design", kind="design.generate", title=title
     )
 
     async def worker(h: jobs.JobHandle) -> None:
-        await h.step("Составляю бриф", progress=0.1)
+        await h.step("Составляю бриф", progress=0.05)
         prov = await h.session.get(Provider, provider_id)
         key = await provider_client.pick_key(h.session, prov)
-        await h.step("Генерирую разметку", progress=0.25)
-        parts: list[str] = []
-        attempt = 0
-        while True:
-            parts, started = [], False
-            try:
-                async for kind, text in provider_client.stream_chat(prov, key, model, messages):
-                    if kind == "reasoning":
-                        await h.reason(text)
-                    else:
-                        if not started:
-                            started = True
-                            await h.step("Модель пишет код", progress=0.5)
-                        parts.append(text)
-                break
-            except Exception as exc:
-                # Временный сбой — повтор с паузой (разметка собирается заново).
-                if not provider_errors.is_retryable(exc) or attempt >= len(provider_errors.RETRY_DELAYS):
-                    raise
-                attempt += 1
-                delay = provider_errors.retry_delay(exc, attempt)
-                await h.step(f"Нет связи с моделью — повтор {attempt} из "
-                             f"{len(provider_errors.RETRY_DELAYS)} через {delay:g} с")
-                await asyncio.sleep(delay)
+        # Настройки модели из «Провайдеры» (длина ответа, температура, размышления…)
+        # действуют и здесь; креативность брифа задаёт температуру этой генерации.
+        caps = design_gen.design_caps((prov.model_caps or {}).get(model), brief)
+        await h.set_result({"model": model, "draft": ""})
+        await h.step(f"Генерирую макет · {model}", progress=0.1)
+        text = ""
+        draft_at = reason_at = 0.0  # когда черновик и размышления последний раз ушли в БД
+        started = False
+        async for kind, value in project_agent._turn(prov, key, model, list(messages), [], caps):
+            if kind == "delta":
+                text += value
+                if not started:
+                    started = True
+                    await h.step("Модель пишет код", progress=0.3)
+                now = time.monotonic()
+                if now - draft_at >= DRAFT_INTERVAL:
+                    # Черновик виден в «Дизайне» по ходу генерации: код и превью.
+                    draft_at = now
+                    await _push_draft(h, text)
+            elif kind == "retract":
+                # Ход повторяется с начала — уже показанный кусок убираем.
+                text = text[: max(0, len(text) - value)]
+                await _push_draft(h, text)
+            elif kind == "reasoning":
+                # Размышления тоже видны по ходу, а не пачками по 300 символов.
+                now = time.monotonic()
+                flush = now - reason_at >= DRAFT_INTERVAL
+                if flush:
+                    reason_at = now
+                await h.reason(value, flush=flush)
+            elif kind == "retry":
+                await h.step(f"Нет связи с моделью — повтор {value['attempt']} из {value['max']} "
+                             f"через {value['delay']:g} с")
+            elif kind == "learned":
+                # Запоминаем, чего модель не умеет, — так же, как в чатах.
+                known = dict(prov.model_caps or {})
+                known[model] = {**(known.get(model) or {}), **value}
+                prov.model_caps = known
+                await h.session.commit()
+                await h.step(project_agent.learned_label(value))
+            elif kind == "done":
+                text = "".join(value[0])
         await h.reason("", flush=True)
-        html = design_gen.extract_html("".join(parts))
+        truncated = text.endswith(project_agent.LENGTH_NOTE)
+        if truncated:
+            text = text[: -len(project_agent.LENGTH_NOTE)]
+            await h.step("Макет упёрся в предельную длину ответа — сохраняю то, что успело сгенерироваться")
+        html = design_gen.extract_html(text)
+        if not html:
+            raise RuntimeError("Модель не вернула разметку. Попробуйте ещё раз или другую модель.")
         files = design_gen.to_files(html)
-        await h.step("Сохраняю артефакт", progress=0.9)
+        await h.step("Сохраняю артефакт", progress=0.95)
         design = Design(owner_id=owner_id, stack=stack, brief=brief, files=files)
         h.session.add(design)
         await audit.record(h.session, actor=owner_id, action="design.generate", target=stack.value)
         await h.session.commit()
-        await h.set_result({"design_id": design.id})
+        await h.set_result({"design_id": design.id, "draft": None, "truncated": truncated})
         await h.step("Готово", progress=1.0)
 
     jobs.launch(sessionmaker, job.id, worker)
