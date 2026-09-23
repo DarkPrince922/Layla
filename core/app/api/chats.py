@@ -57,6 +57,10 @@ def _drop_tail(text: str, count: int) -> str:
 
 
 def _learned_label(learned: dict) -> str:
+    if "max_output_cap" in learned:
+        return f"Провайдер ограничивает длину ответа {learned['max_output_cap']} токенами — лимит исправлен"
+    if "max_output" in learned:
+        return f"Ответ не поместился — лимит длины увеличен до {learned['max_output']} токенов, повторяю"
     if learned.get("tools") is False:
         return "Модель не поддерживает инструменты — продолжаю без работы с файлами"
     if "token_param" in learned:

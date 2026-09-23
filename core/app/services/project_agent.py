@@ -152,7 +152,11 @@ def preview(root: str, name: str, arguments: dict) -> dict | None:
 
 
 NO_TOOLS_NOTE = "\nFile tools are unavailable for this model: answer directly, without tool calls."
-MAX_ADJUSTMENTS = 3  # сколько раз за ход можно подстроиться под ограничения модели
+MAX_ADJUSTMENTS = 4  # сколько раз за ход можно подстроиться под ограничения модели
+MAX_OUTPUT_CEILING = 65536  # выше лимит длины ответа сами не поднимаем
+LENGTH_NOTE = (
+    "\n\n_Ответ упёрся в предельную длину. Напишите «продолжай», и я продолжу._"
+)
 
 
 async def _turn(provider, key, model, conversation, available, caps):
@@ -184,8 +188,40 @@ async def _turn(provider, key, model, conversation, available, caps):
                     yield "reasoning", value
             yield "done", (content, reasoning, context, calls)
             return
+        except provider_errors.OutputLimitError as exc:
+            # Ответ не влез в лимит длины (обычно у reasoning-моделей или при записи
+            # большого файла). Поднимаем лимит и повторяем ход, новое значение запоминаем.
+            current = caps.get("max_output") or tool_chat.DEFAULT_MAX_OUTPUT
+            ceiling = caps.get("max_output_cap") or MAX_OUTPUT_CEILING
+            if current < ceiling and adjustments < MAX_ADJUSTMENTS:
+                adjustments += 1
+                caps["max_output"] = min(current * 2, ceiling)
+                if shown:
+                    yield "retract", shown
+                yield "learned", {"max_output": caps["max_output"]}
+                continue
+            if content and not exc.has_calls:
+                # Потолок — отдаём уже написанный текст с подсказкой, а не ошибку.
+                yield "delta", LENGTH_NOTE
+                yield "done", (content + [LENGTH_NOTE], reasoning, context, [])
+                return
+            raise RuntimeError(
+                f"Ответ модели не поместился даже в {current} токенов. Незавершённые вызовы "
+                "не применены — попросите сделать задачу частями."
+            ) from exc
         except provider_errors.CapabilityError as exc:
             adjustments += 1
+            if exc.capability == "max_output":
+                # Провайдер отказал: лимит длины больше, чем умеет модель. Берём его предел.
+                current = caps.get("max_output") or tool_chat.DEFAULT_MAX_OUTPUT
+                value = exc.value if exc.value and exc.value < current else current // 2
+                if adjustments > MAX_ADJUSTMENTS or value < 1024:
+                    raise
+                caps["max_output"] = caps["max_output_cap"] = value
+                if shown:
+                    yield "retract", shown
+                yield "learned", {"max_output": value, "max_output_cap": value}
+                continue
             if adjustments > MAX_ADJUSTMENTS or caps.get(exc.capability) == exc.value:
                 raise
             caps[exc.capability] = exc.value

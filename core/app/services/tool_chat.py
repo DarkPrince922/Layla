@@ -14,6 +14,7 @@ import httpx
 from app.services.provider_client import _headers, _is_anthropic_native, endpoint
 from app.services.provider_errors import (
     RETRYABLE_STATUS,
+    OutputLimitError,
     ProviderError,
     classify_rejection,
     retry_after,
@@ -21,6 +22,23 @@ from app.services.provider_errors import (
 )
 
 MAX_TURN_BYTES = 4_000_000
+# Стартовый лимит длины одного хода. Если ответ в него не влез, _turn в project_agent
+# поднимает лимит и запоминает его для модели (caps["max_output"]).
+DEFAULT_MAX_OUTPUT = 8192
+# Разные провайдеры по-разному называют одну и ту же причину завершения.
+_FINISH_ALIASES = {
+    "end_turn": "stop", "stop_sequence": "stop", "eos": "stop", "eos_token": "stop",
+    "complete": "stop", "completed": "stop",
+    "tool_use": "tool_calls", "tool_call": "tool_calls", "function_call": "tool_calls",
+    "max_tokens": "length", "model_length": "length", "max_output_tokens": "length",
+}
+
+
+def normalize_finish(value) -> str | None:
+    if not value:
+        return None
+    reason = str(value).strip().lower()
+    return _FINISH_ALIASES.get(reason, reason)
 
 
 def anthropic_messages(messages: list[dict]) -> tuple[str, list[dict]]:
@@ -77,7 +95,7 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
             "system": system,
             "messages": conversation,
             "stream": True,
-            "max_tokens": 8192,
+            "max_tokens": caps.get("max_output") or DEFAULT_MAX_OUTPUT,
             "tools": [
                 {
                     "name": t["function"]["name"],
@@ -97,7 +115,7 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
             "tools": tools,
             "tool_choice": "auto",
             # o-серия и новые модели OpenAI принимают только max_completion_tokens.
-            caps.get("token_param") or "max_tokens": 8192,
+            caps.get("token_param") or "max_tokens": caps.get("max_output") or DEFAULT_MAX_OUTPUT,
         }
         url = endpoint(provider, "chat/completions")
 
@@ -207,18 +225,24 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
                         yield "reasoning", reasoning
                 if len(calls) > 48:
                     raise RuntimeError("Провайдер запросил слишком много инструментов")
-    allowed = ("tool_use", "end_turn", "stop_sequence") if native else ("tool_calls", "stop")
-    if not stopped and finish is None:
-        # Поток закончился без финала — это обрыв связи, такой ход можно повторить.
+    finish = normalize_finish(finish)
+    if stopped and finish is None:
+        # Сервер штатно закрыл поток ([DONE]/message_stop), просто не назвал причину.
+        finish = "tool_calls" if calls else "stop"
+    if finish == "length":
+        raise OutputLimitError("Ответ модели не поместился в лимит длины", has_calls=bool(calls))
+    if not stopped and (finish is None or calls):
+        # Поток оборвался без финала — это обрыв связи, такой ход можно повторить.
+        # Вызовы инструментов без явного конца потока не выполняем никогда.
         raise ProviderError("Связь с моделью оборвалась посреди ответа", retryable=True)
-    if not stopped or finish not in allowed:
+    if finish not in ("stop", "tool_calls"):
         raise RuntimeError(
-            "Ответ модели прерван или достиг лимита. Незавершённые вызовы не применены."
+            f"Модель остановила ответ ({finish}). Незавершённые вызовы не применены."
         )
     if thinking:
         yield "provider_context", {"_anthropic_thinking": [thinking[i] for i in sorted(thinking)]}
     if calls:
-        if finish not in (("tool_use",) if native else ("tool_calls", "stop")):
+        if finish not in (("tool_calls",) if native else ("tool_calls", "stop")):
             raise RuntimeError("Провайдер не завершил вызов инструментов")
         for index, call in calls.items():
             if not call["function"]["arguments"] and index in initial_inputs:

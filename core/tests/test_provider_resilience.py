@@ -188,3 +188,112 @@ async def test_design_generation_retries(client, monkeypatch):
     assert state["status"] == "done", state
     assert attempts["n"] == 2
     assert "<h1>ok</h1>" in (await client.get("/api/designs")).json()[0]["files"][0]["content"]
+
+
+# --- Лимит длины и причины завершения -----------------------------------------
+
+def _wire(*, text="", call=None, finish="stop", done=True):
+    events = []
+    if text:
+        events.append({"choices": [{"delta": {"content": text}}]})
+    if call:
+        events.append({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c1", "type": "function",
+                       "function": {"name": call[0], "arguments": json.dumps(call[1])}}]}}]})
+    events.append({"choices": [{"delta": {}, "finish_reason": finish}]})
+    wire = "".join("data: " + json.dumps(e) + "\n\n" for e in events)
+    return httpx.Response(200, text=wire + ("data: [DONE]\n\n" if done else ""),
+                          headers={"content-type": "text/event-stream"})
+
+
+_REAL_CLIENT = httpx.AsyncClient  # до любых подмен: повторный _http не должен оборачивать подмену
+
+
+def _http(monkeypatch, responses: list, sent: list):
+    original = _REAL_CLIENT
+
+    def handler(request):
+        sent.append(json.loads(request.content))
+        return responses[min(len(sent), len(responses)) - 1]
+
+    monkeypatch.setattr(tool_chat.httpx, "AsyncClient",
+                        lambda **kw: original(transport=httpx.MockTransport(handler), **kw))
+
+
+async def test_truncated_file_write_raises_output_limit_and_retries(client, monkeypatch):
+    """Большой файл не влез в 8192 токенов — лимит растёт, ход повторяется, лимит запоминается."""
+    await _setup(client)
+    write = ("write_file", {"path": "index.html", "content": "<h1>ok</h1>", "expected_sha256": None})
+    sent: list = []
+    _http(monkeypatch, [_wire(call=write, finish="length"), _wire(call=write, finish="tool_calls"),
+                        _wire(text="Готово")], sent)
+    state, last = await _run(client)
+    assert state["status"] == "done", state
+    assert [r["max_tokens"] for r in sent] == [8192, 16384, 16384]
+    assert last["meta"]["tools"][0]["status"] == "done"
+    assert any("лимит длины увеличен до 16384" in s["text"] for s in state["steps"])
+    # Следующий чат с этой моделью сразу просит 16384.
+    sent.clear()
+    _http(monkeypatch, [_wire(text="ok")], sent)
+    await _run(client)
+    assert sent[0]["max_tokens"] == 16384
+
+
+@pytest.mark.parametrize("finish,done", [
+    ("stop", True), ("end_turn", True), ("eos", True), ("STOP", True), (None, True), ("stop", False),
+])
+async def test_normal_endings_are_not_errors(client, monkeypatch, finish, done):
+    """[DONE] без причины, нестандартные названия и текст без [DONE] — это нормальный конец."""
+    await _setup(client)
+    _http(monkeypatch, [_wire(text="Привет", finish=finish, done=done)], [])
+    state, last = await _run(client)
+    assert state["status"] == "done", state
+    assert last["content"] == "Привет"
+
+
+async def test_tool_call_without_stream_end_is_never_executed(client, monkeypatch):
+    await _setup(client)
+    write = ("write_file", {"path": "x.html", "content": "x", "expected_sha256": None})
+    _http(monkeypatch, [_wire(call=write, finish="tool_calls", done=False)], [])
+    state, last = await _run(client)
+    assert state["status"] == "error"
+    assert not [t for t in (last["meta"].get("tools") or []) if t.get("status") == "done"]
+
+
+async def test_provider_output_cap_is_learned(client, monkeypatch):
+    """Провайдер не даёт больше 8192 — лимит снижается до его предела и запоминается."""
+    provider_id = await _setup(client)
+    from sqlalchemy import update
+
+    from app.db import get_sessionmaker
+    from app.main import app
+    from app.models.provider import Provider
+
+    maker = app.dependency_overrides[get_sessionmaker]()
+    async with maker() as s:
+        await s.execute(update(Provider).where(Provider.id == provider_id)
+                        .values(model_caps={"m": {"max_output": 32768}}))
+        await s.commit()
+    sent: list = []
+    too_big = httpx.Response(400, json={"error": {"message": "max_tokens: Input should be less than or equal to 8192"}})
+    _http(monkeypatch, [too_big, _wire(text="ok")], sent)
+    state, last = await _run(client)
+    assert state["status"] == "done", state
+    assert [r["max_tokens"] for r in sent] == [32768, 8192]
+
+
+async def test_long_text_at_ceiling_is_kept_with_hint(client, monkeypatch):
+    await _setup(client)
+    monkeypatch.setattr(project_agent, "MAX_OUTPUT_CEILING", 8192)
+    _http(monkeypatch, [_wire(text="Длинный ответ…", finish="length")], [])
+    state, last = await _run(client)
+    assert state["status"] == "done", state
+    assert last["content"].startswith("Длинный ответ…") and "продолжай" in last["content"]
+
+
+def test_classify_output_cap():
+    err = classify_rejection(400, "max_tokens: Input should be less than or equal to 8192")
+    assert err.capability == "max_output" and err.value == 8192
+    err = classify_rejection(400, "max_tokens is too large: 65536. This model supports at most 16384 completion tokens")
+    assert err.capability == "max_output" and err.value == 16384
+    o1 = "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead."
+    assert classify_rejection(400, o1).capability == "token_param"

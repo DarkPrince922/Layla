@@ -25,6 +25,9 @@ _NO_TOOLS = re.compile(
     r"|support tool use|enable-auto-tool-choice",
     re.IGNORECASE,
 )
+_MAX_TOKENS = re.compile(r"max_(completion_)?tokens|max_output_tokens", re.IGNORECASE)
+_TOO_LARGE_WORDS = ("too large", "less than or equal", "maximum", "exceed", "at most", "<=",
+                    "range", "must be", "too big", "cannot be greater")
 _TRANSIENT_WORDS = ("overload", "rate", "timeout", "unavailable", "server_error", "internal",
                     "capacity", "busy", "try again", "temporarily")
 
@@ -36,6 +39,14 @@ class ProviderError(RuntimeError):
         self.retryable = retryable
         self.retry_after = retry_after
         self.status = status
+
+
+class OutputLimitError(ProviderError):
+    """Ответ обрезан лимитом длины (finish_reason=length / stop_reason=max_tokens)."""
+
+    def __init__(self, message: str, *, has_calls: bool) -> None:
+        super().__init__(message)
+        self.has_calls = has_calls
 
 
 class CapabilityError(ProviderError):
@@ -54,6 +65,11 @@ def classify_rejection(status: int, body: str) -> CapabilityError | None:
     if "max_tokens" in text and "max_completion_tokens" in text:
         return CapabilityError("Модель требует max_completion_tokens", capability="token_param",
                                value="max_completion_tokens", status=status)
+    if _MAX_TOKENS.search(text) and any(w in text for w in _TOO_LARGE_WORDS):
+        # «max_tokens must be less than or equal to 8192» и т. п. — берём предел из текста.
+        numbers = [int(n) for n in re.findall(r"\d{3,7}", text) if 256 <= int(n) <= 2_000_000]
+        return CapabilityError("Провайдер ограничивает длину ответа", capability="max_output",
+                               value=min(numbers) if numbers else None, status=status)
     if "reasoning_content" in text:
         return CapabilityError("Провайдер не принимает reasoning_content", capability="replay_reasoning",
                                value=False, status=status)
