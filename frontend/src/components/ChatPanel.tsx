@@ -1,24 +1,26 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Send, Bot, Plus, Loader2, Download, Square, Trash2, Eraser, Zap, ShieldCheck, ClipboardList, ChevronDown, Pencil, Check, Search, FoldVertical, Undo2, Play, type LucideIcon } from "lucide-react";
-import { api, downloadProject, type Persona, type ModelInfo, type Chat, type ChatDetail, type FileChange, type Job, type ToolEvent } from "@/lib/api";
+import { Send, Bot, Plus, Loader2, Download, Square, Trash2, Eraser, Zap, ShieldCheck, ClipboardList, ChevronDown, Pencil, Check, Search, FoldVertical, Undo2, Play, SearchCheck, BookMarked, ListChecks, CircleCheck, CircleDot, Circle, X, type LucideIcon } from "lucide-react";
+import { ApiError, api, downloadProject, type FileContent, type Persona, type ModelInfo, type Chat, type ChatDetail, type FileChange, type Job, type ToolEvent } from "@/lib/api";
 import { useAuth } from "@/store/auth";
 import { FileDiff } from "@/components/FileDiff";
 import { confirmAction } from "@/components/ConfirmDialog";
 
 const active = (job?: Job | null) => !!job && ["queued", "running"].includes(job.status);
 
-type Mode = "auto" | "confirm" | "plan";
+type Mode = "auto" | "confirm" | "plan" | "review";
 type Decision = "approve" | "reject" | "approve_all";
 // Режимы как в IDE-агентах: сам применяет / спрашивает перед каждым изменением / только план.
 const MODES: { id: Mode; label: string; hint: string; icon: LucideIcon }[] = [
   { id: "auto", label: "Авто", hint: "Агент сам применяет изменения", icon: Zap },
   { id: "confirm", label: "С подтверждением", hint: "Каждое изменение файла ждёт вашего «Применить»", icon: ShieldCheck },
   { id: "plan", label: "План", hint: "Только чтение: агент изучит задачу и предложит план, ничего не меняя", icon: ClipboardList },
+  { id: "review", label: "Ревью", hint: "Только чтение: агент проверит код и перечислит найденные проблемы по важности", icon: SearchCheck },
 ];
-const isMode = (value: string | null): value is Mode => value === "auto" || value === "confirm" || value === "plan";
+const isMode = (value: string | null): value is Mode => MODES.some(m => m.id === value);
 const read = (key: string) => { try { return localStorage.getItem(key); } catch { return null; } };
 const remember = (key: string, value: string) => { try { localStorage.setItem(key, value); } catch { /* Storage can be unavailable. */ } };
 
@@ -299,6 +301,8 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
   // Ход прерван (ошибка, остановка, лимит шагов или длины) — можно продолжить с того же места.
   const interrupted = !running && !sending && last?.role === "assistant" && (!!last.meta?.error || /«продолжай»/.test(last.content.slice(-200)));
   const planReady = !running && !sending && last?.role === "assistant" && last.meta?.mode === "plan" && !last.meta?.error && !!last.content.trim();
+  const reviewReady = !running && !sending && last?.role === "assistant" && last.meta?.mode === "review" && !last.meta?.error && !!last.content.trim();
+  const [rulesOpen, setRulesOpen] = useState(false);
   return <div className="chat-panel flex h-full min-h-0 min-w-0 flex-col">
     <div className="relative flex items-center gap-2 border-b border-ink-700/50 px-4 py-3">
       <Bot className="hidden h-5 w-5 shrink-0 text-accent-300 sm:block" />
@@ -337,6 +341,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
         </details>
       )}
       {chatId && messages.length > 6 && <button aria-label="Сжать контекст" title="Сжать контекст: старые сообщения — в сводку для модели, чтобы разговор мог продолжаться без ограничений" onClick={compact} disabled={running || sending} className="icon-button"><FoldVertical className="h-4 w-4" /></button>}
+      {detail.data?.project_id && <button aria-label="Правила проекта" title="Правила проекта (LAYLA.md): модель видит их в каждом ответе" onClick={() => setRulesOpen(true)} className="icon-button"><BookMarked className="h-4 w-4" /></button>}
       {chatId && renaming === null && <button aria-label="Переименовать чат" title="Переименовать" onClick={() => setRenaming(detail.data?.title || "")} className="icon-button"><Pencil className="h-4 w-4" /></button>}
       {detail.data?.project_id && <button onClick={zip} className="icon-button" aria-label="Скачать файлы чата ZIP"><Download className="h-4 w-4" /></button>}
       {chatId && <button aria-label="Удалить чат" title="Удалить чат" onClick={removeChat} disabled={sending || removing || !ready} className="icon-button hover:bg-red-500/15 hover:text-red-300">{removing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}</button>}
@@ -354,6 +359,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
           {m.role === "assistant" && m.meta?.checkpoint && !m.meta.rolled_back && !running && <button onClick={() => rollback(m.id)} title="Вернуть файлы к состоянию до этого ответа" className="flex items-center gap-1 rounded-md px-1.5 py-0.5 font-normal text-neutral-500 hover:bg-ink-700 hover:text-neutral-200"><Undo2 className="h-3.5 w-3.5" />Откатить к этой точке</button>}
         </div>
         {m.meta?.reasoning && <details className="mb-3 rounded-lg border border-ink-700 p-3"><summary className="cursor-pointer text-xs text-neutral-400">Размышление</summary><p className="mt-3 whitespace-pre-wrap break-words text-xs leading-relaxed text-neutral-400">{m.meta.reasoning}</p></details>}
+        {!!m.meta?.todos?.length && <Todos items={m.meta.todos} />}
         <div className="whitespace-pre-wrap break-words text-sm leading-7">{m.content}</div>
         {m.meta?.tools?.map(tool => <div key={tool.id} className="mt-3">{tool.status === "pending" ? <Approval tool={tool} active={approval?.id === tool.id} busy={deciding} onDecide={decide} /> : tool.status === "rejected" ? <p className="rounded-lg border border-ink-700 p-3 text-xs text-neutral-400">Отклонено вами · <span className="break-all font-mono">{tool.path}</span></p> : tool.change && tool.status === "done" ? <FileDiff change={tool.change} onOpen={onOpenFile} /> : <div className={`rounded-lg border p-3 text-xs ${tool.status === "error" ? "border-red-500/30 text-red-300" : "border-ink-700 text-neutral-400"}`}><span>{tool.status === "running" ? "Выполняется" : tool.status === "done" ? "Готово" : "Ошибка"} · {tool.name}</span><p className="mt-1 break-all font-mono">{tool.path}</p>{tool.error && <p>{tool.error}</p>}</div>}</div>)}
         {m.meta?.error && <p role="alert" className="mt-3 text-sm text-red-300">{m.meta.error}</p>}
@@ -365,6 +371,12 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
       <Play className="h-4 w-4 shrink-0 text-amber-200" /><span className="min-w-0 flex-1">Ход прерван. Уже сделанное сохранено — агент продолжит с того же места.</span>
       <button className="primary-button !px-3 !py-1.5 text-xs" onClick={() => send({ text: "Продолжи с того места, где остановился.", mode })}>Продолжить</button>
     </div>}
+    {reviewReady && <div className="mx-5 mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-accent-500/30 bg-accent-500/10 p-3 text-xs">
+      <SearchCheck className="h-4 w-4 shrink-0 text-accent-300" /><span className="min-w-0 flex-1">Ревью готово. Исправить найденное?</span>
+      <button className="primary-button !px-3 !py-1.5 text-xs" onClick={() => { pickMode("auto"); send({ text: "Исправь найденные проблемы, начиная с самых важных.", mode: "auto" }); }}>Исправить</button>
+      <button className="secondary-button !px-3 !py-1.5 text-xs" onClick={() => { pickMode("confirm"); send({ text: "Исправь найденные проблемы, начиная с самых важных.", mode: "confirm" }); }}>С подтверждением</button>
+    </div>}
+    {rulesOpen && detail.data?.project_id && <RulesDialog projectId={detail.data.project_id} onClose={() => setRulesOpen(false)} />}
     {planReady && <div className="mx-5 mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-accent-500/30 bg-accent-500/10 p-3 text-xs">
       <ClipboardList className="h-4 w-4 shrink-0 text-accent-300" /><span className="min-w-0 flex-1">План готов. Выполнить?</span>
       <button className="primary-button !px-3 !py-1.5 text-xs" onClick={() => { pickMode("auto"); send({ text: "Выполни этот план.", mode: "auto" }); }}>Выполнить</button>
@@ -382,6 +394,59 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
       <p className="px-2 pt-2 text-[11px] text-neutral-500">{MODES.find(m => m.id === mode)?.hint}. Работа продолжается в фоне.</p>
     </div>
   </div>;
+}
+
+/** План агента (update_todos): что сделано, что в работе, что впереди. */
+function Todos({ items }: { items: { content: string; status: "pending" | "in_progress" | "done" }[] }) {
+  const done = items.filter(t => t.status === "done").length;
+  return <div className="mb-3 rounded-lg border border-ink-700 p-3">
+    <p className="mb-2 flex items-center gap-1.5 text-xs text-neutral-400"><ListChecks className="h-3.5 w-3.5 text-accent-300" />План · {done} из {items.length}</p>
+    <ul className="space-y-1 text-xs">
+      {items.map((t, i) => <li key={i} className={`flex items-start gap-2 ${t.status === "done" ? "text-neutral-500 line-through" : t.status === "in_progress" ? "text-neutral-100" : "text-neutral-400"}`}>
+        {t.status === "done" ? <CircleCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-400" /> : t.status === "in_progress" ? <CircleDot className="mt-0.5 h-3.5 w-3.5 shrink-0 text-accent-300" /> : <Circle className="mt-0.5 h-3.5 w-3.5 shrink-0" />}
+        <span className="min-w-0 break-words">{t.content}</span>
+      </li>)}
+    </ul>
+  </div>;
+}
+
+/** Правила проекта — файл LAYLA.md: модель видит их в каждом ответе этого проекта. */
+function RulesDialog({ projectId, onClose }: { projectId: string; onClose: () => void }) {
+  const [text, setText] = useState("");
+  const [sha, setSha] = useState<string | null>(null);
+  const [state, setState] = useState<"loading" | "ready" | "saving">("loading");
+  const [msg, setMsg] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    api.get<FileContent>(`/projects/${projectId}/file?path=LAYLA.md`)
+      .then(file => { if (alive) { setText(file.content); setSha(file.sha256); setState("ready"); } })
+      .catch(e => { if (alive) { if (!(e instanceof ApiError && e.status === 404)) setMsg(e instanceof Error ? e.message : "Не удалось прочитать"); setState("ready"); } });
+    return () => { alive = false; };
+  }, [projectId]);
+  async function save() {
+    setState("saving"); setMsg(null);
+    try {
+      const change = await api.put<{ after_sha256: string | null }>(`/projects/${projectId}/file`, { path: "LAYLA.md", content: text, expected_sha256: sha });
+      setSha(change.after_sha256);
+      setMsg("Сохранено — правила действуют со следующего ответа");
+    } catch (e) { setMsg(e instanceof Error ? e.message : "Не удалось сохранить"); }
+    finally { setState("ready"); }
+  }
+  // Портал в body: иначе «fixed» ограничен колонкой чата (у неё свой контейнер).
+  return createPortal(<div role="dialog" aria-label="Правила проекта" className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4" onClick={onClose}>
+    <div className="w-full max-w-lg rounded-2xl border border-ink-600 bg-ink-900 p-4 shadow-floating" onClick={e => e.stopPropagation()}>
+      <div className="mb-2 flex items-center gap-2"><BookMarked className="h-4 w-4 text-accent-300" /><h2 className="flex-1 text-sm font-semibold">Правила проекта · LAYLA.md</h2><button onClick={onClose} aria-label="Закрыть" className="icon-button !h-8 !w-8"><X className="h-4 w-4" /></button></div>
+      <p className="mb-3 text-xs leading-5 text-neutral-400">Постоянные указания для модели в этом проекте: стек, стиль, что можно и нельзя. Модель видит их в каждом ответе и сама дописывает сюда то, что вы просите запомнить.</p>
+      <textarea aria-label="Текст правил" value={text} onChange={e => setText(e.target.value)} rows={10} disabled={state === "loading"}
+        placeholder={"- Стек: HTML + Tailwind\n- Тексты на «вы», без англицизмов\n- Не трогать папку legacy/"}
+        className="w-full resize-y rounded-lg border border-ink-700 bg-ink-800 p-3 font-mono text-xs leading-5" />
+      {msg && <p role="status" className="mt-2 text-xs text-neutral-300">{msg}</p>}
+      <div className="mt-3 flex justify-end gap-2">
+        <button onClick={onClose} className="secondary-button !px-3 !py-1.5 text-xs">Закрыть</button>
+        <button onClick={save} disabled={state !== "ready"} className="primary-button !px-3 !py-1.5 text-xs">{state === "saving" ? "Сохраняю…" : "Сохранить"}</button>
+      </div>
+    </div>
+  </div>, document.body);
 }
 
 /** Изменение, ждущее решения пользователя (режим «С подтверждением»). */

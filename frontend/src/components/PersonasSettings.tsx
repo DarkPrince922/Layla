@@ -12,7 +12,7 @@ type Draft = {
   color: string;
   instructions: string;
   files: Files;
-  default_mode: "" | "auto" | "confirm" | "plan";
+  default_mode: "" | "auto" | "confirm" | "plan" | "review";
   default_model: string;
 };
 
@@ -21,6 +21,7 @@ const MODES = [
   { id: "auto", label: "Авто" },
   { id: "confirm", label: "С подтверждением" },
   { id: "plan", label: "План" },
+  { id: "review", label: "Ревью" },
 ] as const;
 
 const filesOf = (tools: string[] = []): Files =>

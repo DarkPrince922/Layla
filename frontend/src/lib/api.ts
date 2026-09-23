@@ -193,7 +193,9 @@ export interface ChatMessage {
   tools?: ToolEvent[];
   error?: string | null;
   meta?: {
-    reasoning?: string; tools?: ToolEvent[]; error?: string | null; mode?: "auto" | "confirm" | "plan";
+    reasoning?: string; tools?: ToolEvent[]; error?: string | null; mode?: "auto" | "confirm" | "plan" | "review";
+    /** План агента (update_todos). */
+    todos?: { content: string; status: "pending" | "in_progress" | "done" }[];
     /** Есть контрольная точка: ход можно откатить. */
     checkpoint?: boolean;
     rolled_back?: boolean;
@@ -492,6 +494,8 @@ export interface ProviderModel {
   context?: number | null;
   temperature?: number | null;
   reasoning_effort?: "low" | "medium" | "high" | null;
+  /** Бюджет размышлений на шаг, токенов: null — «Авто» (6000), 0 — без ограничения. */
+  reasoning_budget?: number | null;
   /** Параметры, от которых провайдер отказался. */
   dropped?: string[];
   /** Только в запросе: забыть подобранное автоматически. */

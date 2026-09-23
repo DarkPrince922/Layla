@@ -259,7 +259,7 @@ function ProviderModels({ providerId }: { providerId: string }) {
     qc.invalidateQueries({ queryKey: ["models"] });
   }
   const custom = (m: ProviderModel) =>
-    !!(m.max_output_manual || m.context || m.temperature != null || m.reasoning_effort);
+    !!(m.max_output_manual || m.context || m.temperature != null || m.reasoning_effort || m.reasoning_budget != null);
   const current = models.find((m) => m.name === editing) || null;
 
   return (
@@ -350,6 +350,7 @@ function ModelSettings({ model, onSave, onClose }: {
   const [context, setContext] = useState(model.context ? String(model.context) : "");
   const [temperature, setTemperature] = useState(model.temperature != null ? String(model.temperature) : "");
   const [effort, setEffort] = useState(model.reasoning_effort || "");
+  const [budget, setBudget] = useState(model.reasoning_budget == null ? "" : String(model.reasoning_budget));
   const [state, setState] = useState<{ busy: boolean; msg: string | null; ok: boolean }>({ busy: false, msg: null, ok: true });
   const field = "w-full rounded-md border border-ink-700 bg-ink-900 px-2 py-1.5 text-xs";
   const chip = "rounded bg-ink-800 px-1.5 py-0.5 text-[10px] text-neutral-400 hover:bg-ink-700 hover:text-neutral-200";
@@ -362,6 +363,7 @@ function ModelSettings({ model, onSave, onClose }: {
         max_output: num(output), max_output_manual: !!output.trim(),
         context: num(context), temperature: num(temperature),
         reasoning_effort: (effort || null) as ProviderModel["reasoning_effort"],
+        reasoning_budget: budget === "" ? null : Number(budget),
         reset,
       });
       setState({ busy: false, msg: reset ? "Подобранное сброшено" : "Сохранено", ok: true });
@@ -395,7 +397,7 @@ function ModelSettings({ model, onSave, onClose }: {
             {CONTEXT_PRESETS.map((n) => <button key={n} type="button" className={chip} onClick={() => setContext(String(n))}>{short(n)}</button>)}
             <button type="button" className={chip} onClick={() => setContext("")}>Без ограничения</button>
           </span>
-          <span className="mt-1 block text-[10px] leading-4 text-neutral-500">Длинная история урезается: модели уходят последние сообщения, в чате всё остаётся. Если провайдер сообщит предел — подставится сам.</span>
+          <span className="mt-1 block text-[10px] leading-4 text-neutral-500">Длинная история сворачивается в сводку: старое — кратко, свежие сообщения — целиком, в чате всё остаётся. Если провайдер сообщит предел — подставится сам.</span>
         </label>
         <label className="block">
           <span className="mb-1 block text-[11px] text-neutral-400">Температура</span>
@@ -412,6 +414,22 @@ function ModelSettings({ model, onSave, onClose }: {
             <option value="high">Высокая (high)</option>
           </select>
           <span className="mt-1 block text-[10px] leading-4 text-neutral-500">Для reasoning-моделей (o-серия, gpt-5, DeepSeek R1 через совместимые API). Остальные модели параметр игнорируют.</span>
+        </label>
+        <label className="block sm:col-span-2">
+          <span className="mb-1 block text-[11px] text-neutral-400">Бюджет размышлений на шаг</span>
+          <select value={budget} onChange={(e) => setBudget(e.target.value)} className={field}>
+            <option value="">Авто (6K токенов)</option>
+            <option value="2048">2K — очень коротко</option>
+            <option value="4096">4K</option>
+            <option value="8192">8K</option>
+            <option value="16384">16K</option>
+            <option value="32768">32K — сложные задачи</option>
+            <option value="0">Без ограничения</option>
+          </select>
+          <span className="mt-1 block text-[10px] leading-4 text-neutral-500">
+            Если модель думает дольше и ещё не начала действовать (обычно пишет весь код в «мыслях»), Layla остановит
+            размышления и попросит коротко спланировать шаг и действовать. OpenRouter и Qwen получают бюджет напрямую.
+          </span>
         </label>
       </div>
       {!!model.dropped?.length && (
