@@ -220,6 +220,8 @@ async def _start_generation(session: AsyncSession, sessionmaker, user: User, mod
                                      f"через {value['delay']:g} с")
                     elif kind == "key":
                         await h.step(project_agent.key_label(value))
+                    elif kind == "overthink":
+                        await h.step(project_agent.overthink_label(value))
                     elif kind == "learned":
                         # Запоминаем, чего модель не умеет, — так же, как в чатах.
                         known = dict(prov.model_caps or {})

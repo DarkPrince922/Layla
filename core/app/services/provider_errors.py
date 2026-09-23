@@ -39,7 +39,9 @@ _CONTEXT_SIZE = re.compile(r"(?:maximum context length|context (?:length|window)
                            re.IGNORECASE)
 # Параметры, которые пользователь может задать модели. Если модель их не принимает —
 # убираем из запроса (например, o1 не даёт менять temperature).
-TUNABLE_PARAMS = ("temperature", "reasoning_effort")
+TUNABLE_PARAMS = ("temperature", "reasoning_effort", "reasoning", "thinking_budget", "cache_control")
+# У Anthropic глубина размышлений — output_config.effort: его отказ снимает reasoning_effort.
+_PARAM_ALIASES = {"effort": "reasoning_effort"}
 _UNSUPPORTED_WORDS = ("unsupported", "not supported", "does not support", "only the default",
                       "unrecognized", "unknown", "extra inputs", "not permitted", "not allowed", "invalid")
 # Сервер требует строку в content и не принимает null у хода только с вызовом инструмента.
@@ -96,8 +98,11 @@ def classify_rejection(status: int, body: str) -> CapabilityError | None:
         found = _CONTEXT_SIZE.search(body) or re.search(r">\s*(\d{3,8})\s*maximum", body, re.IGNORECASE)
         return CapabilityError("История не помещается в контекст модели", capability="context",
                                value=int(found.group(1)) if found else None, status=status)
-    for param in TUNABLE_PARAMS:
-        if param in text and any(w in text for w in _UNSUPPORTED_WORDS):
+    unsupported = any(w in text for w in _UNSUPPORTED_WORDS)
+    for name in (*TUNABLE_PARAMS, *_PARAM_ALIASES):
+        # Целым словом: «reasoning» не должен ловить «reasoning_content».
+        if unsupported and re.search(rf"\b{re.escape(name)}\b", text):
+            param = _PARAM_ALIASES.get(name, name)
             return CapabilityError(f"Модель не принимает параметр {param}", capability="drop",
                                    value=param, status=status)
     if "max_tokens" in text and "max_completion_tokens" in text:

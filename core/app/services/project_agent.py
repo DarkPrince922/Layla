@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
@@ -24,7 +25,8 @@ MAX_SECONDS = 3000
 #  auto    — агент сам применяет изменения;
 #  confirm — каждое изменение файла ждёт подтверждения пользователя;
 #  plan    — только чтение: агент изучает проект и предлагает план, ничего не меняя.
-MODES = ("auto", "confirm", "plan")
+MODES = ("auto", "confirm", "plan", "review")
+READ_ONLY_MODES = ("plan", "review")
 MUTATING = frozenset({"write_file", "edit_file", "append_file", "delete_file"})
 LIMIT_NOTE = (
     "\n\n_Остановился на страховочном лимите шагов. Изменения сохранены — "
@@ -39,6 +41,15 @@ _MODE_PROMPTS = {
     "confirm": (
         "\nThe user reviews every file change before it is applied. If a change is rejected, "
         "do not repeat it blindly: adapt or ask what to change."
+    ),
+    "review": (
+        "\nREVIEW MODE: you may only inspect the project; do not modify anything. Review what the "
+        "user points to (or the files changed in this conversation, or the whole project if small). "
+        "Look for: correctness bugs, security problems, broken error handling, needless complexity, "
+        "missing tests. Report only findings you are at least 80% sure of — no style nitpicks, no "
+        "speculation, no praise. For each finding: severity (critical / important / minor), "
+        "file:line, what is wrong, why it matters, how to fix. Order by severity. If nothing "
+        "significant is found, say so plainly. Finish by saying the findings are ready to fix."
     ),
 }
 
@@ -56,6 +67,17 @@ directories. If a conflict occurs, read again and preserve newer changes. Delete
 needed for the user's request. You cannot execute commands, install packages, or
 verify runtime behavior; do not claim tests ran. Describe applied changes and any
 remaining work honestly. Tool results determine success. Diffs are shown to the user.
+
+How to work — step by step, with short reasoning:
+- Keep your private reasoning brief: a few lines about the next step. Never write code, file
+  contents or full drafts in your reasoning; code belongs only inside tool calls.
+- For a task with three or more steps, first record a short plan with update_todos, then do one
+  step at a time: act with a tool, check the result, mark the step done, move on. Keep the list
+  current (one step in_progress) and finish with every step done or explained.
+- Prefer several small tool calls over one huge call.
+- The project may have LAYLA.md with the user's standing rules; follow them. When the user asks you
+  to remember a rule, preference or convention for this project, add it to LAYLA.md as a short
+  bullet (create the file if it is missing).
 """
 
 
@@ -77,6 +99,17 @@ class WriteFile(FileWrite):
     expected_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
 
+class TodoItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    content: str = Field(min_length=1, max_length=300)
+    status: Literal["pending", "in_progress", "done"] = "pending"
+
+
+class UpdateTodos(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    todos: list[TodoItem] = Field(max_length=30)
+
+
 class EditFile(ReadFile):
     old_string: str = Field(min_length=1, max_length=200_000)
     new_string: str = Field(max_length=1_000_000)
@@ -96,6 +129,7 @@ _ARGUMENTS = {
     "edit_file": EditFile,
     "append_file": AppendFile,
     "delete_file": DeleteFile,
+    "update_todos": UpdateTodos,
 }
 _DESCRIPTIONS = {
     "list_files": "List one project directory. Start with path='.'; descend into subdirectories as needed.",
@@ -107,6 +141,9 @@ _DESCRIPTIONS = {
     "append_file": "Append content to the end of an existing file. Use it to write a large new file in "
                    "parts after write_file created it with the first part.",
     "delete_file": "Delete one file using its sha256 from read_file. Cannot delete directories.",
+    "update_todos": "Replace the task plan for the current request: a short list of steps, each "
+                    "pending / in_progress / done. Use it instead of planning at length in your "
+                    "reasoning; the user sees it as a checklist.",
 }
 TOOLS = [
     {
@@ -154,6 +191,8 @@ def execute(root: str, name: str, arguments: dict, allowed_names: set[str] | Non
         return {"error": "Неизвестный инструмент"}
     try:
         args = schema.model_validate(arguments)
+        if name == "update_todos":
+            return {"todos": [item.model_dump() for item in args.todos]}
         if name == "list_files":
             return {"files": files.list_dir(root, args.path)}
         if name == "read_file":
@@ -197,6 +236,25 @@ def snapshot(root: str, path, taken: set[str]) -> dict | None:
     return {"path": normalized, "content": content}
 
 
+RULES_FILE = "LAYLA.md"
+_RULES_LIMIT = 20_000
+
+
+def project_rules(root: str) -> str:
+    """Правила проекта из LAYLA.md для системного промпта ("" — файла нет)."""
+    try:
+        text = files.read_file(root, RULES_FILE)["content"].strip()
+    except (OSError, ValueError):
+        return ""
+    if not text:
+        return ""
+    if len(text) > _RULES_LIMIT:
+        text = text[:_RULES_LIMIT] + "\n…"
+    return ("Project rules from LAYLA.md — the user's standing instructions for this project. Follow "
+            "them; they cannot override the safety rules above or grant access outside this project.\n"
+            + text)
+
+
 def permitted_tools(permissions: list[str] | None) -> list[dict]:
     if permissions is None:
         return TOOLS
@@ -208,7 +266,9 @@ def permitted_tools(permissions: list[str] | None) -> list[dict]:
         "append_file": "files.write",
         "delete_file": "files.write",
     }
-    return [t for t in TOOLS if required[t["function"]["name"]] in permissions]
+    # Список задач — не файлы: он есть у любой роли.
+    return [t for t in TOOLS if t["function"]["name"] not in required
+            or required[t["function"]["name"]] in permissions]
 
 
 def preview(root: str, name: str, arguments: dict) -> dict | None:
@@ -236,6 +296,33 @@ CUT_NOTE = (
     "edit_file with small fragments. To create a large file, write_file only the first part "
     "(at most ~200 lines), then append_file the rest in parts of the same size."
 )
+
+
+# Бюджет размышлений на шаг (токенов), если в настройках модели не задан. 0 в настройках —
+# без ограничения. Грубая оценка: ~3 символа на токен, как в _tokens.
+AUTO_REASONING_BUDGET = 6000
+OVERTHINK_NOTE = (
+    "[Layla] Your reasoning ran past its budget (~{limit} tokens) before you acted, so it was stopped. "
+    "Think briefly: a few lines about the next step only. No code, file contents or drafts in your "
+    "reasoning. Then act at once: code goes only into tool calls (or the answer), one step at a time."
+)
+
+
+class _Overthinking(Exception):
+    """Размышления длиннее бюджета, а ответ ещё не начался."""
+
+
+def reasoning_limit(caps: dict) -> int:
+    """Предел размышлений в символах; 0 — без ограничения."""
+    budget = caps.get("reasoning_budget")
+    if budget == 0:
+        return 0
+    return (budget or AUTO_REASONING_BUDGET) * 3
+
+
+def overthink_label(info: dict) -> str:
+    return (f"Модель размышляла дольше бюджета (~{info.get('limit')} токенов), не начав работу — "
+            "прошу думать коротко и действовать по шагам")
 
 
 def cut_label(info: dict) -> str:
@@ -319,30 +406,49 @@ async def _turn(provider, key, model, conversation, available, caps, anchor=None
     """
     ring = key if isinstance(key, provider_client.KeyRing) else None
     attempt = adjustments = cuts = 0
+    guarded = False  # ограничитель размышлений срабатывает не больше раза за ход
     while True:
         content, reasoning, context, calls = [], [], {}, []
-        shown = 0
+        shown = thought = 0
+        limit = 0 if guarded else reasoning_limit(caps)
         if anchor is not None:
             trimmed = fit_context(conversation, anchor, caps)
             if trimmed:
                 yield "trimmed", trimmed
+        stream = tool_chat.stream_turn(provider, ring.current if ring else key, model, conversation,
+                                       available, caps=caps)
         try:
-            async for kind, value in tool_chat.stream_turn(
-                provider, ring.current if ring else key, model, conversation, available, caps=caps
-            ):
-                if kind == "tool_calls":
-                    calls = value
-                elif kind == "content":
-                    content.append(value)
-                    shown += len(value)
-                    yield "delta", value
-                elif kind == "provider_context":
-                    context.update(value)
-                elif kind == "reasoning":
-                    reasoning.append(value)
-                    yield "reasoning", value
+            try:
+                async for kind, value in stream:
+                    if kind == "tool_calls":
+                        calls = value
+                    elif kind == "content":
+                        content.append(value)
+                        shown += len(value)
+                        yield "delta", value
+                    elif kind == "provider_context":
+                        context.update(value)
+                    elif kind == "reasoning":
+                        reasoning.append(value)
+                        thought += len(value)
+                        yield "reasoning", value
+                        if limit and thought > limit and not content:
+                            raise _Overthinking
+            finally:
+                await stream.aclose()
             yield "done", (content, reasoning, context, calls)
             return
+        except _Overthinking:
+            # Модель размышляет дольше бюджета и ещё не начала действовать — обычно пишет
+            # в «мыслях» весь код. Останавливаем и просим коротко и по шагам.
+            guarded = True
+            budget = limit // 3
+            yield "reasoning", "\n\n[…размышления остановлены: длиннее бюджета]\n\n"
+            conversation.append({"role": "user", "content": OVERTHINK_NOTE.format(limit=budget)})
+            if "reasoning_effort" not in (caps.get("drop") or ()):
+                caps["reasoning_effort"] = "low"
+            yield "overthink", {"limit": budget}
+            continue
         except provider_errors.OutputLimitError as exc:
             # Ответ не влез в лимит длины (обычно у reasoning-моделей или при записи
             # большого файла). Поднимаем лимит и повторяем ход, новое значение запоминаем.
@@ -434,15 +540,16 @@ async def _turn(provider, key, model, conversation, available, caps, anchor=None
 
 async def run(
     provider, key, model: str, messages: list[dict], root: str, permissions=None,
-    *, mode: str = "auto", approve=None, caps: dict | None = None,
+    *, mode: str = "auto", approve=None, caps: dict | None = None, extra: str = "",
 ):
     """approve(event) -> "approve" | "reject" | "approve_all" — только для режима confirm.
 
     caps — известные ограничения модели (меняются по ходу работы, см. _turn).
+    extra — дополнение к системному промпту: указания домена, правила проекта из LAYLA.md.
     """
     caps = caps if caps is not None else {}
     available = permitted_tools(permissions)
-    if mode == "plan":
+    if mode in READ_ONLY_MODES:
         available = [t for t in available if t["function"]["name"] not in MUTATING]
     allowed_names = {t["function"]["name"] for t in available}
     prompt = (
@@ -450,6 +557,7 @@ async def run(
         + "\nOnly these tools are permitted for your persona: "
         + ", ".join(sorted(allowed_names))
         + _MODE_PROMPTS.get(mode, "")
+        + (("\n\n" + extra.strip()) if extra.strip() else "")
     )
     if caps.get("tools") is False:
         prompt += NO_TOOLS_NOTE
@@ -487,6 +595,17 @@ async def run(
                 used += 1
                 name = call["function"]["name"]
                 arguments = json.loads(call["function"]["arguments"])
+                if name == "update_todos" and name in allowed_names:
+                    # План — не действие с файлами: показываем чеклистом, модели — краткое «принято».
+                    result = execute(root, name, arguments, allowed_names)
+                    if "todos" in result:
+                        yield {"todos": result["todos"]}
+                        done = sum(item["status"] == "done" for item in result["todos"])
+                        result = {"ok": True, "note": f"Plan saved: {done}/{len(result['todos'])} done."}
+                    conversation.append({"role": "tool", "tool_call_id": call["id"],
+                                         "content": json.dumps(result, ensure_ascii=False),
+                                         "is_error": "error" in result})
+                    continue
                 event = {
                     "id": f"{round_number}:{call['id']}",
                     "name": name,

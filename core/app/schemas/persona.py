@@ -10,7 +10,7 @@ from app.models.enums import PersonaKind
 # (venue.exec, intel.lookup и т. п.) и HITL задаются встроенными ролями и не
 # редактируются — так настройка роли не может ослабить проверки пентеста/OSINT.
 FILE_TOOLS = ("files.read", "files.write")
-Mode = Literal["auto", "confirm", "plan"]
+Mode = Literal["auto", "confirm", "plan", "review"]
 
 
 class PersonaOut(BaseModel):

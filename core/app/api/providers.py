@@ -273,7 +273,7 @@ async def set_provider_models(
             # Вернули «Авто»: снимаем ручной потолок, дальше лимит подбирается сам.
             for key in ("max_output", "max_output_cap", "max_output_manual"):
                 entry.pop(key, None)
-        for key in ("context", "temperature", "reasoning_effort"):
+        for key in ("context", "temperature", "reasoning_effort", "reasoning_budget"):
             value = getattr(m, key)
             if value is None:
                 entry.pop(key, None)
@@ -294,6 +294,7 @@ def _with_caps(provider: Provider, entries: list[dict]) -> list[ProviderModelInf
             name=m["name"], enabled=bool(m.get("enabled", True)), tools=c.get("tools") is not False,
             max_output=c.get("max_output"), max_output_manual=bool(c.get("max_output_manual")),
             context=c.get("context"), temperature=c.get("temperature"),
-            reasoning_effort=c.get("reasoning_effort"), dropped=list(c.get("drop") or []),
+            reasoning_effort=c.get("reasoning_effort"), reasoning_budget=c.get("reasoning_budget"),
+            dropped=list(c.get("drop") or []),
         ))
     return out

@@ -55,6 +55,17 @@ def _wire(message: dict, skip: set[str], empty=None) -> dict:
     return out
 
 
+def _mark_cache(messages: list[dict]) -> None:
+    """Claude через OpenAI-совместимый шлюз (OpenRouter, LiteLLM): метка кеша на системном промпте."""
+    last = None
+    for message in messages:
+        if message.get("role") != "system":
+            break
+        last = message
+    if last and isinstance(last.get("content"), str) and last["content"]:
+        last["content"] = [{"type": "text", "text": last["content"], "cache_control": {"type": "ephemeral"}}]
+
+
 def anthropic_messages(messages: list[dict]) -> tuple[str, list[dict]]:
     system = "\n".join(m["content"] for m in messages if m["role"] == "system")
     converted = []
@@ -142,8 +153,27 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
     drop = set(caps.get("drop") or ())
     if caps.get("temperature") is not None and "temperature" not in drop:
         payload["temperature"] = caps["temperature"]
-    if caps.get("reasoning_effort") and "reasoning_effort" not in drop and not native:
-        payload["reasoning_effort"] = caps["reasoning_effort"]
+    effort = caps.get("reasoning_effort") if "reasoning_effort" not in drop else None
+    budget = caps.get("reasoning_budget") or 0
+    host = str(getattr(provider, "base_url", "") or "").lower()
+    if native:
+        if effort:
+            payload["output_config"] = {"effort": effort}  # глубина размышлений у Claude
+        if "cache_control" not in drop:
+            # Кеш промпта: метка на системном промпте (он же кеширует инструменты) плюс
+            # автоматическая метка на растущем хвосте разговора.
+            payload["cache_control"] = {"type": "ephemeral"}
+            if system:
+                payload["system"] = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+    else:
+        if budget and "reasoning" not in drop and "openrouter.ai" in host:
+            payload["reasoning"] = {"max_tokens": budget}  # у OpenRouter бюджет вместо effort
+        elif effort:
+            payload["reasoning_effort"] = effort
+        if budget and "thinking_budget" not in drop and "dashscope" in host:
+            payload["thinking_budget"] = budget  # Qwen
+        if "cache_control" not in drop and "claude" in model.lower():
+            _mark_cache(payload["messages"])
 
     calls: dict[int, dict] = {}
     initial_inputs: dict[int, dict] = {}

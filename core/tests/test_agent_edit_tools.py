@@ -61,6 +61,6 @@ def test_preview_shows_edit_diff_without_writing(tmp_path):
 
 def test_edit_tools_need_write_permission():
     names = lambda perms: {t["function"]["name"] for t in project_agent.permitted_tools(perms)}  # noqa: E731
-    assert names(["files.read"]) == {"list_files", "read_file"}
+    assert names(["files.read"]) == {"list_files", "read_file", "update_todos"}  # план — не файлы
     assert {"edit_file", "append_file"} <= names(["files.read", "files.write"])
     assert {"edit_file", "append_file"} <= project_agent.MUTATING  # в режиме «План» их нет

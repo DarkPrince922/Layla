@@ -43,7 +43,7 @@ from app.schemas.chat import (
     SendMessageRequest,
 )
 from app.schemas.job import JobOut
-from app.services import audit, files, history, jobs, project_agent, provider_client, trash
+from app.services import audit, design_gen, files, history, jobs, project_agent, provider_client, trash
 from app.services.auth import get_current_user
 
 
@@ -297,7 +297,8 @@ async def send_message(
         async def events():
             if root:
                 async for event in project_agent.run(
-                    provider, key, model, payload, root, permissions
+                    provider, key, model, payload, root, permissions,
+                    extra=await run_in_threadpool(project_agent.project_rules, root),
                 ):
                     yield event
             else:
@@ -632,6 +633,7 @@ async def run_chat(
         error = None
         last_persist = 0.0
         checkpointed = False  # есть контрольная точка — ход можно откатить
+        todos: list[dict] = []  # план агента (update_todos) — чеклист в сообщении
 
         async def persist(change: dict | None = None) -> None:
             nonlocal last_persist
@@ -641,7 +643,7 @@ async def run_chat(
                     return
                 msg.content = "".join(full)
                 msg.meta = {"reasoning": "".join(reasoning), "tools": list(tools.values()), "error": error,
-                            "mode": mode, "checkpoint": checkpointed}
+                            "mode": mode, "checkpoint": checkpointed, "todos": todos}
                 if change:
                     await audit.record(output_session, actor=owner_id,
                                        action="project.agent." + change["operation"],
@@ -668,13 +670,17 @@ async def run_chat(
                     await h.set_result({"approval": None})
 
             caps = dict((prov.model_caps or {}).get(model) or {})
+            # Указания домена и правила проекта (LAYLA.md) — дополнение к системному промпту.
+            extra = design_gen.DESIGN_CHAT_NOTE if domain == "design" else ""
+            rules = await run_in_threadpool(project_agent.project_rules, root)
+            extra = "\n\n".join(part for part in (extra, rules) if part)
             messages = payload
             if history.needed(messages, caps):
                 # История не влезает в бюджет контекста — старое сворачивается в сводку,
                 # а не отбрасывается. Не вышло — ниже просто уйдут последние сообщения.
                 messages = await _compact_before_turn(h, maker, chat_id, prov, key, model, caps) or messages
             async for event in project_agent.run(prov, key, model, messages, root, permissions,
-                                                 mode=mode, approve=approve, caps=caps):
+                                                 mode=mode, approve=approve, caps=caps, extra=extra):
                 if "delta" in event:
                     full.append(event["delta"])
                 elif "retract" in event:
@@ -692,6 +698,14 @@ async def run_chat(
                     await h.step(project_agent.key_label(event["key"]))
                 elif "cut" in event:
                     await h.step(project_agent.cut_label(event["cut"]))
+                elif "todos" in event:
+                    todos[:] = event["todos"]
+                    current = next((t["content"] for t in todos if t["status"] == "in_progress"), None)
+                    done = sum(t["status"] == "done" for t in todos)
+                    await h.step(f"План: {done} из {len(todos)}" + (f" · {current}" if current else ""))
+                    await persist()
+                elif "overthink" in event:
+                    await h.step(project_agent.overthink_label(event["overthink"]))
                 elif "checkpoint" in event:
                     await _save_checkpoint(maker, chat_id, msg_id, event["checkpoint"])
                     if not checkpointed:

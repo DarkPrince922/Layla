@@ -51,7 +51,7 @@ class SendMessageRequest(BaseModel):
     provider_id: str | None = None  # явный провайдер из пикера (имена моделей могут совпадать)
     # auto — агент сам применяет изменения; confirm — каждое изменение ждёт «Применить»;
     # plan — только чтение и план, без изменений.
-    mode: Literal["auto", "confirm", "plan"] = "auto"
+    mode: Literal["auto", "confirm", "plan", "review"] = "auto"
 
 
 class DecisionRequest(BaseModel):

@@ -78,6 +78,9 @@ class ProviderModelInfo(BaseModel):
     context: int | None = Field(default=None, ge=1024, le=10_000_000)
     temperature: float | None = Field(default=None, ge=0, le=2)
     reasoning_effort: Literal["low", "medium", "high"] | None = None
+    # Бюджет размышлений на один шаг, токенов. None — «Авто» (AUTO_REASONING_BUDGET),
+    # 0 — без ограничения.
+    reasoning_budget: int | None = Field(default=None, ge=0, le=1_000_000)
     # Параметры, от которых провайдер отказался (только для показа).
     dropped: list[str] = Field(default_factory=list)
     # Только во входящем PUT: забыть всё, что Layla подобрала сама, и начать с нуля.

@@ -65,12 +65,17 @@ def entry(message: Message) -> dict | None:
         content += (f"\n[This turn was interrupted: {meta['error']} Steps done before that: {done}. "
                     "Files already reflect the completed steps. When asked to continue, pick up from "
                     "here without repeating completed steps.]")
+    todos = meta.get("todos") if message.role == "assistant" else None
+    if todos:
+        marks = {"done": "✓", "in_progress": "→", "pending": "☐"}
+        listed = "; ".join(f"{marks.get(t.get('status'), '☐')} {t.get('content')}" for t in todos)
+        content += f"\n[Task list at the end of this turn: {listed}]"
     if not content:
         return None
-    item = {"role": message.role, "content": content}
-    if message.role == "assistant" and meta.get("reasoning"):
-        item["reasoning_content"] = meta["reasoning"]
-    return item
+    # Размышления прошлых ответов модели не отправляются: это черновик мысли, часто с
+    # кодом целиком, — он раздувал бы каждый следующий запрос. Внутри текущего хода
+    # (между вызовами инструментов) их по-прежнему передаёт project_agent.
+    return {"role": message.role, "content": content}
 
 
 async def messages(session: AsyncSession, chat_id: str) -> list[Message]:
