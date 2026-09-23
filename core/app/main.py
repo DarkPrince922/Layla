@@ -1,6 +1,7 @@
 """Layla Core — FastAPI application entrypoint."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -32,6 +33,7 @@ from app.api import (
     providers,
     servers,
     telegram,
+    trash,
 )
 from app.config import get_settings
 
@@ -59,9 +61,14 @@ async def lifespan(_app: FastAPI):
         await reap_stale(SessionLocal)
     except Exception:  # noqa: BLE001 — старт не должен падать из-за бутстрапа
         logging.getLogger("layla").exception("Бутстрап/очистка задач не выполнены")
+    # Корзина: всё, что лежит дольше 7 дней, стирается — при старте и раз в час.
+    from app.services.trash import purge_forever
+
+    purger = asyncio.create_task(purge_forever(SessionLocal), name="layla-trash-purge")
     try:
         yield
     finally:
+        purger.cancel()
         from app.services.jobs import shutdown
         await shutdown()
 
@@ -118,6 +125,7 @@ app.include_router(osint.router, prefix=api_prefix)
 app.include_router(engagements.router, prefix=api_prefix)
 app.include_router(servers.router, prefix=api_prefix)
 app.include_router(findings.router, prefix=api_prefix)
+app.include_router(trash.router, prefix=api_prefix)
 app.include_router(pentest_imports.router, prefix=api_prefix)
 app.include_router(agent.router, prefix=api_prefix)
 app.include_router(combos.router, prefix=api_prefix)

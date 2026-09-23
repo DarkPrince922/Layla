@@ -3,12 +3,12 @@
 import { useAuth } from "@/store/auth";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { ArrowLeft, Settings2, Palette, Cable, Bot, Users, BookOpen, ShieldCheck, Plug, Code2, Database, FlaskConical, Network } from "lucide-react";
+import { ArrowLeft, Settings2, Palette, Cable, Bot, Users, BookOpen, ShieldCheck, Plug, Code2, Database, FlaskConical, Network, Trash2 } from "lucide-react";
 import { AppShell } from "@/components/AppShell";
 import { SETTINGS_SECTIONS } from "@/lib/settings-nav";
 import { useLocale } from "@/store/locale";
 
-const icons = [Settings2, Users, Palette, Cable, Bot, Users, BookOpen, ShieldCheck, Plug, Code2, Database, FlaskConical, Network];
+const icons = [Settings2, Users, Palette, Cable, Bot, Users, BookOpen, ShieldCheck, Plug, Code2, Database, FlaskConical, Network, Trash2];
 
 export default function SettingsLayout({ children }: { children: React.ReactNode }) {
   const user = useAuth(s => s.user);

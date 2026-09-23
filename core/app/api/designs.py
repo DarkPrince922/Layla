@@ -194,8 +194,8 @@ async def design_to_project(
         raise HTTPException(status_code=404, detail="Дизайн не найден")
     if design.project_id:
         existing = await session.get(Project, design.project_id)
-        if existing is not None:
-            return existing
+        if existing is not None and existing.deleted_at is None:
+            return existing  # проект из корзины не возвращаем — создадим новый
 
     workspace = await session.scalar(
         select(Workspace).where(Workspace.owner_id == user.id).limit(1)

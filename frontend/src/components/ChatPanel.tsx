@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Send, Bot, Plus, Loader2, Download, Square, Trash2, Eraser, Zap, ShieldCheck, ClipboardList, type LucideIcon } from "lucide-react";
+import { Send, Bot, Plus, Loader2, Download, Square, Trash2, Eraser, Zap, ShieldCheck, ClipboardList, ChevronDown, Pencil, Check, Search, type LucideIcon } from "lucide-react";
 import { api, downloadProject, type Persona, type ModelInfo, type Chat, type ChatDetail, type FileChange, type Job, type ToolEvent } from "@/lib/api";
 import { useAuth } from "@/store/auth";
 import { FileDiff } from "@/components/FileDiff";
@@ -65,6 +65,18 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
   const { data: personas = [] } = useQuery({ queryKey: ["personas"], queryFn: () => api.get<Persona[]>("/personas") });
   const { data: models = [] } = useQuery({ queryKey: ["models"], queryFn: () => api.get<ModelInfo[]>("/models") });
   const history = useQuery({ queryKey: ["chats", owner, domain, projectId], queryFn: () => api.get<Chat[]>(`/chats?domain=${domain}${projectId ? `&project_id=${projectId}` : ""}`) });
+  // Поиск по истории: по названию и тексту сообщений (на сервере), с небольшой задержкой.
+  const historyMenu = useRef<HTMLDetailsElement>(null);
+  const [query, setQuery] = useState("");
+  const [needle, setNeedle] = useState("");
+  useEffect(() => { const t = setTimeout(() => setNeedle(query.trim()), 300); return () => clearTimeout(t); }, [query]);
+  const found = useQuery({
+    queryKey: ["chats", owner, domain, projectId, "search", needle],
+    enabled: !!needle,
+    queryFn: () => api.get<Chat[]>(`/chats?domain=${domain}${projectId ? `&project_id=${projectId}` : ""}&q=${encodeURIComponent(needle)}`),
+  });
+  const listed = needle ? found.data || [] : history.data || [];
+  const [renaming, setRenaming] = useState<string | null>(null);
   const detail = useQuery({ queryKey: ["chat", owner, chatId], enabled: !!chatId,
     queryFn: () => api.get<ChatDetail>(`/chats/${chatId}`),
     refetchInterval: q => active(q.state.data?.last_job) ? 1000 : false,
@@ -201,6 +213,23 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
       await qc.invalidateQueries({ queryKey: ["chat", owner, chatId] });
     } finally { setDeciding(false); }
   }
+  function pick(id: string | null) {
+    if (sending || !ready) return;
+    select(id);
+    setQuery("");
+    if (historyMenu.current) historyMenu.current.open = false;
+  }
+  async function saveTitle() {
+    const title = (renaming || "").trim();
+    if (!chatId || !title) { setRenaming(null); return; }
+    try {
+      await api.patch(`/chats/${chatId}`, { title });
+      await Promise.all([qc.invalidateQueries({ queryKey: ["chats"] }), qc.invalidateQueries({ queryKey: ["chat", owner, chatId] })]);
+      setRenaming(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось переименовать чат");
+    }
+  }
   async function zip() {
     if (!detail.data?.project_id) return;
     try { await downloadProject({ id: detail.data.project_id, name: detail.data.title || "Layla" }); }
@@ -211,8 +240,8 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
   async function removeChat() {
     if (!chatId || removing) return;
     const title = history.data?.find(c => c.id === chatId)?.title || "Чат";
-    const files = domain === "code" ? "" : " Файлы, созданные в этом чате, тоже будут удалены.";
-    if (!(await confirmAction(`Удалить «${title}»? Сообщения и история задач этого чата будут удалены безвозвратно.${files}`))) return;
+    const files = domain === "code" ? "" : " Вместе с ним — файлы, созданные в этом чате.";
+    if (!(await confirmAction(`Удалить «${title}»?${files}\nЧат попадёт в корзину: 7 дней его можно восстановить (Настройки → Корзина).`))) return;
     setRemoving(true); setError(null);
     try {
       await api.del(`/chats/${chatId}`);
@@ -229,8 +258,8 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
   async function clearHistory() {
     const count = history.data?.length || 0;
     if (!count || removing) return;
-    const files = domain === "code" ? "" : " Файлы этих чатов тоже будут удалены.";
-    if (!(await confirmAction(`Удалить всю историю раздела — ${count} чат(ов)? Это необратимо.${files}`, "Очистить"))) return;
+    const files = domain === "code" ? "" : " Вместе с ними — их файлы.";
+    if (!(await confirmAction(`Удалить всю историю раздела — ${count} чат(ов)?${files}\nЧаты попадут в корзину: 7 дней их можно восстановить (Настройки → Корзина).`, "Очистить"))) return;
     setRemoving(true); setError(null);
     try {
       const params = new URLSearchParams({ domain });
@@ -249,14 +278,45 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
   const last = messages.at(-1);
   const planReady = !running && !sending && last?.role === "assistant" && last.meta?.mode === "plan" && !last.meta?.error && !!last.content.trim();
   return <div className="chat-panel flex h-full min-h-0 min-w-0 flex-col">
-    <div className="flex items-center gap-2 border-b border-ink-700/50 px-4 py-3">
-      <Bot className="h-5 w-5 shrink-0 text-accent-300" />
-      <select aria-label="История чатов" value={chatId || ""} disabled={sending || !ready} onChange={e => select(e.target.value || null)} className="min-w-0 flex-1 rounded-lg bg-ink-900 p-2 text-sm">
-        <option value="">Новый чат</option>{history.data?.map(c => <option key={c.id} value={c.id}>{c.title || "Чат"}</option>)}
-      </select>
+    <div className="relative flex items-center gap-2 border-b border-ink-700/50 px-4 py-3">
+      <Bot className="hidden h-5 w-5 shrink-0 text-accent-300 sm:block" />
+      {renaming !== null ? (
+        <form className="flex min-w-0 flex-1 items-center gap-1" onSubmit={e => { e.preventDefault(); saveTitle(); }}>
+          <input autoFocus aria-label="Название чата" value={renaming} maxLength={300} onChange={e => setRenaming(e.target.value)}
+            onKeyDown={e => { if (e.key === "Escape") setRenaming(null); }} className="min-w-0 flex-1 rounded-lg bg-ink-900 p-2 text-sm" />
+          <button aria-label="Сохранить название" className="icon-button"><Check className="h-4 w-4" /></button>
+        </form>
+      ) : (
+        <details ref={historyMenu} className="min-w-0 flex-1">
+          <summary aria-label="История чатов" className="flex cursor-pointer list-none items-center gap-2 rounded-lg bg-ink-900 p-2 text-sm [&::-webkit-details-marker]:hidden">
+            <span className="min-w-0 flex-1 truncate">{chatId ? detail.data?.title || history.data?.find(c => c.id === chatId)?.title || "Чат" : "Новый чат"}</span>
+            <ChevronDown className="h-4 w-4 shrink-0 text-neutral-500" />
+          </summary>
+          {/* Меню во всю ширину шапки чата: на телефоне не вылезает за край. */}
+          <div className="absolute inset-x-3 top-full z-30 mt-1 rounded-xl border border-ink-600 bg-ink-900 p-2 shadow-floating">
+            <label className="mb-2 flex items-center gap-2 rounded-lg bg-ink-800 px-2">
+              <Search className="h-4 w-4 shrink-0 text-neutral-500" />
+              <input aria-label="Поиск по чатам" value={query} onChange={e => setQuery(e.target.value)} placeholder="Поиск по названию и тексту…"
+                className="min-w-0 flex-1 bg-transparent py-2 text-sm outline-none" />
+              {needle && found.isFetching && <Loader2 className="h-3.5 w-3.5 animate-spin text-neutral-500" />}
+            </label>
+            {!needle && <button onClick={() => pick(null)} className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm ${!chatId ? "bg-ink-800 text-white" : "text-neutral-300 hover:bg-ink-800"}`}><Plus className="h-4 w-4" />Новый чат</button>}
+            <div className="max-h-72 overflow-y-auto">
+              {listed.map(c => <button key={c.id} onClick={() => pick(c.id)} className={`block w-full truncate rounded-lg px-2 py-1.5 text-left text-sm ${c.id === chatId ? "bg-ink-800 text-white" : "text-neutral-300 hover:bg-ink-800"}`}>{c.title || "Чат"}</button>)}
+              {needle && !found.isFetching && !listed.length && <p className="px-2 py-3 text-xs text-neutral-500">Ничего не найдено.</p>}
+            </div>
+            {!needle && !!history.data?.length && (
+              <button onClick={() => { if (historyMenu.current) historyMenu.current.open = false; clearHistory(); }} disabled={sending || removing || !ready}
+                className="mt-1 flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs text-red-300 hover:bg-red-500/10">
+                <Eraser className="h-3.5 w-3.5" />Очистить историю раздела
+              </button>
+            )}
+          </div>
+        </details>
+      )}
+      {chatId && renaming === null && <button aria-label="Переименовать чат" title="Переименовать" onClick={() => setRenaming(detail.data?.title || "")} className="icon-button"><Pencil className="h-4 w-4" /></button>}
       {detail.data?.project_id && <button onClick={zip} className="icon-button" aria-label="Скачать файлы чата ZIP"><Download className="h-4 w-4" /></button>}
       {chatId && <button aria-label="Удалить чат" title="Удалить чат" onClick={removeChat} disabled={sending || removing || !ready} className="icon-button hover:bg-red-500/15 hover:text-red-300">{removing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}</button>}
-      {!!history.data?.length && <button aria-label="Очистить историю" title="Очистить историю раздела" onClick={clearHistory} disabled={sending || removing || !ready} className="icon-button hover:bg-red-500/15 hover:text-red-300"><Eraser className="h-4 w-4" /></button>}
       <button aria-label="Новый чат" onClick={() => select(null)} disabled={sending || !ready} className="icon-button"><Plus className="h-5 w-5" /></button>
     </div>
     <div ref={scroll} className="chat-scroll min-h-0 flex-1 space-y-5 overflow-y-auto p-5">

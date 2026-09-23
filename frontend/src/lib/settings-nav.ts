@@ -20,4 +20,5 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
   { slug: "data", label: "Данные", blurb: "Экспорт, импорт, ретеншн, очистка." },
   { slug: "accounts-lab", label: "Accounts Lab", blurb: "Подключение провайдеров, ротация, combos." },
   { slug: "privacy-chain", label: "Privacy Chain", blurb: "Глобальный egress-профиль (Direct/Tor/Proxy)." },
+  { slug: "trash", label: "Корзина", blurb: "Удалённые чаты и проекты: 7 дней на восстановление." },
 ];

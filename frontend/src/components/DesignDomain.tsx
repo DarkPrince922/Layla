@@ -178,6 +178,10 @@ export function DesignDomain() {
         ]);
       }
       if (!projectId) { setError("Сначала сгенерируйте макет или начните чат."); return; }
+      // Папка чата становится проектом «Кода»: появляется в списке и не удаляется вместе с чатом.
+      if (!version) await api.post<Project>(`/projects/${projectId}/promote`);
+      // Сбрасываем кеш списка проектов: «Код» загрузит его заново уже с этим проектом.
+      qc.removeQueries({ queryKey: ["projects"] });
       router.push(`/code?project=${projectId}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Не удалось передать макет в Код");

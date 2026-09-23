@@ -478,3 +478,26 @@ export interface ProviderModel {
   /** Умеет ли модель работать с файлами (инструментами). */
   tools: boolean;
 }
+
+// ---- Корзина ----
+export interface TrashChat {
+  id: string;
+  title?: string | null;
+  domain: string;
+  deleted_at: string;
+  purge_at: string;
+}
+
+export interface TrashProject {
+  id: string;
+  name: string;
+  chats: number;
+  deleted_at: string;
+  purge_at: string;
+}
+
+export interface TrashList {
+  days: number;
+  chats: TrashChat[];
+  projects: TrashProject[];
+}

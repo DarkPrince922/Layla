@@ -16,24 +16,17 @@ from pathlib import Path
 from uuid import uuid4
 
 import anyio
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.concurrency import run_in_threadpool
 
-from app.api.projects import (
-    _default_workspace,
-    _owned_project,
-    _project_root,
-    purge_dirs,
-    remove_project,
-)
+from app.api.projects import _default_workspace, _owned_project, _project_root
 from app.config import get_settings
 from app.db import get_session, get_sessionmaker
 from app.models.chat import Chat, Message
-from app.models.design import Design
 from app.models.enums import Domain
 from app.models.job import Job
 from app.models.persona import Persona
@@ -43,12 +36,13 @@ from app.schemas.chat import (
     ChatCreate,
     ChatDetail,
     ChatOut,
+    ChatRename,
     ClearChatsOut,
     MessageOut,
     SendMessageRequest,
 )
 from app.schemas.job import JobOut
-from app.services import audit, jobs, project_agent, provider_client
+from app.services import audit, jobs, project_agent, provider_client, trash
 from app.services.auth import get_current_user
 
 
@@ -82,7 +76,8 @@ router = APIRouter(prefix="/chats", tags=["chats"])
 
 async def _owned_chat(session: AsyncSession, user: User, chat_id: str) -> Chat:
     chat = await session.get(Chat, chat_id)
-    if chat is None or chat.owner_id != user.id:
+    # Чат в корзине недоступен нигде, кроме корзины.
+    if chat is None or chat.owner_id != user.id or chat.deleted_at is not None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Чат не найден")
     return chat
 
@@ -91,10 +86,16 @@ async def _owned_chat(session: AsyncSession, user: User, chat_id: str) -> Chat:
 async def list_chats(
     project_id: str | None = None,
     domain: str | None = None,
+    q: str | None = Query(default=None, max_length=200),
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> list[Chat]:
-    query = select(Chat).where(Chat.owner_id == user.id)
+    query = select(Chat).where(Chat.owner_id == user.id, Chat.deleted_at.is_(None))
+    if q and q.strip():
+        # Поиск по названию и по тексту сообщений.
+        needle = f"%{q.strip()}%"
+        in_messages = select(Message.id).where(Message.chat_id == Chat.id, Message.content.ilike(needle))
+        query = query.where(or_(Chat.title.ilike(needle), in_messages.exists()))
     if project_id:
         await _owned_project(session, user, project_id)
         query = query.where(Chat.project_id == project_id)
@@ -145,6 +146,19 @@ async def create_chat(
     return chat
 
 
+@router.patch("/{chat_id}", response_model=ChatOut)
+async def rename_chat(
+    chat_id: str,
+    body: ChatRename,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> Chat:
+    chat = await _owned_chat(session, user, chat_id)
+    chat.title = body.title.strip()
+    await session.commit()
+    return chat
+
+
 @router.get("/{chat_id}", response_model=ChatDetail)
 async def get_chat(
     chat_id: str,
@@ -174,10 +188,9 @@ async def delete_chat(
     # Зависшую задачу (воркер умер) удаление освобождает само, а не упирается в 409.
     if await jobs.live_jobs(maker, active):
         raise HTTPException(status_code=409, detail="Сначала остановите задачу этого чата")
-    folder = await _delete_chat(session, chat)
+    # В корзину: 7 дней можно восстановить, потом чат и его папка стираются.
+    await trash.trash_chat(session, chat, trash.now())
     await session.commit()
-    if folder:
-        await purge_dirs([folder])
 
 
 @router.delete("", response_model=ClearChatsOut)
@@ -189,7 +202,7 @@ async def clear_chats(
     maker: async_sessionmaker[AsyncSession] = Depends(get_sessionmaker),
 ) -> ClearChatsOut:
     """Очистить историю раздела (или проекта в «Коде»). Работающие чаты не трогаем."""
-    query = select(Chat).where(Chat.owner_id == user.id, Chat.domain == domain)
+    query = select(Chat).where(Chat.owner_id == user.id, Chat.domain == domain, Chat.deleted_at.is_(None))
     if project_id:
         await _owned_project(session, user, project_id)
         query = query.where(Chat.project_id == project_id)
@@ -197,37 +210,17 @@ async def clear_chats(
         select(Job).where(Job.owner_id == user.id, Job.chat_id.is_not(None), Job.status.in_(jobs.ACTIVE))
     ))
     busy = {job.chat_id for job in await jobs.live_jobs(maker, active)}
-    deleted, skipped, folders = 0, 0, []
+    deleted, skipped, when = 0, 0, trash.now()
     for chat in list(await session.scalars(query)):
         if chat.id in busy:
             skipped += 1
             continue
-        folder = await _delete_chat(session, chat)
+        await trash.trash_chat(session, chat, when)
         deleted += 1
-        if folder:
-            folders.append(folder)
     await audit.record(session, actor=user.id, action="chat.clear", target=domain.value,
                        meta={"deleted": deleted, "skipped": skipped})
     await session.commit()
-    await purge_dirs(folders)
     return ClearChatsOut(deleted=deleted, skipped=skipped)
-
-
-async def _delete_chat(session: AsyncSession, chat: Chat) -> Path | None:
-    """Удалить чат. Вне «Кода» у чата своя рабочая папка-проект: если она больше
-    никому не нужна (нет других чатов и макетов), удаляем и её, иначе такие
-    проекты копились бы в списке «Кода»."""
-    if chat.project_id and chat.domain != Domain.code:
-        project = await session.get(Project, chat.project_id)
-        if project is not None and not project.repo_url:
-            other = await session.scalar(
-                select(Chat.id).where(Chat.project_id == project.id, Chat.id != chat.id).limit(1)
-            )
-            linked = await session.scalar(select(Design.id).where(Design.project_id == project.id).limit(1))
-            if other is None and linked is None:
-                return await remove_project(session, project)
-    await session.delete(chat)
-    return None
 
 
 async def _build_messages(session: AsyncSession, chat: Chat) -> list[dict[str, str]]:
@@ -459,7 +452,7 @@ async def run_chat(
         base = Path(workspace.projects_dir or get_settings().projects_dir).resolve()
         created_root = base / project_id
         await run_in_threadpool(lambda: created_root.mkdir(parents=True, mode=0o755))
-        project = Project(id=project_id, workspace_id=workspace.id,
+        project = Project(id=project_id, workspace_id=workspace.id, kind=trash.CHAT_WORKSPACE,
                           name=f"{domain.upper()} · {chat.title or body.content[:60]}"[:200], path=str(created_root))
         session.add(project)
         # Сначала INSERT проекта, потом ссылка на него: без связи в ORM Postgres

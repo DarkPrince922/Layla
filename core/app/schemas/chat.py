@@ -59,6 +59,10 @@ class DecisionRequest(BaseModel):
     decision: Literal["approve", "reject", "approve_all"]
 
 
+class ChatRename(BaseModel):
+    title: str = Field(min_length=1, max_length=300)
+
+
 class ClearChatsOut(BaseModel):
     deleted: int
     skipped: int  # чаты с работающей задачей не удаляются

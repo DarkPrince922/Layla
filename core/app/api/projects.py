@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote
@@ -29,7 +28,7 @@ from app.schemas.project import (
     ProjectOut,
     RepoImport,
 )
-from app.services import audit, files, jobs, repo
+from app.services import audit, files, jobs, repo, trash
 from app.services.auth import get_current_user
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -41,39 +40,13 @@ async def _default_workspace(session: AsyncSession, user: User) -> Workspace | N
 
 async def _owned_project(session: AsyncSession, user: User, project_id: str) -> Project:
     project = await session.get(Project, project_id)
-    if project is None:
+    # Проект в корзине недоступен нигде, кроме корзины.
+    if project is None or project.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Проект не найден")
     ws = await session.get(Workspace, project.workspace_id)
     if ws is None or ws.owner_id != user.id:
         raise HTTPException(status_code=404, detail="Проект не найден")
     return project
-
-
-def _disposable_dir(project: Project, workspace: Workspace | None) -> Path | None:
-    """Каталог проекта, который безопасно стереть: строго внутри каталога проектов."""
-    if not project.path:
-        return None
-    base = Path((workspace.projects_dir if workspace else None) or get_settings().projects_dir).resolve()
-    target = Path(project.path).resolve()
-    if target == base or base not in target.parents:
-        return None
-    return target
-
-
-async def remove_project(session: AsyncSession, project: Project) -> Path | None:
-    """Удалить проект вместе с его чатами. Возвращает каталог, который нужно
-    стереть после commit (сначала БД — чтобы сбой не оставил записи без файлов)."""
-    workspace = await session.get(Workspace, project.workspace_id)
-    folder = _disposable_dir(project, workspace)
-    for chat in list(await session.scalars(select(Chat).where(Chat.project_id == project.id))):
-        await session.delete(chat)
-    await session.delete(project)
-    return folder
-
-
-async def purge_dirs(folders: list[Path]) -> None:
-    for folder in folders:
-        await run_in_threadpool(shutil.rmtree, folder, True)
 
 
 def _project_root(project: Project) -> str:
@@ -92,7 +65,14 @@ async def list_projects(
     ]
     if not ws_ids:
         return []
-    rows = await session.scalars(select(Project).where(Project.workspace_id.in_(ws_ids)))
+    # Только проекты «Кода»: рабочие папки чатов и корзина сюда не попадают.
+    rows = await session.scalars(
+        select(Project).where(
+            Project.workspace_id.in_(ws_ids),
+            Project.kind == "project",
+            Project.deleted_at.is_(None),
+        ).order_by(Project.created_at)
+    )
     return list(rows)
 
 
@@ -311,9 +291,29 @@ async def delete_project(
     # Зависшую задачу удаление освобождает само; 409 только при реально живой.
     if await jobs.live_jobs(maker, active):
         raise HTTPException(status_code=409, detail="В проекте выполняется задача. Сначала остановите её.")
-    folder = await remove_project(session, project)
-    await audit.record(session, actor=user.id, action="project.delete", target=project_id)
+    # В корзину вместе с чатами; файлы на диске живут, пока корзину не очистят.
+    await trash.trash_project(session, project, trash.now())
+    await audit.record(session, actor=user.id, action="project.trash", target=project_id)
     await session.commit()
-    # Раньше удалялась только запись, а файлы копились на диске.
-    if folder:
-        await purge_dirs([folder])
+
+
+@router.post("/{project_id}/promote", response_model=ProjectOut)
+async def promote_project(
+    project_id: str,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> Project:
+    """Сделать рабочую папку чата проектом «Кода» («Открыть в Коде»).
+
+    После этого папка видна в списке проектов и больше не удаляется вместе с чатом.
+    """
+    project = await _owned_project(session, user, project_id)
+    if project.kind != "project":
+        project.kind = "project"
+        # Имя — по текущему названию чата (его могли переименовать после создания папки).
+        chat = await session.scalar(select(Chat).where(Chat.project_id == project.id).limit(1))
+        if chat is not None and chat.title and chat.title != "Новый чат":
+            project.name = chat.title[:200]
+        await audit.record(session, actor=user.id, action="project.promote", target=project_id)
+        await session.commit()
+    return project

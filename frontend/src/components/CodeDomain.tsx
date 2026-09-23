@@ -54,7 +54,7 @@ export function CodeDomain() {
   const openSequence = useRef(0);
   const dirty =
     !!openFile && (openFile.sha256 === null || draft !== openFile.content);
-  const { data: projects = [], error: projectsError, isPending: loadingProjects } = useQuery({
+  const { data: projects = [], error: projectsError, isPending: loadingProjects, isFetching: refreshingProjects } = useQuery({
     queryKey: ["projects"],
     queryFn: () => api.get<Project[]>("/projects"),
   });
@@ -63,10 +63,13 @@ export function CodeDomain() {
   useEffect(() => {
     if (!projectId && projects.length) {
       const linked = new URLSearchParams(window.location.search).get("project");
+      // Ссылка на проект, которого нет в (возможно, устаревшем) списке, — ждём свежий
+      // список, а не открываем первый попавшийся («Открыть в Коде» из Дизайна).
+      if (linked && !projects.some(p => p.id === linked) && refreshingProjects) return;
       let stored = ""; try { stored = localStorage.getItem(projectKey) || ""; } catch {}
       setProjectId(projects.find(p => p.id === linked || p.id === stored)?.id || projects[0].id);
     }
-  }, [projects, projectId, projectKey]);
+  }, [projects, projectId, projectKey, refreshingProjects]);
   useEffect(() => { if (projectId) try { localStorage.setItem(projectKey, projectId); } catch {} }, [projectId, projectKey]);
   useEffect(() => {
     const open = (event: Event) => {
@@ -112,7 +115,7 @@ export function CodeDomain() {
     if (pending) return;
     // Одно окно подтверждения на всё (без системного confirm для несохранённого файла).
     const unsaved = target.id === projectId && dirty ? "\nНесохранённые изменения открытого файла тоже пропадут." : "";
-    if (!(await confirmAction(`Удалить проект «${target.name}»? Файлы проекта и его чаты будут удалены с сервера безвозвратно. Если нужна копия — сначала скачайте ZIP.${unsaved}`))) return;
+    if (!(await confirmAction(`Удалить проект «${target.name}»? Проект вместе с чатами попадёт в корзину: 7 дней его можно восстановить (Настройки → Корзина), потом файлы сотрутся.${unsaved}`))) return;
     setPending(true);
     setError(null);
     try {

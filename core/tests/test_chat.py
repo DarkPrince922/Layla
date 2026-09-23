@@ -202,3 +202,30 @@ async def test_provider_is_remembered_per_chat(client, monkeypatch):
                 break
     assert used == ["http://n.local/v1", "http://n.local/v1"]
     assert (await client.get(f"/api/chats/{chat['id']}")).json()["provider_id"] == second
+
+
+@pytest.mark.asyncio
+async def test_rename_chat(client):
+    await _register(client)
+    chat = (await client.post("/api/chats", json={"domain": "osint", "model": "m"})).json()
+    renamed = (await client.patch(f"/api/chats/{chat['id']}", json={"title": "  Проверка домена  "})).json()
+    assert renamed["title"] == "Проверка домена"
+    assert (await client.patch(f"/api/chats/{chat['id']}", json={"title": ""})).status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_search_chats_by_title_and_messages(client, db_sessionmaker):
+    from app.models.chat import Message
+
+    await _register(client)
+    first = (await client.post("/api/chats", json={"domain": "osint", "title": "Кофейня Зерно"})).json()
+    second = (await client.post("/api/chats", json={"domain": "osint", "title": "Другое"})).json()
+    await client.post("/api/chats", json={"domain": "design", "title": "Кофейня в дизайне"})
+    async with db_sessionmaker() as s:
+        s.add(Message(chat_id=second["id"], role="user", content="найди сайт кофейни"))
+        await s.commit()
+    found = (await client.get("/api/chats", params={"domain": "osint", "q": "кофейн"})).json()
+    assert {c["id"] for c in found} == {second["id"]}  # в SQLite регистр кириллицы учитывается
+    found = (await client.get("/api/chats", params={"domain": "osint", "q": "Кофейн"})).json()
+    assert {c["id"] for c in found} == {first["id"]}
+    assert len((await client.get("/api/chats", params={"domain": "osint", "q": "  "})).json()) == 2

@@ -55,6 +55,15 @@ async def _wait(client, job_id, predicate, tries=500):
     return body
 
 
+async def _root(client, project_id) -> Path:
+    from app.db import get_sessionmaker
+    from app.main import app
+    from app.models.user import Project
+
+    async with app.dependency_overrides[get_sessionmaker]()() as session:
+        return Path((await session.get(Project, project_id)).path)
+
+
 async def _start(client, mode, domain="design"):
     chat = (await client.post("/api/chats", json={"domain": domain, "model": "m"})).json()
     r = await client.post(f"/api/chats/{chat['id']}/run", json={"content": "сделай", "mode": mode})
@@ -72,7 +81,7 @@ async def test_plan_mode_offers_only_read_tools(client, monkeypatch):
     assert seen[0]["tools"] == {"list_files", "read_file"}
     assert "PLAN MODE" in seen[0]["conversation"][0]["content"]
     detail = (await client.get(f"/api/chats/{chat['id']}")).json()
-    root = Path(next(p for p in (await client.get("/api/projects")).json() if p["id"] == detail["project_id"])["path"])
+    root = await _root(client, detail["project_id"])
     assert not (root / "a.html").exists()  # план ничего не меняет
     assert detail["messages"][-1]["meta"]["mode"] == "plan"
 
@@ -88,7 +97,7 @@ async def test_confirm_mode_waits_and_applies_on_approve(client, monkeypatch):
     detail = (await client.get(f"/api/chats/{chat['id']}")).json()
     pending = detail["messages"][-1]["meta"]["tools"][-1]
     assert pending["status"] == "pending" and "+<h1>ok</h1>" in pending["change"]["diff"]
-    root = Path(next(p for p in (await client.get("/api/projects")).json() if p["id"] == detail["project_id"])["path"])
+    root = await _root(client, detail["project_id"])
     assert not (root / "ok.html").exists()
 
     r = await client.post(f"/api/jobs/{job['id']}/decision", json={"approval_id": approval["id"], "decision": "approve"})
@@ -186,16 +195,20 @@ async def test_stop_releases_dead_job(client, db_sessionmaker):
 
 
 async def test_deleting_chat_removes_its_workspace(client, monkeypatch):
-    """Чат Дизайна/OSINT удаляется вместе со своей папкой — проекты не копятся в «Коде»."""
+    """Чат Дизайна/OSINT уходит в корзину вместе со своей папкой; из корзины — стирается с диска."""
     await _setup(client)
     _script(monkeypatch, [[_write("x.html")]])
     chat, job = await _start(client, "auto")
     await _wait(client, job["id"], lambda b: b["status"] in ("done", "error"))
     project_id = (await client.get(f"/api/chats/{chat['id']}")).json()["project_id"]
-    root = Path(next(p for p in (await client.get("/api/projects")).json() if p["id"] == project_id)["path"])
+    root = await _root(client, project_id)
     assert root.exists()
-    assert (await client.delete(f"/api/chats/{chat['id']}")).status_code == 204
+    # Папка чата — не проект «Кода»: в списке проектов её нет.
     assert all(p["id"] != project_id for p in (await client.get("/api/projects")).json())
+    assert (await client.delete(f"/api/chats/{chat['id']}")).status_code == 204
+    assert (await client.get(f"/api/chats/{chat['id']}")).status_code == 404
+    assert root.exists()  # 7 дней можно вернуть
+    assert (await client.delete(f"/api/trash/chats/{chat['id']}")).status_code == 204
     assert not root.exists()
 
 
@@ -223,16 +236,27 @@ async def test_clear_history_skips_running_chat(client, db_sessionmaker):
     assert left == {ids[0], other}  # другой раздел не тронут
 
 
-async def test_delete_project_removes_files_and_chats(client):
+async def test_delete_project_goes_to_trash_and_restores(client):
     await _setup(client)
     project = (await client.post("/api/projects", json={"name": "Удаляемый"})).json()
-    root = Path(next(p for p in (await client.get("/api/projects")).json() if p["id"] == project["id"])["path"])
+    root = await _root(client, project["id"])
     await client.put(f"/api/projects/{project['id']}/file",
                      json={"path": "index.html", "content": "hi", "expected_sha256": None})
     chat = (await client.post("/api/chats", json={"domain": "code", "project_id": project["id"]})).json()
     assert (await client.delete(f"/api/projects/{project['id']}")).status_code == 204
-    assert not root.exists()
+    assert all(p["id"] != project["id"] for p in (await client.get("/api/projects")).json())
     assert (await client.get(f"/api/chats/{chat['id']}")).status_code == 404
+    trash = (await client.get("/api/trash")).json()
+    assert [p["name"] for p in trash["projects"]] == ["Удаляемый"] and trash["projects"][0]["chats"] == 1
+    assert trash["chats"] == []  # чат проекта — внутри проекта, не отдельной строкой
+    # Восстановление возвращает проект вместе с его чатами и файлами.
+    assert (await client.post(f"/api/trash/projects/{project['id']}/restore")).status_code == 204
+    assert (await client.get(f"/api/chats/{chat['id']}")).status_code == 200
+    assert (root / "index.html").read_text() == "hi"
+    # Окончательное удаление стирает файлы.
+    await client.delete(f"/api/projects/{project['id']}")
+    assert (await client.delete(f"/api/trash/projects/{project['id']}")).status_code == 204
+    assert not root.exists()
 
 
 async def test_delete_chat_with_stuck_job(client, db_sessionmaker):
@@ -303,5 +327,5 @@ async def test_confirm_stop_before_approve_drops_preview(client, monkeypatch):
     tool = detail["messages"][-1]["meta"]["tools"][-1]
     assert tool["status"] == "error"
     assert "change" not in tool  # превью убрано — файл не считается созданным
-    root = Path(next(p for p in (await client.get("/api/projects")).json() if p["id"] == detail["project_id"])["path"])
+    root = await _root(client, detail["project_id"])
     assert not (root / "draft.html").exists()

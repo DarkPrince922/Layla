@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session, get_sessionmaker
+from app.models.chat import Chat
 from app.models.job import Job
 from app.models.user import User
 from app.schemas.chat import DecisionRequest
@@ -26,7 +27,10 @@ async def list_jobs(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> list[Job]:
-    query = select(Job).where(Job.owner_id == user.id)
+    # Задачи чатов из корзины не показываем: их чат открыть уже нельзя.
+    trashed = select(Chat.id).where(Chat.owner_id == user.id, Chat.deleted_at.is_not(None))
+    query = select(Job).where(Job.owner_id == user.id,
+                              or_(Job.chat_id.is_(None), Job.chat_id.not_in(trashed)))
     if chat_id:
         query = query.where(Job.chat_id == chat_id)
     if active:
