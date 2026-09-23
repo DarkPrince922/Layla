@@ -135,13 +135,38 @@ async def test_truncated_design_is_saved_with_note(client, monkeypatch):
     provider_id = await _setup(client)
     await _settings(client, provider_id, max_output=16384, max_output_manual=True)
     calls: list = []
-    _fake(monkeypatch, [("```html\n<main><h1>Длинный", OutputLimitError("limit", has_calls=False))], calls)
+    _fake(monkeypatch, [("```html\n<main><h1>Длинный заголовок", OutputLimitError("limit", has_calls=False))], calls)
     state = await _wait(client, await _generate(client))
     assert state["status"] == "done", state
-    assert len(calls) == 1 and state["result"]["truncated"] is True
+    # Модель каждый раз обрывается — после всех продолжений сохраняем, что есть, без повторов.
+    assert len(calls) == 1 + design_gen.MAX_CONTINUATIONS and state["result"]["truncated"] is True
     design = (await client.get(f"/api/designs/{state['result']['design_id']}")).json()
-    assert design["files"][0]["content"] == "<main><h1>Длинный"
+    assert design["files"][0]["content"] == "<main><h1>Длинный заголовок"
     assert any("предельную длину" in s["text"] for s in state["steps"])
+
+
+async def test_long_design_is_continued_where_it_stopped(client, monkeypatch):
+    provider_id = await _setup(client)
+    await _settings(client, provider_id, max_output=16384, max_output_manual=True)
+    calls: list = []
+    _fake(monkeypatch, [("```html\n<main><h1>Начало", OutputLimitError("limit", has_calls=False)),
+                        "```html\n</h1><p>конец</p></main>\n```"], calls)
+    state = await _wait(client, await _generate(client))
+    assert state["status"] == "done", state
+    assert len(calls) == 2 and state["result"]["truncated"] is False
+    follow_up = calls[1]["messages"]
+    assert follow_up[-2] == {"role": "assistant", "content": "```html\n<main><h1>Начало"}
+    assert follow_up[-1]["content"] == design_gen.CONTINUE_PROMPT
+    design = (await client.get(f"/api/designs/{state['result']['design_id']}")).json()
+    assert design["files"][0]["content"] == "<main><h1>Начало</h1><p>конец</p></main>"
+    assert any("часть 2" in s["text"] for s in state["steps"])
+
+
+def test_continuation_drops_reopened_block_and_overlap():
+    base = "```html\n<section class=\"hero\"><h1>Заголовок</h1>"
+    assert design_gen.join_continuation(base, "```html\n<p>дальше</p>") == base + "<p>дальше</p>"
+    repeated = '<section class="hero"><h1>Заголовок</h1><p>дальше</p>'
+    assert design_gen.join_continuation(base, repeated) == base + "<p>дальше</p>"
 
 
 async def test_output_limit_grows_and_is_remembered(client, monkeypatch):

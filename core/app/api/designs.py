@@ -157,47 +157,60 @@ async def generate_design_bg(
         await h.step(f"Генерирую макет · {model}", progress=0.1)
         text = ""
         draft_at = reason_at = 0.0  # когда черновик и размышления последний раз ушли в БД
-        started = False
-        async for kind, value in project_agent._turn(prov, key, model, list(messages), [], caps):
-            if kind == "delta":
-                text += value
-                if not started:
-                    started = True
-                    await h.step("Модель пишет код", progress=0.3)
-                now = time.monotonic()
-                if now - draft_at >= DRAFT_INTERVAL:
-                    # Черновик виден в «Дизайне» по ходу генерации: код и превью.
-                    draft_at = now
-                    await _push_draft(h, text)
-            elif kind == "retract":
-                # Ход повторяется с начала — уже показанный кусок убираем.
-                text = text[: max(0, len(text) - value)]
-                await _push_draft(h, text)
-            elif kind == "reasoning":
-                # Размышления тоже видны по ходу, а не пачками по 300 символов.
-                now = time.monotonic()
-                flush = now - reason_at >= DRAFT_INTERVAL
-                if flush:
-                    reason_at = now
-                await h.reason(value, flush=flush)
-            elif kind == "retry":
-                await h.step(f"Нет связи с моделью — повтор {value['attempt']} из {value['max']} "
-                             f"через {value['delay']:g} с")
-            elif kind == "key":
-                await h.step(project_agent.key_label(value))
-            elif kind == "learned":
-                # Запоминаем, чего модель не умеет, — так же, как в чатах.
-                known = dict(prov.model_caps or {})
-                known[model] = {**(known.get(model) or {}), **value}
-                prov.model_caps = known
-                await h.session.commit()
-                await h.step(project_agent.learned_label(value))
-            elif kind == "done":
-                text = "".join(value[0])
+        started = truncated = False
+        conversation = list(messages)
+        for part in range(design_gen.MAX_CONTINUATIONS + 1):
+            base, piece = text, ""
+            async for kind, value in project_agent._turn(prov, key, model, conversation, [], caps):
+                if kind == "delta":
+                    piece += value
+                    if not started:
+                        started = True
+                        await h.step("Модель пишет код", progress=0.3)
+                    now = time.monotonic()
+                    if now - draft_at >= DRAFT_INTERVAL:
+                        # Черновик виден в «Дизайне» по ходу генерации: код и превью.
+                        draft_at = now
+                        await _push_draft(h, design_gen.join_continuation(base, piece))
+                elif kind == "retract":
+                    # Ход повторяется с начала — уже показанный кусок убираем.
+                    piece = piece[: max(0, len(piece) - value)]
+                    await _push_draft(h, design_gen.join_continuation(base, piece))
+                elif kind == "reasoning":
+                    # Размышления тоже видны по ходу, а не пачками по 300 символов.
+                    now = time.monotonic()
+                    flush = now - reason_at >= DRAFT_INTERVAL
+                    if flush:
+                        reason_at = now
+                    await h.reason(value, flush=flush)
+                elif kind == "retry":
+                    await h.step(f"Нет связи с моделью — повтор {value['attempt']} из {value['max']} "
+                                 f"через {value['delay']:g} с")
+                elif kind == "key":
+                    await h.step(project_agent.key_label(value))
+                elif kind == "learned":
+                    # Запоминаем, чего модель не умеет, — так же, как в чатах.
+                    known = dict(prov.model_caps or {})
+                    known[model] = {**(known.get(model) or {}), **value}
+                    prov.model_caps = known
+                    await h.session.commit()
+                    await h.step(project_agent.learned_label(value))
+                elif kind == "done":
+                    piece = "".join(value[0])
+            truncated = piece.endswith(project_agent.LENGTH_NOTE)
+            if truncated:
+                piece = piece[: -len(project_agent.LENGTH_NOTE)]
+            text = design_gen.join_continuation(base, piece)
+            await _push_draft(h, text)
+            if not truncated or part == design_gen.MAX_CONTINUATIONS:
+                break
+            # Макет не влез в предельную длину ответа — модель продолжает с места обрыва.
+            await h.step(f"Макет длиннее одного ответа — модель продолжает с места обрыва "
+                         f"(часть {part + 2})")
+            conversation = [*messages, {"role": "assistant", "content": text},
+                            {"role": "user", "content": design_gen.CONTINUE_PROMPT}]
         await h.reason("", flush=True)
-        truncated = text.endswith(project_agent.LENGTH_NOTE)
         if truncated:
-            text = text[: -len(project_agent.LENGTH_NOTE)]
             await h.step("Макет упёрся в предельную длину ответа — сохраняю то, что успело сгенерироваться")
         html = design_gen.extract_html(text)
         if not html:

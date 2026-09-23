@@ -57,6 +57,8 @@ _TOOL_LABELS = {
     "list_files": "Обзор папки",
     "read_file": "Чтение",
     "write_file": "Запись",
+    "edit_file": "Правка",
+    "append_file": "Дозапись",
     "delete_file": "Удаление",
 }
 
@@ -546,6 +548,8 @@ async def run_chat(
                                  f"через {info['delay']:g} с")
                 elif "key" in event:
                     await h.step(project_agent.key_label(event["key"]))
+                elif "cut" in event:
+                    await h.step(project_agent.cut_label(event["cut"]))
                 elif "learned" in event:
                     # Запоминаем, чего модель не умеет, чтобы дальше сразу слать правильный запрос.
                     known = dict(prov.model_caps or {})

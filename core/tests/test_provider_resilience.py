@@ -340,8 +340,28 @@ async def test_manual_output_limit_is_a_ceiling(client, monkeypatch):
     sent: list = []
     _http(monkeypatch, [_wire(call=write, finish="length")], sent)
     state, _ = await _run(client)
-    assert state["status"] == "error" and len(sent) == 1  # ручной потолок не поднимаем сами
+    # Ручной потолок не поднимаем сами: просим модель писать частями, а если и это не
+    # помогло — ошибка с подсказкой.
+    assert state["status"] == "error" and len(sent) == 1 + project_agent.MAX_CUT_NOTES
+    assert all(r["max_tokens"] == 4096 for r in sent)
+    assert "append_file" in sent[1]["messages"][-1]["content"]
     assert "Макс. токенов ответа" in state["error"]
+    assert any("писать файл частями" in s["text"] for s in state["steps"])
+
+
+async def test_cut_tool_call_is_retried_in_parts(client, monkeypatch):
+    """Вызов не влез в потолок — модель переписывает его частями, задача не падает."""
+    provider_id = await _setup(client)
+    await _settings(client, provider_id, max_output=4096, max_output_manual=True)
+    whole = ("write_file", {"path": "a.html", "content": "x" * 50, "expected_sha256": None})
+    part = ("write_file", {"path": "a.html", "content": "<h1>", "expected_sha256": None})
+    sent: list = []
+    _http(monkeypatch, [_wire(call=whole, finish="length"), _wire(call=part, finish="tool_calls"),
+                        _wire(text="Записал первую часть")], sent)
+    state, last = await _run(client)
+    assert state["status"] == "done", state
+    assert last["content"] == "Записал первую часть"
+    assert [t["status"] for t in last["meta"]["tools"]] == ["done"]
 
 
 async def test_unsupported_param_is_dropped_and_remembered(client, monkeypatch):

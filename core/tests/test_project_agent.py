@@ -182,7 +182,7 @@ async def test_agent_creates_reads_edits_deletes_and_persists(
         body = json.loads(request.content)
         requests.append(body)
         round_number = len(requests) - 1
-        assert len(body["tools"]) == 4
+        assert len(body["tools"]) == len(project_agent.TOOLS)
         history = results(body, native)
         if round_number == 0:
             return provider_response(native, [call("list_files", {"path": "."})])

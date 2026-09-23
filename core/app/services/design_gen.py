@@ -130,6 +130,29 @@ def design_caps(model_caps: dict | None, brief: dict) -> dict:
     return caps
 
 
+# Макет не влез в предельную длину ответа: просим модель продолжить с места обрыва.
+MAX_CONTINUATIONS = 4
+CONTINUE_PROMPT = (
+    "Ответ оборвался на лимите длины. Продолжи документ ровно с места обрыва: без повторов уже "
+    "написанного, без пояснений и без открывающего ```html — только продолжение кода. "
+    "Когда документ будет готов, закрой блок ```."
+)
+_REOPEN = re.compile(r"^\s*```[ \t]*(?:html|htm)?[ \t]*\n", re.IGNORECASE)
+
+
+def join_continuation(base: str, piece: str) -> str:
+    """Склеить уже написанное с продолжением: убрать повторно открытый блок и нахлёст."""
+    if not base:
+        return piece
+    piece = _REOPEN.sub("", piece, count=1)
+    tail = base[-400:]
+    # Модели часто повторяют последнюю строку перед продолжением — срезаем нахлёст (от 20 символов).
+    for size in range(min(len(tail), len(piece)), 19, -1):
+        if tail.endswith(piece[:size]):
+            return base + piece[size:]
+    return base + piece
+
+
 _FENCE = re.compile(r"```[ \t]*(?:html|htm)?[ \t]*\n?", re.IGNORECASE)
 
 
