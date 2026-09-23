@@ -12,7 +12,7 @@ from app.models.pentest import Server
 from app.models.user import User
 from app.schemas.pentest import ServerCreate, ServerOut
 from app.security import crypto
-from app.services import audit, egress
+from app.services import audit, egress, ssh_exec
 from app.services.auth import get_current_user
 
 router = APIRouter(prefix="/servers", tags=["pentest"])
@@ -74,6 +74,38 @@ async def delete_server(
     s = await _owned(session, user, sid)
     await session.delete(s)
     await session.commit()
+
+
+@router.post("/{sid}/test-connection")
+async def test_connection(
+    sid: str,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Проверить SSH-доступ к серверу и закрепить ключ хоста (TOFU) при первом успехе."""
+    s = await _owned(session, user, sid)
+    if not s.secret_ref:
+        raise HTTPException(status_code=400, detail="У сервера не задан ключ или пароль")
+    cfg = ssh_exec.SSHConfig(
+        host=s.host, port=s.port, user=s.user, auth=s.auth,
+        secret=crypto.decrypt(s.secret_ref), host_key=s.host_key,
+    )
+    try:
+        result = await ssh_exec.probe(cfg)
+    except ssh_exec.SSHError as exc:
+        await audit.record(session, actor=user.id, action="server.test_connection",
+                           target=f"{s.user}@{s.host}", meta={"ok": False})
+        await session.commit()
+        return {"ok": False, "reason": str(exc)}
+    pinned = False
+    if result.host_key and s.host_key != result.host_key:
+        s.host_key = result.host_key
+        pinned = True
+    await audit.record(session, actor=user.id, action="server.test_connection",
+                       target=f"{s.user}@{s.host}", meta={"ok": True, "pinned": pinned})
+    await session.commit()
+    return {"ok": True, "reason": f"Подключение успешно ({s.user}@{s.host}:{s.port})",
+            "pinned_host_key": pinned}
 
 
 @router.post("/{sid}/test-route")

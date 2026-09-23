@@ -584,6 +584,7 @@ export interface PentestServer {
   auth: "key" | "password";
   has_key: boolean;
   has_secret: boolean;
+  host_key?: string | null;
 }
 
 // ---- Типы M5 (Agent) ----

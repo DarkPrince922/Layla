@@ -19,6 +19,7 @@ on third-party systems.
 | Authorized-workspace gate | `Engagement.authorized` (bool, default false); `Scope.confirmed` | M4 service layer + UI gate |
 | Hard scope enforcement | `Scope.allow[]`, `Scope.deny[]` | M4 target-check before every active action / attack-box command (with unit tests) |
 | Venue isolation | `Venue.mode` ∈ {analysis_only, attack_box, this_machine}; default analysis_only | M4/M5 command dispatch |
+| Attack-box execution | `ssh_exec` (asyncssh) runs approved commands on the selected `Server` **after** the gates; host key pinned on first connect (TOFU), mismatch → refused | active only via `attack_box` venue + HITL approval |
 | Egress fail-closed | `Venue.egress_route`, `Server.egress_route` ∈ {inherit, direct, tor, proxy} | M4 SSH/egress routing (fail-closed, no Direct fallback) |
 | Encrypted secrets | `secret_ref` columns; `app.security.crypto` (Fernet); UI masking | M0 (done) |
 | Plain-HTTP key block | `HttpKeyBanner`; key inputs disabled until acknowledged | M0 (done) |
