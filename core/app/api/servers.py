@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_session
-from app.models.enums import EgressRoute
+from app.models.enums import EgressRoute, ServerAuth
 from app.models.pentest import Server
 from app.models.user import User
 from app.schemas.pentest import ServerCreate, ServerOut
@@ -20,7 +20,8 @@ router = APIRouter(prefix="/servers", tags=["pentest"])
 
 def _to_out(s: Server) -> ServerOut:
     out = ServerOut.model_validate(s)
-    out.has_key = bool(s.secret_ref)
+    out.has_secret = bool(s.secret_ref)
+    out.has_key = out.has_secret
     return out
 
 
@@ -46,17 +47,20 @@ async def create_server(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> ServerOut:
+    secret = body.password if body.auth == ServerAuth.password else body.private_key
     s = Server(
         owner_id=user.id,
         engagement_id=body.engagement_id,
         host=body.host,
         port=body.port,
         user=body.user,
+        auth=body.auth.value,
         egress_route=body.egress_route,
-        secret_ref=crypto.encrypt(body.private_key) if body.private_key else None,
+        secret_ref=crypto.encrypt(secret) if secret else None,
     )
     session.add(s)
-    await audit.record(session, actor=user.id, action="server.add", target=f"{body.user}@{body.host}")
+    await audit.record(session, actor=user.id, action="server.add",
+                       target=f"{body.user}@{body.host}", meta={"auth": body.auth.value})
     await session.commit()
     return _to_out(s)
 

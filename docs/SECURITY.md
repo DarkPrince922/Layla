@@ -27,10 +27,13 @@ on third-party systems.
 
 ## Secrets at rest
 
-- API keys (providers, intelligence APIs) and SSH private keys are encrypted with
-  a Fernet key derived from `LAYLA_SECRET_KEY`. In production, supply a real
-  generated Fernet key; the app derives a stable dev key otherwise so local runs
-  work, which is **not** safe for production.
+- API keys (providers, intelligence APIs) and attack-box SSH secrets — the private
+  key or, when the server uses password auth, the password (`Server.auth` says
+  which) — are encrypted with a Fernet key derived from `LAYLA_SECRET_KEY`. The
+  secret is never returned by the API; only a `has_secret` flag is. In production,
+  supply a real generated Fernet key; the app derives a stable dev key otherwise so
+  local runs work, which is **not** safe for production. SSH keys are preferred over
+  passwords for attack boxes.
 - Plaintext secrets never appear in API responses. Endpoints expose only a
   `has_secret` flag (and, where useful, a masked form). This is covered by a test
   (`tests/test_auth_flow.py::test_provider_api_key_never_returned`).
