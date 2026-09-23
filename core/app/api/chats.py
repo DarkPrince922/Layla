@@ -42,7 +42,7 @@ from app.schemas.chat import (
     SendMessageRequest,
 )
 from app.schemas.job import JobOut
-from app.services import audit, jobs, project_agent, provider_client, trash
+from app.services import audit, history, jobs, project_agent, provider_client, trash
 from app.services.auth import get_current_user
 
 
@@ -215,32 +215,8 @@ async def clear_chats(
 
 
 async def _build_messages(session: AsyncSession, chat: Chat) -> list[dict[str, str]]:
-    """Собрать payload сообщений: системный промпт персоны + история."""
-    out: list[dict[str, str]] = []
-    if chat.persona_id:
-        persona = await session.get(Persona, chat.persona_id)
-        if persona and persona.instructions:
-            out.append({"role": "system", "content": persona.instructions})
-    history = await session.scalars(
-        select(Message).where(Message.chat_id == chat.id).order_by(Message.created_at)
-    )
-    for m in history:
-        if m.role in ("user", "assistant", "system"):
-            content = m.content
-            changes = [t["change"] for t in (m.meta or {}).get("tools", [])
-                       if t.get("change") and t.get("status") == "done"]
-            if changes:
-                content += (
-                    "\n[Applied project changes: "
-                    + ", ".join(f"{c['operation']} {c['path']}" for c in changes)
-                    + "]"
-                )
-            if content:
-                entry = {"role": m.role, "content": content}
-                if m.role == "assistant" and (m.meta or {}).get("reasoning"):
-                    entry["reasoning_content"] = m.meta["reasoning"]
-                out.append(entry)
-    return out
+    """Payload сообщений: инструкции персоны, сводка сжатой истории и свежие сообщения."""
+    return await history.build(session, chat)
 
 
 @router.post("/{chat_id}/messages")
@@ -368,6 +344,88 @@ async def send_message(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+async def _step_for(h: jobs.JobHandle, kind: str, value) -> None:
+    """Шаги «В работе» для служебных запросов к модели (сводка контекста)."""
+    if kind == "retry":
+        await h.step(f"Нет связи с моделью — повтор {value['attempt']} из {value['max']} через {value['delay']:g} с")
+    elif kind == "key":
+        await h.step(project_agent.key_label(value))
+
+
+async def _compact_before_turn(h: jobs.JobHandle, maker, chat_id: str, prov, key, model: str,
+                               caps: dict) -> list[dict] | None:
+    await h.step("История длиннее контекста модели — сворачиваю старые сообщения в сводку")
+    try:
+        async with maker() as session:
+            chat = await session.get(Chat, chat_id)
+            summary = await history.compact(session, chat, prov, key, model, caps,
+                                            on_event=lambda kind, value: _step_for(h, kind, value))
+            if summary is None:
+                return None
+            await h.step(f"Контекст сжат: {summary.meta['count']} сообщений в сводке, свежие — целиком")
+            return await history.build(session, chat)
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 — сводка не получилась, но ход важнее
+        await h.step("Не удалось сжать контекст — отправляю последние сообщения")
+        return None
+
+
+async def _chat_provider(session: AsyncSession, chat: Chat, user: User) -> Provider:
+    provider = None
+    if chat.provider_id:
+        provider = await session.get(Provider, chat.provider_id)
+        if provider is not None and not (provider.enabled and provider.active):
+            provider = None
+    if provider is None and chat.model:
+        provider = await provider_client.resolve_provider(session, user.id, chat.model)
+    if provider is None or not chat.model:
+        raise HTTPException(status_code=400, detail="Не выбрана модель: отправьте сообщение с выбранной моделью.")
+    return provider
+
+
+@router.post("/{chat_id}/compact", response_model=JobOut, status_code=202)
+async def compact_chat(
+    chat_id: str,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+    maker: async_sessionmaker[AsyncSession] = Depends(get_sessionmaker),
+) -> Job:
+    """«Сжать контекст»: старые сообщения — в сводку, последние остаются как есть."""
+    chat = await _owned_chat(session, user, chat_id)
+    active = await session.scalar(select(Job).where(Job.chat_id == chat_id, Job.status.in_(jobs.ACTIVE)))
+    if active is not None and not jobs.is_orphaned(active):
+        raise HTTPException(status_code=409, detail="В этом чате уже выполняется задача.")
+    provider = await _chat_provider(session, chat, user)
+    provider_id, model = provider.id, chat.model
+    job = Job(owner_id=user.id, domain=chat.domain.value, kind="chat.compact", title="Сжатие контекста",
+              chat_id=chat_id, status="queued", created_at=datetime.now(UTC), result={"chat_id": chat_id})
+    session.add(job)
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="В этом чате уже выполняется задача.") from exc
+    await session.refresh(job)
+
+    async def worker(h: jobs.JobHandle) -> None:
+        prov = await h.session.get(Provider, provider_id)
+        key = await provider_client.key_ring(h.session, prov)
+        caps = dict((prov.model_caps or {}).get(model) or {})
+        await h.step("Сворачиваю старые сообщения в сводку", progress=0.1)
+        async with maker() as work:
+            row = await work.get(Chat, chat_id)
+            summary = await history.compact(work, row, prov, key, model, caps, keep=4,
+                                            on_event=lambda kind, value: _step_for(h, kind, value))
+        if summary is None:
+            await h.step("Сжимать нечего: разговор и так короткий", progress=1.0)
+            return
+        await h.set_result({"summary_id": summary.id, "count": summary.meta["count"]})
+        await h.step(f"Контекст сжат: {summary.meta['count']} сообщений в сводке", progress=1.0)
+
+    jobs.launch(maker, job.id, worker)
+    return job
 
 
 @router.post("/{chat_id}/run", response_model=JobOut, status_code=202)
@@ -531,7 +589,12 @@ async def run_chat(
                     await h.set_result({"approval": None})
 
             caps = dict((prov.model_caps or {}).get(model) or {})
-            async for event in project_agent.run(prov, key, model, payload, root, permissions,
+            messages = payload
+            if history.needed(messages, caps):
+                # История не влезает в бюджет контекста — старое сворачивается в сводку,
+                # а не отбрасывается. Не вышло — ниже просто уйдут последние сообщения.
+                messages = await _compact_before_turn(h, maker, chat_id, prov, key, model, caps) or messages
+            async for event in project_agent.run(prov, key, model, messages, root, permissions,
                                                  mode=mode, approve=approve, caps=caps):
                 if "delta" in event:
                     full.append(event["delta"])
@@ -550,6 +613,9 @@ async def run_chat(
                     await h.step(project_agent.key_label(event["key"]))
                 elif "cut" in event:
                     await h.step(project_agent.cut_label(event["cut"]))
+                elif "shrunk" in event:
+                    await h.step(f"Длинная задача: {event['shrunk']} старых результатов инструментов "
+                                 "ужато, чтобы не упереться в контекст")
                 elif "learned" in event:
                     # Запоминаем, чего модель не умеет, чтобы дальше сразу слать правильный запрос.
                     known = dict(prov.model_caps or {})

@@ -437,8 +437,14 @@ async def run(
     # Текущий запрос пользователя: при подгонке под контекст всё с него и дальше сохраняется.
     anchor = conversation[-1]
     used = 0
+    from app.services import history  # history сам использует _turn — импорт здесь, без цикла
+
     async with asyncio.timeout(MAX_SECONDS):
         for round_number in range(MAX_ROUNDS):
+            # Длинный ход: старые результаты инструментов ужимаются, чтобы не упереться в контекст.
+            shrunk = history.shrink_run(conversation, anchor, caps)
+            if shrunk:
+                yield {"shrunk": shrunk}
             content, reasoning, context, calls = [], [], {}, []
             async for kind, value in _turn(provider, key, model, conversation, available, caps, anchor):
                 if kind == "done":

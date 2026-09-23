@@ -407,7 +407,10 @@ async def _run_in(client, chat):
     return state
 
 
-async def test_history_is_trimmed_to_context(client, monkeypatch, db_sessionmaker):
+async def test_long_history_is_compacted_into_summary(client, monkeypatch, db_sessionmaker):
+    """История не влезает в контекст — старое сворачивается в сводку, а не теряется."""
+    from app.services import history
+
     provider_id = await _setup(client)
     await _settings(client, provider_id, context=4096, max_output=1024, max_output_manual=True)
     chat = await _chat_with_history(client, db_sessionmaker, turns=20)
@@ -415,13 +418,40 @@ async def test_history_is_trimmed_to_context(client, monkeypatch, db_sessionmake
     _http(monkeypatch, [_wire(text="ok")], sent)
     state = await _run_in(client, chat)
     assert state["status"] == "done", state
-    roles = [m["role"] for m in sent[0]["messages"]]
+    summaries = [r for r in sent if r["messages"][0]["content"] == history.SUMMARY_PROMPT]
+    assert summaries and "#0" in summaries[0]["messages"][1]["content"]
+    turn = sent[-1]["messages"]
+    assert turn[1]["content"] == history.SUMMARY_HEADER + "ok"
+    assert "#15" in turn[2]["content"] and "#19" in turn[-2]["content"]  # свежие — целиком
+    assert turn[-1]["content"] == "новый вопрос"
+    assert any("Контекст сжат: 15 сообщений в сводке" in s["text"] for s in state["steps"])
+    # В чате всё на месте, сводка — отдельным сообщением сразу за свёрнутой частью.
+    messages = (await client.get(f"/api/chats/{chat['id']}")).json()["messages"]
+    assert len(messages) == 23
+    assert messages[15]["role"] == "system" and messages[15]["meta"]["kind"] == "summary"
+
+    # Следующий ход уже со сводкой: заново не сжимаем.
+    sent.clear()
+    assert (await _run_in(client, chat))["status"] == "done"
+    assert not [r for r in sent if r["messages"][0]["content"] == history.SUMMARY_PROMPT]
+    assert sent[0]["messages"][1]["content"] == history.SUMMARY_HEADER + "ok"
+
+
+async def test_history_is_trimmed_when_summary_fails(client, monkeypatch, db_sessionmaker):
+    provider_id = await _setup(client)
+    await _settings(client, provider_id, context=4096, max_output=1024, max_output_manual=True)
+    chat = await _chat_with_history(client, db_sessionmaker, turns=20)
+    sent: list = []
+    refused = httpx.Response(400, json={"error": {"message": "bad request"}})
+    _http(monkeypatch, [refused, _wire(text="ok")], sent)
+    state = await _run_in(client, chat)
+    assert state["status"] == "done", state
+    assert any("Не удалось сжать контекст" in s["text"] for s in state["steps"])
+    roles = [m["role"] for m in sent[-1]["messages"]]
     assert roles[0] == "system" and roles[1] == "user"  # история начинается с пользователя
-    assert sent[0]["messages"][-1]["content"] == "новый вопрос"
+    assert sent[-1]["messages"][-1]["content"] == "новый вопрос"
     assert 3 < len(roles) < 22  # старое отрезано, свежее осталось
-    assert "#19" in sent[0]["messages"][-2]["content"]
     assert any("старых" in s["text"] for s in state["steps"])
-    # В самом чате история цела.
     assert len((await client.get(f"/api/chats/{chat['id']}")).json()["messages"]) == 22
 
 
