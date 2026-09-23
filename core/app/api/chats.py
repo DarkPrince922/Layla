@@ -51,6 +51,10 @@ def _drop_tail(text: str, count: int) -> str:
 
 
 def _learned_label(learned: dict) -> str:
+    if "context" in learned:
+        return f"История не помещается в контекст модели — отправляю последнее (до {learned['context']} токенов)"
+    if "drop" in learned:
+        return f"Модель не принимает {', '.join(learned['drop'])} — отправляю без этого"
     if "max_output_cap" in learned:
         return f"Провайдер ограничивает длину ответа {learned['max_output_cap']} токенами — лимит исправлен"
     if "max_output" in learned:
@@ -547,6 +551,9 @@ async def run_chat(
                     # Ход повторяется — уже показанный кусок ответа убираем, чтобы не задвоился.
                     full[:] = [_drop_tail("".join(full), event["retract"])]
                     await persist()
+                elif "trimmed" in event:
+                    await h.step(f"История длиннее контекста модели — {event['trimmed']} старых "
+                                 "сообщений не отправлено модели (в чате они остались)")
                 elif "retry" in event:
                     info = event["retry"]
                     await h.step(f"Нет связи с моделью — повтор {info['attempt']} из {info['max']} "

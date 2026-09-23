@@ -477,6 +477,17 @@ export interface ProviderModel {
   enabled: boolean;
   /** Умеет ли модель работать с файлами (инструментами). */
   tools: boolean;
+  /** Макс. токенов ответа; max_output_manual=false — «Авто» (значение подобрано Layla). */
+  max_output?: number | null;
+  max_output_manual?: boolean;
+  /** Контекст модели в токенах: сколько истории отправлять. */
+  context?: number | null;
+  temperature?: number | null;
+  reasoning_effort?: "low" | "medium" | "high" | null;
+  /** Параметры, от которых провайдер отказался. */
+  dropped?: string[];
+  /** Только в запросе: забыть подобранное автоматически. */
+  reset?: boolean;
 }
 
 // ---- Корзина ----

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from app.models.enums import ProviderKind
@@ -68,6 +70,18 @@ class ProviderModelInfo(BaseModel):
     # Умеет ли модель вызывать инструменты (работа с файлами). Выключается само,
     # если провайдер отклонил инструменты, и вручную — в настройках.
     tools: bool = True
+    # Макс. токенов одного ответа. max_output_manual=False — «Авто»: Layla подбирает
+    # сама (растёт, если ответ не влез); True — жёсткий потолок, заданный вручную.
+    max_output: int | None = Field(default=None, ge=256, le=1_000_000)
+    max_output_manual: bool = False
+    # Контекст модели в токенах: столько истории Layla отправляет, пропуская старое.
+    context: int | None = Field(default=None, ge=1024, le=10_000_000)
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    reasoning_effort: Literal["low", "medium", "high"] | None = None
+    # Параметры, от которых провайдер отказался (только для показа).
+    dropped: list[str] = Field(default_factory=list)
+    # Только во входящем PUT: забыть всё, что Layla подобрала сама, и начать с нуля.
+    reset: bool = False
 
 
 class ProviderModelsUpdate(BaseModel):

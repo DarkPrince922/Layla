@@ -25,6 +25,19 @@ _NO_TOOLS = re.compile(
     r"|support tool use|enable-auto-tool-choice",
     re.IGNORECASE,
 )
+# Переполнение контекста: «maximum context length is 32768 tokens», «prompt is too long» и т. п.
+_CONTEXT = re.compile(
+    r"context[ _]length|context window|context_length_exceeded|prompt is too long|input is too long"
+    r"|too many (input )?tokens|reduce the length of the messages",
+    re.IGNORECASE,
+)
+_CONTEXT_SIZE = re.compile(r"(?:maximum context length|context (?:length|window)(?: of| is)?)\D{0,20}(\d{3,8})",
+                           re.IGNORECASE)
+# Параметры, которые пользователь может задать модели. Если модель их не принимает —
+# убираем из запроса (например, o1 не даёт менять temperature).
+TUNABLE_PARAMS = ("temperature", "reasoning_effort")
+_UNSUPPORTED_WORDS = ("unsupported", "not supported", "does not support", "only the default",
+                      "unrecognized", "unknown", "extra inputs", "not permitted", "not allowed", "invalid")
 _MAX_TOKENS = re.compile(r"max_(completion_)?tokens|max_output_tokens", re.IGNORECASE)
 _TOO_LARGE_WORDS = ("too large", "less than or equal", "maximum", "exceed", "at most", "<=",
                     "range", "must be", "too big", "cannot be greater")
@@ -62,6 +75,14 @@ def classify_rejection(status: int, body: str) -> CapabilityError | None:
     if status not in (400, 404, 422):
         return None
     text = body.lower()
+    if _CONTEXT.search(body):
+        found = _CONTEXT_SIZE.search(body) or re.search(r">\s*(\d{3,8})\s*maximum", body, re.IGNORECASE)
+        return CapabilityError("История не помещается в контекст модели", capability="context",
+                               value=int(found.group(1)) if found else None, status=status)
+    for param in TUNABLE_PARAMS:
+        if param in text and any(w in text for w in _UNSUPPORTED_WORDS):
+            return CapabilityError(f"Модель не принимает параметр {param}", capability="drop",
+                                   value=param, status=status)
     if "max_tokens" in text and "max_completion_tokens" in text:
         return CapabilityError("Модель требует max_completion_tokens", capability="token_param",
                                value="max_completion_tokens", status=status)

@@ -159,7 +159,48 @@ LENGTH_NOTE = (
 )
 
 
-async def _turn(provider, key, model, conversation, available, caps):
+def _tokens(message: dict) -> int:
+    """Грубая оценка токенов сообщения (≈3 символа на токен, с запасом для кириллицы и кода)."""
+    size = len(str(message.get("content") or ""))
+    if message.get("tool_calls"):
+        size += len(json.dumps(message["tool_calls"], ensure_ascii=False))
+    return size // 3 + 4
+
+
+def fit_context(conversation: list[dict], anchor: dict, caps: dict) -> int:
+    """Убрать старую историю, если она не влезает в контекст модели (caps["context"]).
+
+    Системные сообщения и всё начиная с текущего запроса пользователя (anchor) не
+    трогаем; удаляем самые старые реплики. Возвращает число пропущенных сообщений.
+    """
+    limit = caps.get("context")
+    if not limit:
+        return 0
+    budget = limit - (caps.get("max_output") or tool_chat.DEFAULT_MAX_OUTPUT) - 256
+    if budget <= 0:
+        budget = limit // 2
+    removed = 0
+
+    def oldest() -> int | None:
+        stop = next(i for i, m in enumerate(conversation) if m is anchor)
+        return next((i for i in range(stop) if conversation[i]["role"] != "system"), None)
+
+    while sum(_tokens(m) for m in conversation) > budget:
+        index = oldest()
+        if index is None:
+            break
+        del conversation[index]
+        removed += 1
+        # История не должна начинаться с ответа ассистента (Anthropic такое отклоняет).
+        index = oldest()
+        while index is not None and conversation[index]["role"] == "assistant":
+            del conversation[index]
+            removed += 1
+            index = oldest()
+    return removed
+
+
+async def _turn(provider, key, model, conversation, available, caps, anchor=None):
     """Один ход модели с автоповтором.
 
     Временный сбой (обрыв, 429, 5xx) — повтор до len(RETRY_DELAYS) раз с паузой;
@@ -171,6 +212,10 @@ async def _turn(provider, key, model, conversation, available, caps):
     while True:
         content, reasoning, context, calls = [], [], {}, []
         shown = 0
+        if anchor is not None:
+            trimmed = fit_context(conversation, anchor, caps)
+            if trimmed:
+                yield "trimmed", trimmed
         try:
             async for kind, value in tool_chat.stream_turn(
                 provider, key, model, conversation, available, caps=caps
@@ -205,9 +250,11 @@ async def _turn(provider, key, model, conversation, available, caps):
                 yield "delta", LENGTH_NOTE
                 yield "done", (content + [LENGTH_NOTE], reasoning, context, [])
                 return
+            hint = ("увеличьте «Макс. токенов ответа» у модели в настройках провайдера или "
+                    "поставьте «Авто»") if caps.get("max_output_manual") else "попросите сделать задачу частями"
             raise RuntimeError(
-                f"Ответ модели не поместился даже в {current} токенов. Незавершённые вызовы "
-                "не применены — попросите сделать задачу частями."
+                f"Ответ модели не поместился в {current} токенов. Незавершённые вызовы "
+                f"не применены — {hint}."
             ) from exc
         except provider_errors.CapabilityError as exc:
             adjustments += 1
@@ -221,6 +268,27 @@ async def _turn(provider, key, model, conversation, available, caps):
                 if shown:
                     yield "retract", shown
                 yield "learned", {"max_output": value, "max_output_cap": value}
+                continue
+            if exc.capability == "context":
+                # История не влезла: запоминаем размер контекста и повторяем с урезанной историей.
+                size = exc.value or max(2048, int(sum(_tokens(m) for m in conversation) * 0.75))
+                if adjustments > MAX_ADJUSTMENTS or anchor is None:
+                    raise
+                existing = caps.get("context")
+                # Повторный отказ при том же пределе — наша оценка токенов занижена: урезаем ещё.
+                caps["context"] = size if not existing or existing > size else int(existing * 0.75)
+                if shown:
+                    yield "retract", shown
+                yield "learned", {"context": caps["context"]}
+                continue
+            if exc.capability == "drop":
+                dropped = sorted({*(caps.get("drop") or ()), exc.value})
+                if adjustments > MAX_ADJUSTMENTS or dropped == sorted(caps.get("drop") or ()):
+                    raise
+                caps["drop"] = dropped
+                if shown:
+                    yield "retract", shown
+                yield "learned", {"drop": dropped}
                 continue
             if adjustments > MAX_ADJUSTMENTS or caps.get(exc.capability) == exc.value:
                 raise
@@ -264,11 +332,13 @@ async def run(
         prompt += NO_TOOLS_NOTE
     ask = approve if mode == "confirm" else None
     conversation = [{"role": "system", "content": prompt}, *messages]
+    # Текущий запрос пользователя: при подгонке под контекст всё с него и дальше сохраняется.
+    anchor = conversation[-1]
     used = 0
     async with asyncio.timeout(MAX_SECONDS):
         for round_number in range(MAX_ROUNDS):
             content, reasoning, context, calls = [], [], {}, []
-            async for kind, value in _turn(provider, key, model, conversation, available, caps):
+            async for kind, value in _turn(provider, key, model, conversation, available, caps, anchor):
                 if kind == "done":
                     content, reasoning, context, calls = value
                 else:

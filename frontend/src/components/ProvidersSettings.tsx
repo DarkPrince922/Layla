@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Trash2, KeyRound, Wrench } from "lucide-react";
+import { Plus, Trash2, KeyRound, Wrench, SlidersHorizontal, X } from "lucide-react";
 import { api, type ProviderModel } from "@/lib/api";
 import { HttpKeyBanner } from "@/components/HttpKeyBanner";
 
@@ -224,6 +224,7 @@ export function ProvidersSettings() {
 function ProviderModels({ providerId }: { providerId: string }) {
   const qc = useQueryClient();
   const [msg, setMsg] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
 
   const { data: models = [] } = useQuery({
     queryKey: ["provider-models", providerId],
@@ -251,6 +252,15 @@ function ProviderModels({ providerId }: { providerId: string }) {
     qc.setQueryData(["provider-models", providerId], next);
     save.mutate(next);
   }
+  async function saveSettings(name: string, change: Partial<ProviderModel>) {
+    const next = models.map((m) => (m.name === name ? { ...m, ...change } : m));
+    const saved = await api.put<ProviderModel[]>(`/providers/${providerId}/models`, { models: next });
+    qc.setQueryData(["provider-models", providerId], saved);
+    qc.invalidateQueries({ queryKey: ["models"] });
+  }
+  const custom = (m: ProviderModel) =>
+    !!(m.max_output_manual || m.context || m.temperature != null || m.reasoning_effort);
+  const current = models.find((m) => m.name === editing) || null;
 
   return (
     <div className="mt-2 rounded-md border border-ink-800 bg-ink-950/40 p-2">
@@ -292,6 +302,17 @@ function ProviderModels({ providerId }: { providerId: string }) {
               {m.name}
               <button
                 type="button"
+                onClick={(e) => { e.preventDefault(); setEditing(editing === m.name ? null : m.name); }}
+                aria-pressed={editing === m.name}
+                aria-label={`Настройки модели ${m.name}`}
+                title="Длина ответа, контекст, температура"
+                className={`relative ml-0.5 rounded p-0.5 ${editing === m.name ? "text-white" : "text-neutral-400"}`}
+              >
+                <SlidersHorizontal className="h-3 w-3" />
+                {custom(m) && <span className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-accent-300" />}
+              </button>
+              <button
+                type="button"
                 onClick={(e) => { e.preventDefault(); toggle(m.name, { tools: !m.tools }); }}
                 aria-pressed={m.tools}
                 aria-label={`Инструменты для ${m.name}`}
@@ -306,6 +327,102 @@ function ProviderModels({ providerId }: { providerId: string }) {
           ))}
         </div>
       )}
+      {current && (
+        <ModelSettings key={current.name} model={current} onClose={() => setEditing(null)}
+          onSave={(change) => saveSettings(current.name, change)} />
+      )}
+    </div>
+  );
+}
+
+const OUTPUT_PRESETS = [4096, 8192, 16384, 32768, 65536];
+const CONTEXT_PRESETS = [32000, 128000, 200000, 1000000];
+const short = (n: number) =>
+  n >= 1_000_000 ? `${n / 1_000_000}M` : n % 1024 === 0 ? `${n / 1024}K` : `${Math.round(n / 1000)}K`;
+
+/** Настройки одной модели: длина ответа, контекст, температура, глубина размышлений. */
+function ModelSettings({ model, onSave, onClose }: {
+  model: ProviderModel;
+  onSave: (change: Partial<ProviderModel>) => Promise<void>;
+  onClose: () => void;
+}) {
+  const [output, setOutput] = useState(model.max_output_manual && model.max_output ? String(model.max_output) : "");
+  const [context, setContext] = useState(model.context ? String(model.context) : "");
+  const [temperature, setTemperature] = useState(model.temperature != null ? String(model.temperature) : "");
+  const [effort, setEffort] = useState(model.reasoning_effort || "");
+  const [state, setState] = useState<{ busy: boolean; msg: string | null; ok: boolean }>({ busy: false, msg: null, ok: true });
+  const field = "w-full rounded-md border border-ink-700 bg-ink-900 px-2 py-1.5 text-xs";
+  const chip = "rounded bg-ink-800 px-1.5 py-0.5 text-[10px] text-neutral-400 hover:bg-ink-700 hover:text-neutral-200";
+
+  async function save(reset = false) {
+    const num = (v: string) => (v.trim() ? Number(v) : null);
+    setState({ busy: true, msg: null, ok: true });
+    try {
+      await onSave({
+        max_output: num(output), max_output_manual: !!output.trim(),
+        context: num(context), temperature: num(temperature),
+        reasoning_effort: (effort || null) as ProviderModel["reasoning_effort"],
+        reset,
+      });
+      setState({ busy: false, msg: reset ? "Подобранное сброшено" : "Сохранено", ok: true });
+    } catch (e) {
+      setState({ busy: false, msg: e instanceof Error ? e.message : "Не удалось сохранить", ok: false });
+    }
+  }
+
+  return (
+    <div className="mt-2 rounded-md border border-ink-700 bg-ink-900/60 p-3">
+      <div className="mb-3 flex items-center gap-2">
+        <span className="min-w-0 flex-1 truncate text-xs font-medium text-neutral-200">{model.name}</span>
+        <button onClick={onClose} aria-label="Закрыть настройки модели" className="rounded p-1 text-neutral-500 hover:bg-ink-800"><X className="h-3.5 w-3.5" /></button>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="block">
+          <span className="mb-1 block text-[11px] text-neutral-400">Макс. токенов ответа</span>
+          <input type="number" min={256} max={1000000} value={output} onChange={(e) => setOutput(e.target.value)}
+            placeholder={model.max_output && !model.max_output_manual ? `Авто · сейчас ${model.max_output}` : "Авто"} className={field} />
+          <span className="mt-1 flex flex-wrap gap-1">
+            {OUTPUT_PRESETS.map((n) => <button key={n} type="button" className={chip} onClick={() => setOutput(String(n))}>{short(n)}</button>)}
+            <button type="button" className={chip} onClick={() => setOutput("")}>Авто</button>
+          </span>
+          <span className="mt-1 block text-[10px] leading-4 text-neutral-500">«Авто» — Layla сама поднимет лимит, если ответ не влезет. Число — жёсткий потолок.</span>
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-[11px] text-neutral-400">Контекст модели, токенов</span>
+          <input type="number" min={1024} max={10000000} value={context} onChange={(e) => setContext(e.target.value)}
+            placeholder="Не ограничивать" className={field} />
+          <span className="mt-1 flex flex-wrap gap-1">
+            {CONTEXT_PRESETS.map((n) => <button key={n} type="button" className={chip} onClick={() => setContext(String(n))}>{short(n)}</button>)}
+            <button type="button" className={chip} onClick={() => setContext("")}>Без ограничения</button>
+          </span>
+          <span className="mt-1 block text-[10px] leading-4 text-neutral-500">Длинная история урезается: модели уходят последние сообщения, в чате всё остаётся. Если провайдер сообщит предел — подставится сам.</span>
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-[11px] text-neutral-400">Температура</span>
+          <input type="number" min={0} max={2} step={0.1} value={temperature} onChange={(e) => setTemperature(e.target.value)}
+            placeholder="По умолчанию" className={field} />
+          <span className="mt-1 block text-[10px] leading-4 text-neutral-500">0 — строже и предсказуемее, 1+ — свободнее. Пусто — как решит провайдер.</span>
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-[11px] text-neutral-400">Глубина размышлений</span>
+          <select value={effort} onChange={(e) => setEffort(e.target.value)} className={field}>
+            <option value="">По умолчанию</option>
+            <option value="low">Низкая (low)</option>
+            <option value="medium">Средняя (medium)</option>
+            <option value="high">Высокая (high)</option>
+          </select>
+          <span className="mt-1 block text-[10px] leading-4 text-neutral-500">Для reasoning-моделей (o-серия, gpt-5, DeepSeek R1 через совместимые API). Остальные модели параметр игнорируют.</span>
+        </label>
+      </div>
+      {!!model.dropped?.length && (
+        <p className="mt-3 text-[11px] text-amber-300">Провайдер не принял: {model.dropped.join(", ")} — отправляется без этого.</p>
+      )}
+      {state.msg && <p role={state.ok ? "status" : "alert"} className={`mt-2 text-[11px] ${state.ok ? "text-emerald-300" : "text-red-300"}`}>{state.msg}</p>}
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button onClick={() => save()} disabled={state.busy} className="rounded bg-accent-600 px-3 py-1 text-xs text-white hover:bg-accent-500 disabled:opacity-50">Сохранить</button>
+        <button onClick={() => save(true)} disabled={state.busy} title="Забыть, что Layla подобрала сама (лимиты, отключённые параметры)"
+          className="rounded bg-ink-700 px-3 py-1 text-xs text-neutral-200 hover:bg-ink-600 disabled:opacity-50">Сбросить подобранное</button>
+      </div>
     </div>
   );
 }

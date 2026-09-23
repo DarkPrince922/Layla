@@ -94,7 +94,7 @@ async def test_model_without_tools_is_learned_and_remembered(client, monkeypatch
     assert last["content"] == "Отвечаю без файлов"
     # Запомнено: в настройках модели инструменты выключены, следующий чат сразу без них.
     models = (await client.get(f"/api/providers/{provider_id}/models")).json()
-    assert models == [] or all(m["tools"] is False for m in models if m["name"] == "m")
+    assert [(m["name"], m["tools"]) for m in models] == [("m", False)]
     calls.clear()
     _script(monkeypatch, ["сразу"], calls)
     await _run(client)
@@ -105,7 +105,7 @@ async def test_tools_toggle_in_settings(client):
     provider_id = await _setup(client)
     saved = (await client.put(f"/api/providers/{provider_id}/models",
                               json={"models": [{"name": "m", "enabled": True, "tools": False}]})).json()
-    assert saved == [{"name": "m", "enabled": True, "tools": False}]
+    assert saved[0]["name"] == "m" and saved[0]["enabled"] is True and saved[0]["tools"] is False
     assert (await client.get(f"/api/providers/{provider_id}/models")).json()[0]["tools"] is False
 
 
@@ -297,3 +297,130 @@ def test_classify_output_cap():
     assert err.capability == "max_output" and err.value == 16384
     o1 = "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead."
     assert classify_rejection(400, o1).capability == "token_param"
+
+
+# --- Настройки модели: длина ответа, контекст, температура, глубина размышлений --
+
+async def _settings(client, provider_id, **fields):
+    body = {"name": "m", "enabled": True, "tools": True, **fields}
+    r = await client.put(f"/api/providers/{provider_id}/models", json={"models": [body]})
+    assert r.status_code == 200, r.text
+    return r.json()[0]
+
+
+async def test_model_settings_round_trip_and_back_to_auto(client):
+    provider_id = await _setup(client)
+    saved = await _settings(client, provider_id, max_output=4096, max_output_manual=True, context=32000,
+                            temperature=0.3, reasoning_effort="high")
+    assert (saved["max_output"], saved["max_output_manual"], saved["context"],
+            saved["temperature"], saved["reasoning_effort"]) == (4096, True, 32000, 0.3, "high")
+    auto = await _settings(client, provider_id)
+    assert (auto["max_output"], auto["max_output_manual"], auto["context"], auto["temperature"],
+            auto["reasoning_effort"]) == (None, False, None, None, None)
+    bad = await client.put(f"/api/providers/{provider_id}/models",
+                           json={"models": [{"name": "m", "temperature": 5}]})
+    assert bad.status_code == 422
+
+
+async def test_settings_reach_the_request(client, monkeypatch):
+    provider_id = await _setup(client)
+    await _settings(client, provider_id, max_output=4096, max_output_manual=True, temperature=0.3,
+                    reasoning_effort="low")
+    sent: list = []
+    _http(monkeypatch, [_wire(text="ok")], sent)
+    await _run(client)
+    assert (sent[0]["max_tokens"], sent[0]["temperature"], sent[0]["reasoning_effort"]) == (4096, 0.3, "low")
+
+
+async def test_manual_output_limit_is_a_ceiling(client, monkeypatch):
+    provider_id = await _setup(client)
+    await _settings(client, provider_id, max_output=4096, max_output_manual=True)
+    write = ("write_file", {"path": "a.html", "content": "x", "expected_sha256": None})
+    sent: list = []
+    _http(monkeypatch, [_wire(call=write, finish="length")], sent)
+    state, _ = await _run(client)
+    assert state["status"] == "error" and len(sent) == 1  # ручной потолок не поднимаем сами
+    assert "Макс. токенов ответа" in state["error"]
+
+
+async def test_unsupported_param_is_dropped_and_remembered(client, monkeypatch):
+    provider_id = await _setup(client)
+    await _settings(client, provider_id, temperature=0.7)
+    rejected = httpx.Response(400, json={"error": {"message": "Unsupported value: 'temperature' does not support 0.7 "
+                                                               "with this model. Only the default (1) value is supported."}})
+    sent: list = []
+    _http(monkeypatch, [rejected, _wire(text="ok")], sent)
+    state, last = await _run(client)
+    assert state["status"] == "done" and last["content"] == "ok"
+    assert "temperature" in sent[0] and "temperature" not in sent[1]
+    model = (await client.get(f"/api/providers/{provider_id}/models")).json()[0]
+    assert model["dropped"] == ["temperature"] and model["temperature"] == 0.7
+    # «Сбросить подобранное» возвращает параметр в запрос.
+    await _settings(client, provider_id, temperature=0.7, reset=True)
+    assert (await client.get(f"/api/providers/{provider_id}/models")).json()[0]["dropped"] == []
+
+
+async def _chat_with_history(client, db_sessionmaker, turns: int, size: int = 600):
+    from datetime import UTC, datetime, timedelta
+
+    from app.models.chat import Message
+
+    chat = (await client.post("/api/chats", json={"domain": "osint", "model": "m"})).json()
+    start = datetime.now(UTC) - timedelta(hours=1)
+    async with db_sessionmaker() as s:
+        for i in range(turns):
+            role = "user" if i % 2 == 0 else "assistant"
+            s.add(Message(chat_id=chat["id"], role=role, content=f"#{i} " + "история " * (size // 8),
+                          created_at=start + timedelta(seconds=i)))
+        await s.commit()
+    return chat
+
+
+async def _run_in(client, chat):
+    job = (await client.post(f"/api/chats/{chat['id']}/run", json={"content": "новый вопрос"})).json()
+    for _ in range(300):
+        await asyncio.sleep(0.02)
+        state = (await client.get(f"/api/jobs/{job['id']}")).json()
+        if state["status"] not in ("queued", "running"):
+            return state
+    return state
+
+
+async def test_history_is_trimmed_to_context(client, monkeypatch, db_sessionmaker):
+    provider_id = await _setup(client)
+    await _settings(client, provider_id, context=4096, max_output=1024, max_output_manual=True)
+    chat = await _chat_with_history(client, db_sessionmaker, turns=20)
+    sent: list = []
+    _http(monkeypatch, [_wire(text="ok")], sent)
+    state = await _run_in(client, chat)
+    assert state["status"] == "done", state
+    roles = [m["role"] for m in sent[0]["messages"]]
+    assert roles[0] == "system" and roles[1] == "user"  # история начинается с пользователя
+    assert sent[0]["messages"][-1]["content"] == "новый вопрос"
+    assert 3 < len(roles) < 22  # старое отрезано, свежее осталось
+    assert "#19" in sent[0]["messages"][-2]["content"]
+    assert any("старых" in s["text"] for s in state["steps"])
+    # В самом чате история цела.
+    assert len((await client.get(f"/api/chats/{chat['id']}")).json()["messages"]) == 22
+
+
+async def test_context_overflow_is_learned(client, monkeypatch, db_sessionmaker):
+    provider_id = await _setup(client)
+    chat = await _chat_with_history(client, db_sessionmaker, turns=30)
+    overflow = httpx.Response(400, json={"error": {"message": "This model's maximum context length is 4096 tokens. "
+                                                               "However, you requested 9000 tokens."}})
+    sent: list = []
+    _http(monkeypatch, [overflow, _wire(text="ok")], sent)
+    state = await _run_in(client, chat)
+    assert state["status"] == "done", state
+    assert len(sent[1]["messages"]) < len(sent[0]["messages"])
+    model = (await client.get(f"/api/providers/{provider_id}/models")).json()
+    assert model[0]["name"] == "m" and model[0]["context"] == 4096
+
+
+def test_classify_context_and_params():
+    err = classify_rejection(400, "This model's maximum context length is 32768 tokens. However, you requested "
+                                  "40000 tokens (31808 in the messages, 8192 in the completion).")
+    assert (err.capability, err.value) == ("context", 32768)
+    assert classify_rejection(400, "prompt is too long: 210000 tokens > 200000 maximum").value == 200000
+    assert classify_rejection(400, "Unrecognized request argument supplied: reasoning_effort").value == "reasoning_effort"

@@ -83,7 +83,8 @@ def anthropic_messages(messages: list[dict]) -> tuple[str, list[dict]]:
 
 async def stream_turn(provider, key, model: str, messages: list[dict], tools: list[dict],
                       caps: dict | None = None):
-    """caps — известные ограничения модели: tools=False, token_param, replay_reasoning=False."""
+    """caps — ограничения и настройки модели: tools, token_param, replay_reasoning,
+    max_output, temperature, reasoning_effort, drop (см. project_agent._turn)."""
     caps = caps or {}
     if caps.get("tools") is False:
         tools = []
@@ -122,6 +123,13 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
     if not tools:
         payload.pop("tools", None)
         payload.pop("tool_choice", None)
+    # Настройки модели из «Провайдеры → модель». Параметры, от которых провайдер уже
+    # отказывался (caps["drop"]), не шлём.
+    drop = set(caps.get("drop") or ())
+    if caps.get("temperature") is not None and "temperature" not in drop:
+        payload["temperature"] = caps["temperature"]
+    if caps.get("reasoning_effort") and "reasoning_effort" not in drop and not native:
+        payload["reasoning_effort"] = caps["reasoning_effort"]
 
     calls: dict[int, dict] = {}
     initial_inputs: dict[int, dict] = {}

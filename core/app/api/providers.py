@@ -220,7 +220,9 @@ async def get_provider_models(
     session: AsyncSession = Depends(get_session),
 ) -> list[ProviderModelInfo]:
     provider = await _owned_provider(session, user, provider_id)
-    return _with_caps(provider, provider.models or [])
+    # Список не загружали — в чатах работает модель по умолчанию; её тоже можно настроить.
+    entries = provider.models or ([{"name": provider.default_model, "enabled": True}] if provider.default_model else [])
+    return _with_caps(provider, entries)
 
 
 @router.post("/{provider_id}/fetch-models", response_model=list[ProviderModelInfo])
@@ -259,7 +261,20 @@ async def set_provider_models(
     provider.models = [{"name": m.name, "enabled": m.enabled} for m in body.models]
     caps = dict(provider.model_caps or {})
     for m in body.models:
-        caps[m.name] = {**(caps.get(m.name) or {}), "tools": m.tools}
+        entry = {"tools": m.tools} if m.reset else {**(caps.get(m.name) or {}), "tools": m.tools}
+        if m.max_output_manual and m.max_output:
+            entry.update(max_output=m.max_output, max_output_cap=m.max_output, max_output_manual=True)
+        elif entry.get("max_output_manual"):
+            # Вернули «Авто»: снимаем ручной потолок, дальше лимит подбирается сам.
+            for key in ("max_output", "max_output_cap", "max_output_manual"):
+                entry.pop(key, None)
+        for key in ("context", "temperature", "reasoning_effort"):
+            value = getattr(m, key)
+            if value is None:
+                entry.pop(key, None)
+            else:
+                entry[key] = value
+        caps[m.name] = entry
     provider.model_caps = caps
     await session.commit()
     return _with_caps(provider, provider.models)
@@ -267,8 +282,13 @@ async def set_provider_models(
 
 def _with_caps(provider: Provider, entries: list[dict]) -> list[ProviderModelInfo]:
     caps = provider.model_caps or {}
-    return [
-        ProviderModelInfo(name=m["name"], enabled=bool(m.get("enabled", True)),
-                          tools=(caps.get(m["name"]) or {}).get("tools") is not False)
-        for m in entries
-    ]
+    out = []
+    for m in entries:
+        c = caps.get(m["name"]) or {}
+        out.append(ProviderModelInfo(
+            name=m["name"], enabled=bool(m.get("enabled", True)), tools=c.get("tools") is not False,
+            max_output=c.get("max_output"), max_output_manual=bool(c.get("max_output_manual")),
+            context=c.get("context"), temperature=c.get("temperature"),
+            reasoning_effort=c.get("reasoning_effort"), dropped=list(c.get("drop") or []),
+        ))
+    return out
