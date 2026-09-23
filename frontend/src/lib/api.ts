@@ -41,7 +41,8 @@ export const api = {
     request<T>(p, { method: "PUT", body: body ? JSON.stringify(body) : undefined }),
   patch: <T>(p: string, body?: unknown) =>
     request<T>(p, { method: "PATCH", body: body ? JSON.stringify(body) : undefined }),
-  del: <T>(p: string) => request<T>(p, { method: "DELETE" }),
+  del: <T>(p: string, body?: unknown) =>
+    request<T>(p, { method: "DELETE", body: body ? JSON.stringify(body) : undefined }),
 };
 
 // ---- OSINT / intelligence (M3) ----
@@ -258,6 +259,88 @@ export interface ToolEvent {
   status: "running" | "pending" | "done" | "error" | "rejected";
   error?: string;
   change?: FileChange;
+  /** run_command / run_code: команда (или «язык: файлы»), вывод и итог. */
+  command?: string;
+  output?: string;
+  note?: string;
+  exit_code?: number | null;
+  duration_s?: number;
+  timed_out?: boolean;
+  signal?: string | number | null;
+}
+
+export const RUN_TOOLS = new Set(["run_command", "run_code"]);
+
+// ---- Запуск кода: песочница проекта и Piston ----
+export interface SandboxStatus {
+  sandbox: {
+    available: boolean;
+    tools?: Record<string, string>;
+    network?: "proxy" | "off";
+    limits?: { max_timeout: number; default_timeout: number; max_output: number; max_parallel: number };
+  };
+  piston: { available: boolean; runtimes: { language: string; version: string; aliases?: string[]; runtime?: string }[] };
+}
+
+export interface PistonPackage {
+  language: string;
+  language_version: string;
+  installed: boolean;
+}
+
+export type RunEvent =
+  | { type: "info"; data: string }
+  | { type: "output"; data: string }
+  | { type: "error"; data: string }
+  | { type: "exit"; code: number | null; signal: number | null; duration: number; timed_out: boolean; truncated: boolean };
+
+/** Команда в песочнице проекта; события приходят по мере выполнения. */
+export async function runInProject(
+  projectId: string,
+  body: { command: string; timeout?: number; stdin?: string },
+  onEvent: (event: RunEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch(`${BASE}/projects/${projectId}/run`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!res.ok || !res.body) {
+    const detail = await res.json().catch(() => ({}));
+    throw new ApiError(res.status, typeof detail.detail === "string" ? detail.detail : `Ошибка ${res.status}`);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const frame = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 2);
+        if (frame.startsWith("data:")) onEvent(JSON.parse(frame.slice(5).trim()) as RunEvent);
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+export interface RunCodeResult {
+  language: string;
+  version: string;
+  exit_code?: number | null;
+  output?: string;
+  signal?: string | null;
+  message?: string;
+  compile?: { exit_code: number | null; output: string };
+  shown?: string;
 }
 
 export async function downloadProject(project: Project): Promise<void> {

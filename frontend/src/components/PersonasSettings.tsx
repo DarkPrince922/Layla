@@ -12,6 +12,8 @@ type Draft = {
   color: string;
   instructions: string;
   files: Files;
+  /** Запуск кода в песочнице проекта (run_command / run_code). */
+  run: boolean;
   default_mode: "" | "auto" | "confirm" | "plan" | "review";
   default_model: string;
 };
@@ -26,13 +28,15 @@ const MODES = [
 
 const filesOf = (tools: string[] = []): Files =>
   tools.includes("files.write") ? "write" : tools.includes("files.read") ? "read" : "none";
-const toolsOf = (files: Files) =>
-  files === "write" ? ["files.read", "files.write"] : files === "read" ? ["files.read"] : [];
+const canRun = (tools: string[] = []) => tools.includes("code.run") || tools.includes("shell.local");
+const toolsOf = (files: Files, run: boolean) =>
+  [...(files === "write" ? ["files.read", "files.write"] : files === "read" ? ["files.read"] : []), ...(run ? ["code.run"] : [])];
 const draftOf = (p: Persona): Draft => ({
   name: p.name,
   color: p.color || "#8b7bd8",
   instructions: p.instructions || "",
   files: filesOf(p.allowed_tools),
+  run: canRun(p.allowed_tools),
   default_mode: (p.default_mode || "") as Draft["default_mode"],
   default_model: p.default_model || "",
 });
@@ -40,7 +44,8 @@ const draftOf = (p: Persona): Draft => ({
 const RIGHTS: Record<string, string> = {
   "files.read": "чтение файлов",
   "files.write": "запись файлов",
-  "shell.local": "локальные команды",
+  "shell.local": "запуск кода в песочнице",
+  "code.run": "запуск кода в песочнице",
   "repo.git": "git",
   "design.render": "превью дизайна",
   "engagement.read": "данные engagement",
@@ -87,18 +92,18 @@ export function PersonasSettings() {
     instructions: draft.instructions,
     default_mode: draft.default_mode || null,
     default_model: draft.default_model || null,
-    ...(selected.is_builtin ? {} : { allowed_tools: toolsOf(draft.files) }),
+    ...(selected.is_builtin ? {} : { allowed_tools: toolsOf(draft.files, draft.run) }),
   }), "Сохранено");
 
   const create = () => run(() => api.post<Persona>("/personas", {
-    name: "Новая роль", instructions: "", allowed_tools: ["files.read", "files.write"],
+    name: "Новая роль", instructions: "", allowed_tools: ["files.read", "files.write", "code.run"],
   }), "Роль создана — опишите её промт");
 
   const duplicate = () => selected && draft && run(() => api.post<Persona>("/personas", {
     name: `${draft.name} — копия`.slice(0, 120),
     color: draft.color,
     instructions: draft.instructions,
-    allowed_tools: toolsOf(draft.files),
+    allowed_tools: toolsOf(draft.files, draft.run),
     default_mode: draft.default_mode || null,
     default_model: draft.default_model || null,
   }), "Копия создана — это своя роль, её можно менять целиком");
@@ -199,6 +204,10 @@ export function PersonasSettings() {
                       {label}
                     </button>
                   ))}
+                  <label className="ml-1 flex cursor-pointer items-center gap-2 rounded-lg bg-ink-900 px-3 py-1.5 text-neutral-300">
+                    <input type="checkbox" checked={draft.run} onChange={e => setDraft({ ...draft, run: e.target.checked })} className="accent-accent-400" />
+                    Запуск кода в песочнице
+                  </label>
                 </div>
               )}
 

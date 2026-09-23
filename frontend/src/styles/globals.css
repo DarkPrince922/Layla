@@ -79,10 +79,12 @@
 .code-pane.code-active { display: flex; animation: surface-in 180ms ease-out both; }
 .code-projects { @apply rounded-2xl border border-ink-700/70 bg-ink-800/30; }
 .code-editor { @apply overflow-hidden rounded-2xl border border-ink-700/70 bg-ink-950/30; }
+.code-terminal { @apply overflow-hidden rounded-2xl border border-ink-700/70 bg-ink-950/30; }
 .code-chat { max-width: 920px; margin: 0 auto; }
 @container (min-width: 880px) {
   .code-panes[data-pane="projects"] .code-projects,
-  .code-panes[data-pane="editor"] .code-projects { display: flex; width: 280px; flex-shrink: 0; }
+  .code-panes[data-pane="editor"] .code-projects,
+  .code-panes[data-pane="terminal"] .code-projects { display: flex; width: 280px; flex-shrink: 0; }
   .code-panes[data-pane="projects"] .code-editor,
   .code-panes[data-pane="editor"] .code-editor { display: flex; width: auto; }
 }

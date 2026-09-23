@@ -3,7 +3,9 @@
 **Layla** is a self-hostable, multi-domain AI workstation. You connect your own
 AI providers and work across four domains, each with its own UI and tools:
 
-- **Code** — chat agent with access to project files and repositories.
+- **Code** — chat agent with access to project files and repositories; it can install
+  dependencies, run tests and compile code in an isolated sandbox (see
+  [docs/SANDBOX.md](docs/SANDBOX.md)).
 - **Pentest** — authorized engagements: scope, findings, reports, attack-box
   execution over SSH, autonomous/interactive agent. *(core value; guardrails
   built in — see [Security](#security))*
@@ -189,6 +191,7 @@ npm run dev            # http://localhost:3000 ; /api is proxied to :8000
 
 ```bash
 cd core && . .venv/bin/activate && pytest      # backend
+cd sandbox && sudo -E python -m pytest         # code sandbox (as root: runs commands as sandbox uids)
 cd frontend && npm run build                   # typecheck + lint + build
 ```
 
@@ -212,6 +215,7 @@ Layla/
 │   └── tests/
 ├── frontend/        Next.js app (Layla Shell)
 │   └── src/{app,components,lib,store,styles}
+├── sandbox/         code sandbox service: commands with dependencies + egress proxy
 ├── deploy/
 │   ├── caddy/Caddyfile
 │   └── litellm/config.yaml

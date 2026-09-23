@@ -13,6 +13,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
   { slug: "providers", label: "Провайдеры", blurb: "Профили подключения LLM (через LiteLLM)." },
   { slug: "agent", label: "Агент", blurb: "Оркестрация Ultracode, бюджеты, диагностика." },
   { slug: "personas", label: "Роли", blurb: "Промты ролей, доступ к файлам, свои роли." },
+  { slug: "sandbox", label: "Песочница", blurb: "Запуск кода: зависимости, тесты, языки Piston." },
   { slug: "knowledge", label: "База знаний", blurb: "Документы RAG, индексация в pgvector." },
   { slug: "security", label: "Безопасность", blurb: "Политики доступа, подтверждения, аудит-лог." },
   { slug: "integrations", label: "Интеграции", blurb: "MCP-серверы, Telegram, intelligence-API." },

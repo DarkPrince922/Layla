@@ -3,12 +3,16 @@
 import { useAuth } from "@/store/auth";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { ArrowLeft, Settings2, Palette, Cable, Bot, Users, BookOpen, ShieldCheck, Plug, Code2, Database, FlaskConical, Network, Trash2 } from "lucide-react";
+import { ArrowLeft, Settings2, Palette, Cable, Bot, Users, BookOpen, ShieldCheck, Plug, Code2, Database, FlaskConical, Network, Trash2, SquareTerminal, type LucideIcon } from "lucide-react";
 import { AppShell } from "@/components/AppShell";
 import { SETTINGS_SECTIONS } from "@/lib/settings-nav";
 import { useLocale } from "@/store/locale";
 
-const icons = [Settings2, Users, Palette, Cable, Bot, Users, BookOpen, ShieldCheck, Plug, Code2, Database, FlaskConical, Network, Trash2];
+const icons: Record<string, LucideIcon> = {
+  general: Settings2, users: Users, appearance: Palette, providers: Cable, agent: Bot, personas: Users,
+  sandbox: SquareTerminal, knowledge: BookOpen, security: ShieldCheck, integrations: Plug, "local-api": Code2,
+  data: Database, "accounts-lab": FlaskConical, "privacy-chain": Network, trash: Trash2,
+};
 
 export default function SettingsLayout({ children }: { children: React.ReactNode }) {
   const user = useAuth(s => s.user);
@@ -22,8 +26,8 @@ export default function SettingsLayout({ children }: { children: React.ReactNode
         <Link href="/code" className="mb-5 flex items-center gap-2 rounded-lg px-3 py-3 text-sm text-neutral-400 hover:bg-ink-700 hover:text-neutral-100"><ArrowLeft className="h-4 w-4" />{t("back.toApp")}</Link>
         <div className="mb-3 px-3 text-xs font-semibold text-neutral-500">{t("nav.settings")}</div>
         <nav aria-label="Разделы настроек" className="min-h-0 space-y-1 overflow-y-auto">
-          {sections.map((s, index) => {
-            const Icon = icons[SETTINGS_SECTIONS.indexOf(s)] || Settings2;
+          {sections.map(s => {
+            const Icon = icons[s.slug] || Settings2;
             const active = pathname === `/settings/${s.slug}`;
             return <Link key={s.slug} href={`/settings/${s.slug}`} aria-current={active ? "page" : undefined} className={`flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm ${active ? "bg-accent-500/15 text-accent-200" : "text-neutral-400 hover:bg-ink-700/60 hover:text-neutral-100"}`}><Icon className="h-4 w-4 shrink-0" />{t(`settings.${s.slug}`)}</Link>;
           })}

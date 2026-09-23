@@ -4,9 +4,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Send, Bot, Plus, Loader2, Download, Square, Trash2, Eraser, Zap, ShieldCheck, ClipboardList, ChevronDown, Pencil, Check, Search, FoldVertical, Undo2, Play, SearchCheck, BookMarked, ListChecks, CircleCheck, CircleDot, Circle, X, type LucideIcon } from "lucide-react";
-import { ApiError, api, downloadProject, type FileContent, type Persona, type ModelInfo, type Chat, type ChatDetail, type FileChange, type Job, type ToolEvent } from "@/lib/api";
+import { ApiError, RUN_TOOLS, api, downloadProject, type FileContent, type Persona, type ModelInfo, type Chat, type ChatDetail, type FileChange, type Job, type ToolEvent } from "@/lib/api";
 import { useAuth } from "@/store/auth";
 import { FileDiff } from "@/components/FileDiff";
+import { RunCard } from "@/components/RunOutput";
 import { confirmAction } from "@/components/ConfirmDialog";
 
 const active = (job?: Job | null) => !!job && ["queued", "running"].includes(job.status);
@@ -16,9 +17,9 @@ type Decision = "approve" | "reject" | "approve_all";
 // Режимы как в IDE-агентах: сам применяет / спрашивает перед каждым изменением / только план.
 const MODES: { id: Mode; label: string; hint: string; icon: LucideIcon }[] = [
   { id: "auto", label: "Авто", hint: "Агент сам применяет изменения", icon: Zap },
-  { id: "confirm", label: "С подтверждением", hint: "Каждое изменение файла ждёт вашего «Применить»", icon: ShieldCheck },
+  { id: "confirm", label: "С подтверждением", hint: "Каждое изменение файла и запуск команды ждёт вашего решения", icon: ShieldCheck },
   { id: "plan", label: "План", hint: "Только чтение: агент изучит задачу и предложит план, ничего не меняя", icon: ClipboardList },
-  { id: "review", label: "Ревью", hint: "Только чтение: агент проверит код и перечислит найденные проблемы по важности", icon: SearchCheck },
+  { id: "review", label: "Ревью", hint: "Файлы не меняются: агент проверит код (может прогнать тесты) и перечислит проблемы по важности", icon: SearchCheck },
 ];
 const isMode = (value: string | null): value is Mode => MODES.some(m => m.id === value);
 const read = (key: string) => { try { return localStorage.getItem(key); } catch { return null; } };
@@ -361,7 +362,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
         {m.meta?.reasoning && <details className="mb-3 rounded-lg border border-ink-700 p-3"><summary className="cursor-pointer text-xs text-neutral-400">Размышление</summary><p className="mt-3 whitespace-pre-wrap break-words text-xs leading-relaxed text-neutral-400">{m.meta.reasoning}</p></details>}
         {!!m.meta?.todos?.length && <Todos items={m.meta.todos} />}
         <div className="whitespace-pre-wrap break-words text-sm leading-7">{m.content}</div>
-        {m.meta?.tools?.map(tool => <div key={tool.id} className="mt-3">{tool.status === "pending" ? <Approval tool={tool} active={approval?.id === tool.id} busy={deciding} onDecide={decide} /> : tool.status === "rejected" ? <p className="rounded-lg border border-ink-700 p-3 text-xs text-neutral-400">Отклонено вами · <span className="break-all font-mono">{tool.path}</span></p> : tool.change && tool.status === "done" ? <FileDiff change={tool.change} onOpen={onOpenFile} /> : <div className={`rounded-lg border p-3 text-xs ${tool.status === "error" ? "border-red-500/30 text-red-300" : "border-ink-700 text-neutral-400"}`}><span>{tool.status === "running" ? "Выполняется" : tool.status === "done" ? "Готово" : "Ошибка"} · {tool.name}</span><p className="mt-1 break-all font-mono">{tool.path}</p>{tool.error && <p>{tool.error}</p>}</div>}</div>)}
+        {m.meta?.tools?.map(tool => <div key={tool.id} className="mt-3">{tool.status === "pending" ? <Approval tool={tool} active={approval?.id === tool.id} busy={deciding} onDecide={decide} /> : tool.status === "rejected" ? <p className="rounded-lg border border-ink-700 p-3 text-xs text-neutral-400">Отклонено вами · <span className="break-all font-mono">{tool.command || tool.path}</span></p> : RUN_TOOLS.has(tool.name) ? <RunCard tool={tool} /> : tool.change && tool.status === "done" ? <FileDiff change={tool.change} onOpen={onOpenFile} /> : <div className={`rounded-lg border p-3 text-xs ${tool.status === "error" ? "border-red-500/30 text-red-300" : "border-ink-700 text-neutral-400"}`}><span>{tool.status === "running" ? "Выполняется" : tool.status === "done" ? "Готово" : "Ошибка"} · {tool.name}</span><p className="mt-1 break-all font-mono">{tool.path}</p>{tool.error && <p>{tool.error}</p>}</div>}</div>)}
         {m.meta?.error && <p role="alert" className="mt-3 text-sm text-red-300">{m.meta.error}</p>}
       </article>)}
     </div>
@@ -453,13 +454,15 @@ function RulesDialog({ projectId, onClose }: { projectId: string; onClose: () =>
 function Approval({ tool, active, busy, onDecide }: {
   tool: ToolEvent; active: boolean; busy: boolean; onDecide: (decision: Decision) => void;
 }) {
+  const run = RUN_TOOLS.has(tool.name);
   return <div className="rounded-xl border border-amber-400/40 bg-amber-500/5 p-2">
-    <p className="px-2 pt-1 text-xs font-medium text-amber-200">{active ? "Применить это изменение?" : "Ожидало подтверждения"}</p>
-    {tool.change ? <FileDiff change={tool.change} expanded={active} /> : <p className="p-2 break-all font-mono text-xs text-neutral-400">{tool.name} · {tool.path}</p>}
+    <p className="px-2 pt-1 text-xs font-medium text-amber-200">{!active ? "Ожидало подтверждения" : run ? (tool.name === "run_code" ? "Запустить программу?" : "Выполнить команду в песочнице проекта?") : "Применить это изменение?"}</p>
+    {run ? <pre className="m-2 overflow-x-auto whitespace-pre-wrap break-all rounded-lg bg-ink-950/70 p-3 font-mono text-xs text-neutral-200">{tool.name === "run_command" ? "$ " : ""}{tool.command}</pre>
+      : tool.change ? <FileDiff change={tool.change} expanded={active} /> : <p className="p-2 break-all font-mono text-xs text-neutral-400">{tool.name} · {tool.path}</p>}
     {active && <div className="flex flex-wrap gap-2 px-2 pb-1">
-      <button className="primary-button !px-3 !py-1.5 text-xs" disabled={busy} onClick={() => onDecide("approve")}>Применить</button>
+      <button className="primary-button !px-3 !py-1.5 text-xs" disabled={busy} onClick={() => onDecide("approve")}>{run ? "Запустить" : "Применить"}</button>
       <button className="secondary-button !px-3 !py-1.5 text-xs" disabled={busy} onClick={() => onDecide("reject")}>Отклонить</button>
-      <button className="secondary-button !px-3 !py-1.5 text-xs" disabled={busy} onClick={() => onDecide("approve_all")} title="Остальные изменения этого ответа применятся без вопросов">Применять всё</button>
+      <button className="secondary-button !px-3 !py-1.5 text-xs" disabled={busy} onClick={() => onDecide("approve_all")} title="Остальные изменения и запуски этого ответа пройдут без вопросов">{run ? "Разрешить всё" : "Применять всё"}</button>
     </div>}
   </div>;
 }

@@ -12,8 +12,10 @@ import {
   Folder,
   FolderGit2,
   GitBranch,
+  Play,
   Plus,
   Save,
+  SquareTerminal,
   Trash2,
 } from "lucide-react";
 import {
@@ -26,10 +28,11 @@ import {
 import { FileTree } from "@/components/FileTree";
 import { FileDiff } from "@/components/FileDiff";
 import { ChatPanel } from "@/components/ChatPanel";
+import { ProjectTerminal, type RunRequest } from "@/components/ProjectTerminal";
 import { confirmAction } from "@/components/ConfirmDialog";
 
 type OpenFile = Omit<FileContent, "sha256"> & { sha256: string | null };
-type Pane = "projects" | "editor" | "chat";
+type Pane = "projects" | "editor" | "chat" | "terminal";
 const button =
   "secondary-button px-3 text-xs";
 
@@ -51,6 +54,7 @@ export function CodeDomain() {
   const [pending, setPending] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [runRequest, setRunRequest] = useState<RunRequest | null>(null);
   const openSequence = useRef(0);
   const dirty =
     !!openFile && (openFile.sha256 === null || draft !== openFile.content);
@@ -264,6 +268,7 @@ export function CodeDomain() {
             ["chat", "Чат", MessageCircle],
             ["projects", "Файлы и проекты", Folder],
             ...(openFile ? [["editor", "Редактор", FileCode2] as const] : []),
+            ...(projectId ? [["terminal", "Терминал", SquareTerminal] as const] : []),
           ] as const).map(([id, label, Icon]) => <button key={id} aria-pressed={pane === id} onClick={() => setPane(id)} className="segment"><Icon className="hidden h-3.5 w-3.5 sm:block" />{label}</button>)}
         </nav>
         <button onClick={() => { setForm("local"); setPane("projects"); }} aria-label="Новый проект" className="icon-button"><Plus className="h-5 w-5" /></button>
@@ -448,6 +453,17 @@ export function CodeDomain() {
                 </button>
                 {openFile.sha256 && (
                   <button
+                    onClick={() => { setRunRequest({ id: Date.now(), path: openFile.path }); setPane("terminal"); }}
+                    disabled={pending || dirty}
+                    title={dirty ? "Сохраните файл перед запуском" : "Запустить файл в песочнице проекта"}
+                    className={button}
+                  >
+                    <Play className="h-3.5 w-3.5" />
+                    Запустить
+                  </button>
+                )}
+                {openFile.sha256 && (
+                  <button
                     onClick={() => saveFile(true)}
                     disabled={pending}
                     className={button}
@@ -494,6 +510,13 @@ export function CodeDomain() {
             </div>
           )}
         </section>
+        {projectId && (
+          <section
+            className={`code-pane code-terminal min-h-0 min-w-0 flex-1 flex-col ${pane === "terminal" ? "code-active" : ""}`}
+          >
+            <ProjectTerminal key={projectId} projectId={projectId} request={runRequest} />
+          </section>
+        )}
         <section
           className={`code-pane code-chat min-h-0 min-w-0 flex-1 flex-col ${pane === "chat" ? "code-active" : ""}`}
         >
