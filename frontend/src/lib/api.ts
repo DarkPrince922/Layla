@@ -269,7 +269,68 @@ export interface ToolEvent {
   signal?: string | number | null;
 }
 
-export const RUN_TOOLS = new Set(["run_command", "run_code"]);
+export const RUN_TOOLS = new Set(["run_command", "run_code", "start_preview", "check_preview", "stop_preview"]);
+/** Превью приложения проекта: состояние процесса в песочнице и ссылка для браузера. */
+export type PreviewState = {
+  state: "none" | "starting" | "running" | "no_port" | "exited" | "stopped" | "idle" | "lifetime" | "unavailable" | string;
+  command?: string | null;
+  suggested?: string | null;
+  port?: number | null;
+  started?: number | null;
+  exit_code?: number | null;
+  logs?: string;
+  base?: string;
+  url?: string;
+  error?: string;
+};
+
+export const GIT_TOOLS = new Set(["git_status", "git_log", "git_diff", "git_commit", "git_push"]);
+
+// ---- Git проекта ----
+export interface GitCommit {
+  sha: string;
+  short: string;
+  author: string;
+  email: string;
+  date: string;
+  message: string;
+  stat?: string;
+}
+
+export interface GitStatus {
+  initialized: boolean;
+  branch?: string;
+  upstream?: string | null;
+  ahead?: number;
+  behind?: number;
+  changes?: { path: string; status: "new" | "added" | "modified" | "deleted" | "renamed"; code: string }[];
+  remote?: string | null;
+  remote_host?: string | null;
+  has_token?: boolean;
+  last_commit?: GitCommit | null;
+}
+
+export interface GitCredential {
+  host: string;
+  username?: string | null;
+  masked: string;
+}
+
+/** Разобрать вывод git diff на изменения по файлам — для FileDiff. */
+export function splitGitDiff(text: string): FileChange[] {
+  const out: FileChange[] = [];
+  for (const block of text.split(/^(?=diff --git )/m)) {
+    if (!block.startsWith("diff --git ")) continue;
+    const plus = /^\+\+\+ b\/(.+)$/m.exec(block)?.[1];
+    const minus = /^--- a\/(.+)$/m.exec(block)?.[1];
+    const header = /^diff --git a\/(.+?) b\/(.+)$/m.exec(block);
+    const path = plus || minus || header?.[2] || "?";
+    const operation = /^new file mode/m.test(block) ? "create" : /^deleted file mode/m.test(block) ? "delete" : "edit";
+    const start = block.search(/^@@/m);
+    out.push({ path, operation, diff: start >= 0 ? block.slice(start) : "", before_sha256: null, after_sha256: null });
+  }
+  return out;
+}
 
 // ---- Запуск кода: песочница проекта и Piston ----
 export interface SandboxStatus {

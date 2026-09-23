@@ -62,6 +62,9 @@ services:
       # Запуск кода: песочница — через unix-сокет (у неё нет сети до ядра и базы), Piston — по сети piston.
       LAYLA_SANDBOX_URL: ${LAYLA_SANDBOX_URL:-unix:///run/layla-sandbox/sandbox.sock}
       LAYLA_PISTON_URL: ${LAYLA_PISTON_URL:-http://piston:2000}
+      # Порт превью снаружи (как опубликован у caddy) или полный адрес, если превью на своём домене.
+      LAYLA_PREVIEW_PORT: ${LAYLA_PREVIEW_PORT:-8090}
+      LAYLA_PREVIEW_URL: ${LAYLA_PREVIEW_URL:-}
     volumes:
       - projectsdata:/app/data/projects
       - sandboxsock:/run/layla-sandbox
@@ -98,6 +101,10 @@ services:
     environment:
       SANDBOX_PROXY: ${SANDBOX_PROXY:-http://sandbox-proxy:3128}
       SANDBOX_MAX_TIMEOUT: ${SANDBOX_MAX_TIMEOUT:-900}
+      # Превью: остановить после простоя / через столько секунд работы; сколько превью на пользователя.
+      SANDBOX_SERVICE_IDLE: ${SANDBOX_SERVICE_IDLE:-1800}
+      SANDBOX_SERVICE_LIFETIME: ${SANDBOX_SERVICE_LIFETIME:-21600}
+      SANDBOX_MAX_SERVICES_PER_USER: ${SANDBOX_MAX_SERVICES_PER_USER:-3}
     volumes:
       - sandboxwork:/work
       - sandboxsock:/run/layla-sandbox
@@ -168,10 +175,14 @@ services:
     ports:
       - "80:80"
       - "443:443"
+      # Превью приложений из песочницы (отдельный адрес — изоляция от Лейлы).
+      - "${LAYLA_PREVIEW_PORT:-8090}:8090"
     environment:
       # Адрес сайта для Caddy. По умолчанию http://localhost — простой HTTP без
       # авто-TLS и без редиректа. Для HTTPS укажите голый домен (example.com).
       LAYLA_SITE_ADDRESS: ${LAYLA_SITE_ADDRESS:-http://localhost}
+      # Адрес превью: :8090 — HTTP для любого хоста; для HTTPS — example.com:8090.
+      LAYLA_PREVIEW_ADDRESS: ${LAYLA_PREVIEW_ADDRESS:-:8090}
     volumes:
       - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddydata:/data

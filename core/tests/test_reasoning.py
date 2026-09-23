@@ -256,7 +256,7 @@ async def test_review_mode_is_read_only(client, monkeypatch):
     _script(monkeypatch, [[("content", "1. [важно] a.py:3 …")]], calls)
     _, state = await _run(client, domain="code", mode="review")
     assert state["status"] == "done", state
-    assert calls[0]["tools"] == {"list_files", "read_file", "update_todos"}
+    assert calls[0]["tools"] == {"list_files", "read_file", "update_todos", "git_status", "git_log", "git_diff"}
     assert "REVIEW MODE" in calls[0]["conversation"][0]["content"]
 
 

@@ -28,7 +28,7 @@ from app.schemas.project import (
     ProjectOut,
     RepoImport,
 )
-from app.services import audit, files, jobs, repo, trash
+from app.services import audit, files, jobs, repo, sandbox, trash
 from app.services.auth import get_current_user
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -216,6 +216,7 @@ async def write_project_file(
         meta={"path": change["path"]},
     )
     await session.commit()
+    sandbox.preview_touch(user.id, project.id)  # запущенное превью подхватит правку
     return change
 
 
@@ -244,6 +245,7 @@ async def delete_project_file(
         meta={"path": change["path"]},
     )
     await session.commit()
+    sandbox.preview_touch(user.id, project.id)
     return change
 
 

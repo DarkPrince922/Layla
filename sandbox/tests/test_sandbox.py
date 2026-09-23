@@ -8,30 +8,14 @@ import asyncio
 import io
 import json
 import os
-import shutil
 import tarfile
-import tempfile
-from pathlib import Path
 
 import httpx
 import pytest
 
 from layla_sandbox import config, proxy, server
-from layla_sandbox.workspace import Users, prepare_root
 
 root_only = pytest.mark.skipif(os.geteuid() != 0, reason="нужен root: команды идут от uid песочницы")
-
-
-@pytest.fixture
-def work(monkeypatch):
-    path = Path(tempfile.mkdtemp(prefix="layla-sandbox-", dir="/var/tmp"))
-    os.chmod(path, 0o711)
-    prepare_root(path)
-    monkeypatch.setattr(config, "WORK", path)
-    monkeypatch.setattr(server, "users", Users(path))
-    monkeypatch.setattr(config, "PROXY", "")
-    yield path
-    shutil.rmtree(path, ignore_errors=True)
 
 
 def tar(files: dict[str, str]) -> bytes:

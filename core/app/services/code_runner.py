@@ -13,7 +13,10 @@ from starlette.concurrency import run_in_threadpool
 
 from app.services import files, sandbox
 
-RUN_TOOLS = frozenset({"run_command", "run_code"})
+RUN_TOOLS = frozenset({"run_command", "run_code", "start_preview", "check_preview", "stop_preview"})
+PREVIEW_TOOLS = frozenset({"start_preview", "check_preview", "stop_preview"})
+# Что запускает команды — в режиме «С подтверждением» ждёт решения пользователя.
+NEEDS_APPROVAL = frozenset({"run_command", "run_code", "start_preview"})
 # Право роли на запуск кода. shell.local — прежнее имя того же права у встроенных ролей.
 RUN_PERMISSIONS = ("code.run", "shell.local")
 MODEL_OUTPUT = 8000  # символов вывода, которые видит модель
@@ -47,6 +50,24 @@ class RunCode(BaseModel):
         if not self.paths and not (self.code or "").strip():
             raise ValueError("нужны paths (файлы проекта) или code")
         return self
+
+
+class StartPreview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    command: str | None = Field(default=None, max_length=4000)
+
+
+class CheckPreview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: str = Field(default="/", max_length=2000)
+
+
+class StopPreview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+_SCHEMAS = {"run_command": RunCommand, "run_code": RunCode, "start_preview": StartPreview,
+            "check_preview": CheckPreview, "stop_preview": StopPreview}
 
 
 def can_run(permissions: list[str] | None) -> bool:
@@ -87,8 +108,27 @@ def code_tool(runtimes: list[dict]) -> dict:
     ), RunCode)
 
 
+def preview_tools() -> list[dict]:
+    return [
+        _spec("start_preview", (
+            "Start (or restart) the project's app in the sandbox so the user can see and click it live in "
+            "Код → Превью: a dev server (npm run dev, Django runserver, python app.py…) or a static server. "
+            "Without command it is chosen from the project (package.json dev/start, manage.py, index.html). "
+            "The server should listen on $PORT (env) if it can; any port works. Waits until the app answers "
+            "and returns its state, the first page and recent logs. Project file edits reach the running app "
+            "automatically (hot reload where the framework supports it)."
+        ), StartPreview),
+        _spec("check_preview", (
+            "Open a page of the running preview from the server side: status code, title, visible text of the "
+            "HTML and recent server logs (build errors show up there). JavaScript is not executed, so for SPAs "
+            "check the logs and that the page and its assets load."
+        ), CheckPreview),
+        _spec("stop_preview", "Stop the running preview of this project.", StopPreview),
+    ]
+
+
 def validate(name: str, arguments: dict) -> tuple[BaseModel | None, str | None]:
-    schema = RunCommand if name == "run_command" else RunCode
+    schema = _SCHEMAS.get(name, RunCode)
     try:
         return schema.model_validate(arguments), None
     except ValidationError as exc:
@@ -100,6 +140,12 @@ def label(name: str, arguments: dict) -> str:
     """Что показать в карточке и на подтверждении: команда или язык с файлами."""
     if name == "run_command":
         return str(arguments.get("command") or "")[:2000]
+    if name == "start_preview":
+        return "превью: " + (str(arguments.get("command") or "").strip() or "команда по проекту")[:2000]
+    if name == "check_preview":
+        return f"проверка превью: {arguments.get('path') or '/'}"
+    if name == "stop_preview":
+        return "остановить превью"
     paths = arguments.get("paths") if isinstance(arguments.get("paths"), list) else []
     target = ", ".join(str(p) for p in paths[:5]) or "код из сообщения"
     return f"{arguments.get('language', '?')}: {target}"
@@ -118,6 +164,7 @@ class Runner:
         box = await sandbox.info()
         if box is not None:
             found.append(command_tool(box))
+            found.extend(preview_tools())
         runtimes = await sandbox.runtimes()
         if runtimes:
             found.append(code_tool(runtimes))
@@ -157,6 +204,35 @@ class Runner:
             yield {"result": {"error": "Песочница не сообщила результат команды", "output": _shown(text)}}
             return
         yield {"result": _command_result(exit_event, text, time.monotonic() - started)}
+
+    async def call(self, name: str, args: BaseModel) -> dict:
+        """Инструменты без живого вывода: run_code и превью."""
+        if name == "run_code":
+            return await self.code(args)
+        try:
+            if name == "start_preview":
+                return await self._start_preview(args)
+            if name == "check_preview":
+                return _page(await sandbox.preview_fetch(self.owner_id, self.project_id, args.path))
+            if name == "stop_preview":
+                await sandbox.preview_stop(self.owner_id, self.project_id)
+                return {"stopped": True, "shown": "Превью остановлено"}
+        except sandbox.SandboxError as exc:
+            return {"error": str(exc)}
+        return {"error": "Неизвестный инструмент"}
+
+    async def _start_preview(self, args: StartPreview) -> dict:
+        await sandbox.preview_start(self.owner_id, self.project_id, self.root, args.command)
+        status = await sandbox.preview_wait(self.owner_id, self.project_id)
+        logs = _tail(status.get("logs") or "")
+        if status.get("state") != "running":
+            return {"error": f"Превью не запустилось (состояние: {status.get('state')}). Смотрите логи.",
+                    "command": status.get("command"), "logs_tail": logs, "shown": logs}
+        page = _page(await sandbox.preview_fetch(self.owner_id, self.project_id, "/"))
+        page.pop("shown", None)
+        return {"state": "running", "command": status.get("command"), "port": status.get("port"),
+                "note": "The user sees the running app in Код → Превью.", "first_page": page,
+                "shown": f"Превью работает · порт {status.get('port')}\n{logs}"}
 
     async def code(self, args: RunCode) -> dict:
         try:
@@ -238,4 +314,21 @@ def _code_result(data: dict) -> dict:
     if ran is not None:
         shown.append(ran["output"])
     result["shown"] = "\n".join(shown)
+    return result
+
+
+def _tail(text: str, lines: int = 40) -> str:
+    return "\n".join(sandbox.clean(text).splitlines()[-lines:])
+
+
+def _page(data: dict) -> dict:
+    """Страница превью глазами агента + текст для карточки."""
+    if data.get("state") != "running":
+        return {"error": f"Превью не работает (состояние: {data.get('state')})",
+                "logs_tail": _tail(data.get("logs_tail") or ""), "shown": _tail(data.get("logs_tail") or "")}
+    result = {k: data.get(k) for k in ("status", "content_type", "title", "text", "error") if data.get(k) is not None}
+    result["logs_tail"] = _tail(data.get("logs_tail") or "", 25)
+    status = data.get("status")
+    result["shown"] = (f"HTTP {status} · {data.get('title') or 'без заголовка'}\n{(data.get('text') or '')[:600]}"
+                       if status else str(data.get("error") or ""))
     return result

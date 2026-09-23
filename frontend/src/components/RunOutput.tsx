@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, CircleAlert, CircleCheck, Clock3, Cpu, Loader2, SquareTerminal } from "lucide-react";
+import { ChevronDown, CircleAlert, CircleCheck, Clock3, Cpu, GitBranch, Loader2, MonitorPlay, SquareTerminal } from "lucide-react";
 import type { ToolEvent } from "@/lib/api";
 
 /** Вывод команды: моноширинный, с автопрокруткой вниз, пока пользователь сам не прокрутил выше. */
@@ -33,6 +33,7 @@ export function RunBadge({ tool }: { tool: ToolEvent }) {
   if (tool.status === "running") return <span className="flex items-center gap-1 text-accent-200"><Loader2 className="h-3 w-3 animate-spin" />Выполняется</span>;
   if (tool.status === "error") return <span className="flex items-center gap-1 text-red-300"><CircleAlert className="h-3 w-3" />Ошибка</span>;
   if (tool.timed_out) return <span className="flex items-center gap-1 text-amber-200"><Clock3 className="h-3 w-3" />Время вышло</span>;
+  if (tool.exit_code === undefined) return <span className="flex items-center gap-1 text-emerald-300"><CircleCheck className="h-3 w-3" />готово</span>;
   const ok = tool.exit_code === 0;
   return <span className={`flex items-center gap-1 ${ok ? "text-emerald-300" : "text-red-300"}`}>
     {ok ? <CircleCheck className="h-3 w-3" /> : <CircleAlert className="h-3 w-3" />}код {tool.exit_code ?? "?"}
@@ -42,10 +43,10 @@ export function RunBadge({ tool }: { tool: ToolEvent }) {
 /** Карточка run_command / run_code в чате. Успешный вывод свёрнут, упавший и живой — раскрыт. */
 export function RunCard({ tool }: { tool: ToolEvent }) {
   const live = tool.status === "running";
-  const failed = tool.status === "error" || !!tool.timed_out || (tool.status === "done" && tool.exit_code !== 0);
+  const failed = tool.status === "error" || !!tool.timed_out || (tool.status === "done" && tool.exit_code !== undefined && tool.exit_code !== 0);
   const [open, setOpen] = useState<boolean | null>(null);
   const shown = open ?? (live || failed);
-  const Icon = tool.name === "run_code" ? Cpu : SquareTerminal;
+  const Icon = tool.name === "run_code" ? Cpu : tool.name.startsWith("git_") ? GitBranch : tool.name.endsWith("_preview") ? MonitorPlay : SquareTerminal;
   const output = tool.output || "";
   return (
     <div className={`overflow-hidden rounded-lg border text-xs ${failed ? "border-red-500/30" : "border-ink-700"}`}>

@@ -14,6 +14,8 @@ type Draft = {
   files: Files;
   /** Запуск кода в песочнице проекта (run_command / run_code). */
   run: boolean;
+  /** Git проекта: статус, коммит, пуш (git_*). */
+  git: boolean;
   default_mode: "" | "auto" | "confirm" | "plan" | "review";
   default_model: string;
 };
@@ -29,14 +31,15 @@ const MODES = [
 const filesOf = (tools: string[] = []): Files =>
   tools.includes("files.write") ? "write" : tools.includes("files.read") ? "read" : "none";
 const canRun = (tools: string[] = []) => tools.includes("code.run") || tools.includes("shell.local");
-const toolsOf = (files: Files, run: boolean) =>
-  [...(files === "write" ? ["files.read", "files.write"] : files === "read" ? ["files.read"] : []), ...(run ? ["code.run"] : [])];
+const toolsOf = (files: Files, run: boolean, git: boolean) =>
+  [...(files === "write" ? ["files.read", "files.write"] : files === "read" ? ["files.read"] : []), ...(run ? ["code.run"] : []), ...(git ? ["repo.git"] : [])];
 const draftOf = (p: Persona): Draft => ({
   name: p.name,
   color: p.color || "#8b7bd8",
   instructions: p.instructions || "",
   files: filesOf(p.allowed_tools),
   run: canRun(p.allowed_tools),
+  git: (p.allowed_tools || []).includes("repo.git"),
   default_mode: (p.default_mode || "") as Draft["default_mode"],
   default_model: p.default_model || "",
 });
@@ -46,7 +49,7 @@ const RIGHTS: Record<string, string> = {
   "files.write": "запись файлов",
   "shell.local": "запуск кода в песочнице",
   "code.run": "запуск кода в песочнице",
-  "repo.git": "git",
+  "repo.git": "Git (коммит, пуш с подтверждением)",
   "design.render": "превью дизайна",
   "engagement.read": "данные engagement",
   "findings.write": "находки",
@@ -92,18 +95,18 @@ export function PersonasSettings() {
     instructions: draft.instructions,
     default_mode: draft.default_mode || null,
     default_model: draft.default_model || null,
-    ...(selected.is_builtin ? {} : { allowed_tools: toolsOf(draft.files, draft.run) }),
+    ...(selected.is_builtin ? {} : { allowed_tools: toolsOf(draft.files, draft.run, draft.git) }),
   }), "Сохранено");
 
   const create = () => run(() => api.post<Persona>("/personas", {
-    name: "Новая роль", instructions: "", allowed_tools: ["files.read", "files.write", "code.run"],
+    name: "Новая роль", instructions: "", allowed_tools: ["files.read", "files.write", "code.run", "repo.git"],
   }), "Роль создана — опишите её промт");
 
   const duplicate = () => selected && draft && run(() => api.post<Persona>("/personas", {
     name: `${draft.name} — копия`.slice(0, 120),
     color: draft.color,
     instructions: draft.instructions,
-    allowed_tools: toolsOf(draft.files, draft.run),
+    allowed_tools: toolsOf(draft.files, draft.run, draft.git),
     default_mode: draft.default_mode || null,
     default_model: draft.default_model || null,
   }), "Копия создана — это своя роль, её можно менять целиком");
@@ -207,6 +210,10 @@ export function PersonasSettings() {
                   <label className="ml-1 flex cursor-pointer items-center gap-2 rounded-lg bg-ink-900 px-3 py-1.5 text-neutral-300">
                     <input type="checkbox" checked={draft.run} onChange={e => setDraft({ ...draft, run: e.target.checked })} className="accent-accent-400" />
                     Запуск кода в песочнице
+                  </label>
+                  <label className="flex cursor-pointer items-center gap-2 rounded-lg bg-ink-900 px-3 py-1.5 text-neutral-300">
+                    <input type="checkbox" checked={draft.git} onChange={e => setDraft({ ...draft, git: e.target.checked })} className="accent-accent-400" />
+                    Git
                   </label>
                 </div>
               )}

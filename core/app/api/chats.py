@@ -23,6 +23,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.concurrency import run_in_threadpool
 
+from app.api.git import credential as git_credential
 from app.api.projects import _default_workspace, _owned_project, _project_root
 from app.config import get_settings
 from app.db import get_session, get_sessionmaker
@@ -44,6 +45,7 @@ from app.schemas.chat import (
 )
 from app.schemas.job import JobOut
 from app.services import (
+    agent_git,
     audit,
     code_runner,
     design_gen,
@@ -52,6 +54,7 @@ from app.services import (
     jobs,
     project_agent,
     provider_client,
+    sandbox,
     trash,
 )
 from app.services.auth import get_current_user
@@ -73,6 +76,11 @@ _TOOL_LABELS = {
     "delete_file": "Удаление",
     "run_command": "Команда",
     "run_code": "Запуск программы",
+    "git_status": "Git: статус",
+    "git_log": "Git: история",
+    "git_diff": "Git: изменения",
+    "git_commit": "Git: коммит",
+    "git_push": "Git: пуш",
 }
 
 router = APIRouter(prefix="/chats", tags=["chats"])
@@ -305,6 +313,8 @@ async def send_message(
                         meta={"path": change["path"]},
                     )
                 await session.commit()
+            if change and chat.project_id:
+                sandbox.preview_touch(user.id, chat.project_id)  # запущенное превью подхватит правку
 
         async def events():
             if root:
@@ -312,6 +322,7 @@ async def send_message(
                     provider, key, model, payload, root, permissions,
                     extra=await run_in_threadpool(project_agent.project_rules, root),
                     runner=code_runner.Runner(user.id, chat.project_id, root),
+                    git=await _git_agent(maker, user.id, root),
                 ):
                     yield event
             else:
@@ -368,10 +379,25 @@ async def send_message(
     )
 
 
-async def _audit_run(maker, owner_id: str, project_id: str, tool: dict) -> None:
-    """Каждый запуск кода агентом — в аудит: что выполнено и с каким итогом."""
+async def _git_agent(maker, owner_id: str, root: str) -> agent_git.GitAgent:
+    """Git проекта от имени пользователя: он — автор коммитов, его токены — для пуша."""
     async with maker() as session:
-        await audit.record(session, actor=owner_id, action="project.agent.run", target=project_id,
+        user = await session.get(User, owner_id)
+        author = (user.display_name or user.email.split("@")[0]) if user else "Layla"
+        email = user.email if user else "layla@localhost"
+
+    async def credential(url: str | None):
+        async with maker() as session:
+            return await git_credential(session, owner_id, url)
+
+    return agent_git.GitAgent(root, author, email, credential)
+
+
+async def _audit_run(maker, owner_id: str, project_id: str, tool: dict) -> None:
+    """Каждый запуск кода и git-действие агента — в аудит: что выполнено и с каким итогом."""
+    action = "project.agent.git" if tool["name"] in agent_git.GIT_TOOLS else "project.agent.run"
+    async with maker() as session:
+        await audit.record(session, actor=owner_id, action=action, target=project_id,
                            meta={"tool": tool["name"], "command": (tool.get("command") or "")[:500],
                                  "exit_code": tool.get("exit_code"), "error": tool.get("error")})
         await session.commit()
@@ -484,6 +510,7 @@ async def rollback_to(
     await audit.record(session, actor=user.id, action="chat.rollback", target=chat_id,
                        meta={"message_id": message_id, "paths": paths})
     await session.commit()
+    sandbox.preview_touch(user.id, project.id)
     return RollbackOut(restored=paths, messages=rolled)
 
 
@@ -704,9 +731,10 @@ async def run_chat(
                 # а не отбрасывается. Не вышло — ниже просто уйдут последние сообщения.
                 messages = await _compact_before_turn(h, maker, chat_id, prov, key, model, caps) or messages
             runner = code_runner.Runner(owner_id, project_id, root)
+            git = await _git_agent(maker, owner_id, root)
             async for event in project_agent.run(prov, key, model, messages, root, permissions,
                                                  mode=mode, approve=approve, caps=caps, extra=extra,
-                                                 runner=runner):
+                                                 runner=runner, git=git):
                 if "delta" in event:
                     full.append(event["delta"])
                 elif "retract" in event:
@@ -767,7 +795,10 @@ async def run_chat(
                             await h.step(f"{label}: {target}{suffix}")
                         # В аудит — только применённые изменения, не превью на подтверждение.
                         await persist(tool.get("change") if tool["status"] == "done" else None)
-                        if tool["name"] in code_runner.RUN_TOOLS and tool["status"] in ("done", "error"):
+                        if tool.get("change") and tool["status"] == "done":
+                            sandbox.preview_touch(owner_id, project_id)  # запущенное превью подхватит правку
+                        if ((tool["name"] in code_runner.RUN_TOOLS or tool["name"] in agent_git.GIT_MUTATING)
+                                and tool["status"] in ("done", "error")):
                             await _audit_run(maker, owner_id, project_id, tool)
                 if time.monotonic() - last_persist >= 0.7:
                     await persist()

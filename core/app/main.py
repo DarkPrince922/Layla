@@ -20,6 +20,7 @@ from app.api import (
     designs,
     engagements,
     findings,
+    git,
     health,
     intelligence,
     jobs,
@@ -37,6 +38,8 @@ from app.api import (
     trash,
 )
 from app.config import get_settings
+from app.security.origin import OriginGuard
+from app.services.preview import PreviewGateway
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 
@@ -106,6 +109,11 @@ if not settings.is_prod:
         allow_headers=["*"],
     )
 
+# Изменяющие запросы к API — только со страниц самой Лейлы (не с превью приложений).
+app.add_middleware(OriginGuard, extra=() if settings.is_prod else ("http://localhost:3000",))
+# Адрес превью (отдельный порт Caddy) целиком принадлежит приложению пользователя.
+app.add_middleware(PreviewGateway)
+
 # All routes are served under /api (Caddy routes /api/* to core).
 api_prefix = "/api"
 app.include_router(health.router, prefix=api_prefix)
@@ -117,6 +125,7 @@ app.include_router(models.router, prefix=api_prefix)
 app.include_router(chats.router, prefix=api_prefix)
 app.include_router(projects.router, prefix=api_prefix)
 app.include_router(sandbox.router, prefix=api_prefix)
+app.include_router(git.router, prefix=api_prefix)
 app.include_router(designs.router, prefix=api_prefix)
 app.include_router(jobs.router, prefix=api_prefix)
 app.include_router(knowledge.router, prefix=api_prefix)

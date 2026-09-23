@@ -6,10 +6,10 @@ from pydantic import BaseModel, Field
 
 from app.models.enums import PersonaKind
 
-# Через редактор ролей меняется только доступ к файлам проекта и запуск кода в песочнице.
+# Через редактор ролей меняются доступ к файлам проекта, запуск кода в песочнице и Git.
 # Остальные права (venue.exec, intel.lookup и т. п.) и HITL задаются встроенными ролями и
 # не редактируются — так настройка роли не может ослабить проверки пентеста/OSINT.
-FILE_TOOLS = ("files.read", "files.write", "code.run")
+FILE_TOOLS = ("files.read", "files.write", "code.run", "repo.git")
 Mode = Literal["auto", "confirm", "plan", "review"]
 
 
@@ -44,6 +44,6 @@ class PersonaUpdate(BaseModel):
     instructions: str | None = Field(default=None, max_length=20_000)
     icon: str | None = Field(default=None, max_length=64)
     color: str | None = Field(default=None, max_length=32)
-    allowed_tools: list[str] | None = None  # только files.* и code.run; у встроенных — игнор
+    allowed_tools: list[str] | None = None  # files.*, code.run, repo.git; у встроенных — игнор
     default_model: str | None = Field(default=None, max_length=200)
     default_mode: Mode | None = None

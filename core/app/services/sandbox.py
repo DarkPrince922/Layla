@@ -9,6 +9,7 @@ Piston — отдельный изолированный запуск прогр
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
@@ -317,3 +318,102 @@ def _piston_error(response: httpx.Response, fallback: str) -> str:
     except ValueError:
         message = None
     return f"{fallback}: {message}" if isinstance(message, str) else fallback
+
+
+# --- превью приложения: долгоживущий процесс в песочнице ------------------------
+
+_previews: dict[tuple[str, str], str] = {}  # (владелец, проект) -> корень проекта, пока превью живо
+_pending_sync: dict[tuple[str, str], asyncio.Task] = {}
+
+
+def _service_url(owner_id: str, project_id: str, tail: str = "") -> str:
+    return f"/workspaces/{_owner_key(owner_id)}/{project_id}/service{tail}"
+
+
+async def _service_call(method: str, url: str, *, json_body: dict | None = None, params: dict | None = None,
+                        timeout: float = 60) -> dict:
+    async with _client(httpx.Timeout(timeout, connect=5)) as client:
+        try:
+            response = await client.request(method, url, json=json_body, params=params)
+        except httpx.HTTPError as exc:
+            raise SandboxError(f"Песочница не отвечает: {type(exc).__name__}") from exc
+    if response.status_code >= 400:
+        raise SandboxError(_detail(response, "Песочница отказала"))
+    return response.json()
+
+
+async def preview_start(owner_id: str, project_id: str, root: str, command: str | None = None) -> dict:
+    """Синхронизировать файлы и запустить превью (dev-сервер или статический сервер)."""
+    await sync(owner_id, project_id, root)
+    data = await _service_call("POST", _service_url(owner_id, project_id), json_body={"command": command})
+    _previews[(owner_id, project_id)] = root
+    return data
+
+
+async def preview_status(owner_id: str, project_id: str, *, logs: bool = False, root: str | None = None) -> dict:
+    """Состояние превью. С root живое превью снова отслеживается для синхронизации правок —
+    например, после перезапуска ядра, пока превью в песочнице продолжало работать."""
+    data = await _service_call("GET", _service_url(owner_id, project_id), params={"logs": logs} if logs else None,
+                               timeout=15)
+    if data.get("state") not in ("starting", "running", "no_port"):
+        _previews.pop((owner_id, project_id), None)
+    elif root is not None:
+        _previews[(owner_id, project_id)] = root
+    return data
+
+
+async def preview_stop(owner_id: str, project_id: str) -> dict:
+    _previews.pop((owner_id, project_id), None)
+    return await _service_call("DELETE", _service_url(owner_id, project_id), timeout=30)
+
+
+async def preview_fetch(owner_id: str, project_id: str, path: str = "/") -> dict:
+    return await _service_call("GET", _service_url(owner_id, project_id, "/fetch"), params={"path": path},
+                               timeout=60)
+
+
+async def preview_wait(owner_id: str, project_id: str, timeout: float = 150) -> dict:
+    """Дождаться, пока превью начнёт отвечать (или упадёт)."""
+    deadline = time.monotonic() + timeout
+    status: dict = {}
+    while time.monotonic() < deadline:
+        status = await preview_status(owner_id, project_id, logs=True)
+        if status.get("state") != "starting":
+            return status
+        await asyncio.sleep(1)
+    return status
+
+
+def preview_touch(owner_id: str, project_id: str) -> None:
+    """Файлы проекта изменились — если превью запущено, донести их в песочницу (с задержкой)."""
+    key = (owner_id, project_id)
+    root = _previews.get(key)
+    if root is None:
+        return
+    pending = _pending_sync.get(key)
+    if pending is not None and not pending.done():
+        pending.cancel()
+
+    async def later() -> None:
+        await asyncio.sleep(0.8)  # пачка правок подряд — одна синхронизация
+        try:
+            await sync(owner_id, project_id, root)
+        except SandboxError as exc:
+            logger.info("preview sync failed: %s", exc)
+
+    _pending_sync[key] = asyncio.get_running_loop().create_task(later())
+
+
+def sandbox_socket() -> str | None:
+    """Путь unix-сокета песочницы (для WebSocket-прокси) или None, если песочница по http."""
+    url = get_settings().sandbox_url.strip()
+    return url[len("unix://"):] if url.startswith("unix://") else None
+
+
+def sandbox_http_base() -> str:
+    url = get_settings().sandbox_url.strip()
+    return "http://sandbox" if url.startswith("unix://") else url.rstrip("/")
+
+
+def preview_path(owner_id: str, project_id: str, kind: str, path: str) -> str:
+    return _service_url(owner_id, project_id, f"/{kind}/{path.lstrip('/')}")

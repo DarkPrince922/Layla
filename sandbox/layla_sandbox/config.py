@@ -42,3 +42,10 @@ CA_ENV = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "PIP_CERT", "NODE_EXTRA_CA_CERT
 # Необязательные языки ставятся в образ флагами сборки; их пути — в PATH команд.
 EXTRA_PATH = ("/usr/local/go/bin", "/opt/cargo/bin")
 BASE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Долгоживущие процессы (превью приложения): простой и срок жизни, лимиты числа.
+SERVICE_IDLE = _int("SANDBOX_SERVICE_IDLE", 30 * 60)
+SERVICE_LIFETIME = _int("SANDBOX_SERVICE_LIFETIME", 6 * 60 * 60)
+SERVICE_START_WAIT = _int("SANDBOX_SERVICE_START_WAIT", 180)
+MAX_SERVICES = _int("SANDBOX_MAX_SERVICES", 8)
+MAX_SERVICES_PER_USER = _int("SANDBOX_MAX_SERVICES_PER_USER", 3)

@@ -4,10 +4,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import {
-  ArrowLeft, ArrowRight, ChevronDown, Code2, Columns2, Eye, History, Loader2, Monitor, Palette, Smartphone,
-  Sparkles, Tablet, Trash2,
+  ArrowLeft, ArrowRight, ChevronDown, Code2, Columns2, Eye, History, Loader2, Monitor, MousePointerClick, Palette,
+  Smartphone, Sparkles, Tablet, Trash2,
 } from "lucide-react";
 import { ChatPanel } from "@/components/ChatPanel";
+import { PickBar, PickFrame } from "@/components/PickBar";
+import { pickMessage, type PickedElement } from "@/lib/pick";
 import { DesignBriefForm } from "@/components/DesignBriefForm";
 import { CodeStream, DesignLive, isActive } from "@/components/DesignLive";
 import { api, type Chat, type Design, type FileContent, type FileNode, type Job, type ModelInfo, type Project } from "@/lib/api";
@@ -39,6 +41,10 @@ export function DesignDomain() {
   // Генерация по брифу, которую показываем вживую; watching=false — пользователь смотрит другое.
   const [liveJobId, setLiveJobId] = useState<string | null>(null);
   const [watching, setWatching] = useState(false);
+  // Правка по клику: режим выбора и выбранный в превью элемент.
+  const [picking, setPicking] = useState(false);
+  const [pickedEl, setPickedEl] = useState<PickedElement | null>(null);
+  const [pickBusy, setPickBusy] = useState(false);
 
   const { data: models = [] } = useQuery({ queryKey: ["models"], queryFn: () => api.get<ModelInfo[]>("/models") });
   const { data: designs = [], isSuccess: designsLoaded } = useQuery({ queryKey: ["designs"], queryFn: () => api.get<Design[]>("/designs") });
@@ -210,6 +216,31 @@ export function DesignDomain() {
     } finally { setBusy(false); }
   }
 
+  function stopPicking() { setPicking(false); setPickedEl(null); }
+  /** Задача по выбранному элементу — в дизайн-чат. Версию по брифу сначала копируем в новый чат. */
+  async function sendPick(request: string) {
+    if (!pickedEl) return;
+    setPickBusy(true);
+    try {
+      const text = pickMessage(pickedEl, request, version ? "index.html" : page?.path);
+      if (version) {
+        const chat = await api.post<Chat>(`/designs/${version.id}/chat`);
+        await qc.invalidateQueries({ queryKey: ["chats"] });
+        window.dispatchEvent(new CustomEvent("layla:open-chat", { detail: chat }));
+        window.dispatchEvent(new CustomEvent("layla:chat-send", { detail: { domain: "design", text, chat_id: chat.id } }));
+        setSource({ kind: "chat" });
+      } else {
+        window.dispatchEvent(new CustomEvent("layla:chat-send", { detail: { domain: "design", text } }));
+      }
+      stopPicking();
+      setError(null);
+      // На телефоне превью и чат — разные экраны: показываем чат, где агент уже работает.
+      if (window.matchMedia?.("(max-width: 760px)").matches) setPane("chat");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось отправить правку");
+    } finally { setPickBusy(false); }
+  }
+
   /** Передать увиденное в домен «Код»: там файловое дерево, редактор и агент. */
   async function openInCode() {
     setBusy(true);
@@ -312,6 +343,13 @@ export function DesignDomain() {
                 )}
               </div>
             </details>
+            {view !== "code" && html && !showLive && (
+              <button onClick={() => (picking || pickedEl ? stopPicking() : setPicking(true))} aria-pressed={picking || !!pickedEl}
+                title="Нажмите на элемент в превью и опишите, что в нём изменить"
+                className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs ${picking || pickedEl ? "bg-accent-500/25 text-accent-100" : "bg-ink-900 text-neutral-300 hover:bg-ink-800"}`}>
+                <MousePointerClick className="h-3.5 w-3.5" />Правка по клику
+              </button>
+            )}
             {view !== "code" && (
               <div className="ml-auto hidden gap-1 sm:flex">
                 <ToolbarBtn label="Компьютер" active={bp === "desktop"} onClick={() => setBp("desktop")}><Monitor className="h-3.5 w-3.5" /></ToolbarBtn>
@@ -344,7 +382,7 @@ export function DesignDomain() {
             ) : view === "preview" ? (
               <div className="mx-auto h-full bg-white" style={{ width: BREAKPOINTS[bp], maxWidth: "100%" }}>
                 {/* Изолированный sandbox: скрипты выполняются, доступа к родителю нет. */}
-                <iframe title="preview" sandbox="allow-scripts" srcDoc={html} className="h-full w-full border-0" />
+                <PickFrame html={html} picking={picking} onPicked={el => { setPickedEl(el); setPicking(false); }} onCancel={stopPicking} />
               </div>
             ) : view === "code" ? (
               <pre className="whitespace-pre-wrap text-xs leading-relaxed text-neutral-300"><code>{html}</code></pre>
@@ -353,13 +391,14 @@ export function DesignDomain() {
                 <div className="min-h-0 border-b border-ink-700/60 lg:border-b-0 lg:border-r"><CodeStream code={html} live={false} /></div>
                 <div className="min-h-0 p-3">
                   <div className="mx-auto h-full bg-white" style={{ width: BREAKPOINTS[bp], maxWidth: "100%" }}>
-                    <iframe title="preview" sandbox="allow-scripts" srcDoc={html} className="h-full w-full border-0" />
+                    <PickFrame html={html} picking={picking} onPicked={el => { setPickedEl(el); setPicking(false); }} onCancel={stopPicking} />
                   </div>
                 </div>
               </div>
             )}
           </div>
           )}
+          {!showLive && <PickBar picking={picking} element={pickedEl} onSend={sendPick} onCancel={stopPicking} busy={pickBusy} />}
         </div>
       </div>
     </div>

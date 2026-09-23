@@ -20,6 +20,9 @@
 		-Server
 	}
 
+	# Заголовок превью ставит только сайт превью ниже; снаружи его подделать нельзя.
+	request_header -X-Layla-Preview
+
 	# API + WebSocket -> backend core
 	handle /api/* {
 		reverse_proxy layla-core:8000
@@ -34,5 +37,26 @@
 	handle {
 		encode gzip
 		reverse_proxy layla-frontend:3000
+	}
+}
+
+# =====================================================================
+# Превью приложений из песочницы — отдельный адрес (другой порт того же хоста).
+# Всё, что приходит сюда, принадлежит приложению пользователя: Layla сама здесь
+# недоступна, а ядро отличает такие запросы по заголовку X-Layla-Preview.
+#   HTTP:  :8090 (по умолчанию) — любой хост на порту 8090
+#   HTTPS: <домен>:8090, напр. example.com:8090 (Caddy возьмёт тот же сертификат)
+# =====================================================================
+
+{$LAYLA_PREVIEW_ADDRESS::8090} {
+	header {
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+	reverse_proxy layla-core:8000 {
+		header_up X-Layla-Preview 1
+		# Потоковые ответы (SSE, стриминг) приложения — без буферизации.
+		flush_interval -1
 	}
 }

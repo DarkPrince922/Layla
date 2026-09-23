@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -14,7 +14,7 @@ from app.db import get_session, get_sessionmaker
 from app.models.job import Job
 from app.models.user import User
 from app.schemas.job import JobOut
-from app.services import audit, code_runner, jobs, sandbox
+from app.services import audit, code_runner, jobs, preview, sandbox
 from app.services.auth import get_current_user, require_admin
 
 router = APIRouter(tags=["sandbox"])
@@ -170,3 +170,71 @@ async def reset_project_sandbox(
     await audit.record(session, actor=user.id, action="project.sandbox.reset", target=project_id)
     await session.commit()
     return {"ok": True}
+
+
+# --- превью приложения -----------------------------------------------------------
+
+class PreviewIn(BaseModel):
+    command: str | None = Field(default=None, max_length=4000)
+
+
+def _with_url(request: Request, owner_id: str, project_id: str, data: dict) -> dict:
+    """Ссылка на превью для браузера: отдельный адрес, вход по подписанному токену."""
+    scheme = request.headers.get("x-forwarded-proto", request.url.scheme).split(",")[0].strip()
+    host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "localhost").split(",")[0].strip()
+    base = preview.base_url(scheme, host)
+    out = {**data, "base": base}
+    nonce = data.pop("nonce", None)
+    out.pop("nonce", None)
+    if nonce and data.get("state") in ("starting", "running"):
+        out["url"] = preview.open_url(base, preview.make_token(owner_id, project_id, nonce))
+    return out
+
+
+@router.post("/projects/{project_id}/preview")
+async def start_preview(
+    project_id: str,
+    request: Request,
+    body: PreviewIn | None = None,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Запустить приложение проекта в песочнице и получить ссылку на живое превью."""
+    project = await _owned_project(session, user, project_id)
+    command = (body.command if body else None) or None
+    try:
+        data = await sandbox.preview_start(user.id, project_id, _project_root(project), command)
+    except sandbox.SandboxError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await audit.record(session, actor=user.id, action="project.preview.start", target=project_id,
+                       meta={"command": (data.get("command") or "")[:500]})
+    await session.commit()
+    return _with_url(request, user.id, project_id, data)
+
+
+@router.get("/projects/{project_id}/preview")
+async def preview_state(
+    project_id: str,
+    request: Request,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    project = await _owned_project(session, user, project_id)
+    try:
+        data = await sandbox.preview_status(user.id, project_id, logs=True, root=_project_root(project))
+    except sandbox.SandboxError as exc:
+        return {"state": "unavailable", "error": str(exc)}
+    return _with_url(request, user.id, project_id, data)
+
+
+@router.delete("/projects/{project_id}/preview")
+async def stop_preview(
+    project_id: str,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    await _owned_project(session, user, project_id)
+    try:
+        return await sandbox.preview_stop(user.id, project_id)
+    except sandbox.SandboxError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 
 from app.schemas.project import FileWrite
-from app.services import code_runner, files, provider_client, provider_errors, tool_chat
+from app.services import agent_git, code_runner, files, provider_client, provider_errors, tool_chat
 
 # Страховочные пределы, а не рабочие: на обычных задачах агент до них не доходит.
 # Достигнув предела, агент останавливается мягко (ответ сохраняется как обычный),
@@ -281,6 +281,15 @@ def preview(root: str, name: str, arguments: dict) -> dict | None:
 
 
 NO_TOOLS_NOTE = "\nFile tools are unavailable for this model: answer directly, without tool calls."
+PREVIEW_NOTE = (
+    "\nFor a web app or site, start it with start_preview so the user can open it live, and check it "
+    "with check_preview (status, title, server logs) after changes."
+)
+GIT_NOTE = (
+    "\nGit: inspect with git_status / git_log / git_diff. Commit with git_commit when the user asks "
+    "or when they asked you to keep history; write short imperative messages. Push with git_push only "
+    "when the user asks — they approve every push."
+)
 NO_RUN_NOTE = (
     "\nYou cannot execute commands, install packages, or verify runtime behavior here; do not claim "
     "tests ran."
@@ -550,12 +559,14 @@ async def _turn(provider, key, model, conversation, available, caps, anchor=None
 async def run(
     provider, key, model: str, messages: list[dict], root: str, permissions=None,
     *, mode: str = "auto", approve=None, caps: dict | None = None, extra: str = "", runner=None,
+    git=None,
 ):
     """approve(event) -> "approve" | "reject" | "approve_all" — только для режима confirm.
 
     caps — известные ограничения модели (меняются по ходу работы, см. _turn).
     extra — дополнение к системному промпту: указания домена, правила проекта из LAYLA.md.
     runner — запуск кода (code_runner.Runner): без него инструментов run_* нет.
+    git — Git проекта (agent_git.GitAgent): без него инструментов git_* нет.
     """
     caps = caps if caps is not None else {}
     available = permitted_tools(permissions)
@@ -565,16 +576,21 @@ async def run(
     run_specs = []
     if runner is not None and code_runner.can_run(permissions) and mode != "plan":
         run_specs = await runner.tools()
-    available = available + run_specs
+    git_specs = agent_git.specs(mode) if git is not None and agent_git.can_use(permissions) else []
+    available = available + run_specs + git_specs
     allowed_names = {t["function"]["name"] for t in available}
     run_note = NO_RUN_NOTE
     if "run_command" in allowed_names:
         code = (", and run_code runs standalone programs in other languages"
                 if "run_code" in allowed_names else "")
         run_note = RUN_NOTE.format(code=code)
+        if "start_preview" in allowed_names:
+            run_note += PREVIEW_NOTE
     elif "run_code" in allowed_names:
         run_note = ("\nrun_code compiles and runs standalone programs in an isolated runner; use it "
                     "to check code where it helps. You cannot install packages here.")
+    if git_specs:
+        run_note += GIT_NOTE
     prompt = (
         SYSTEM_PROMPT
         + run_note
@@ -636,6 +652,20 @@ async def run(
                     "path": arguments.get("path") if isinstance(arguments.get("path"), str) else "",
                     "status": "running",
                 }
+                if name in agent_git.GIT_TOOLS and name in allowed_names:
+                    event["command"] = agent_git.label(name, arguments)
+                    outcome = None
+                    async for item in _git_tool(git, name, arguments, event, ask, approve):
+                        if "ask_off" in item:
+                            ask = None
+                        elif "outcome" in item:
+                            outcome = item["outcome"]
+                        else:
+                            yield item
+                    conversation.append({"role": "tool", "tool_call_id": call["id"],
+                                         "content": json.dumps(outcome, ensure_ascii=False),
+                                         "is_error": "error" in outcome})
+                    continue
                 if name in code_runner.RUN_TOOLS and name in allowed_names:
                     event["command"] = code_runner.label(name, arguments)
                     outcome = None
@@ -711,7 +741,7 @@ async def _run_code_tool(runner, name: str, arguments: dict, event: dict, ask):
         yield {"tool": {**event, "status": "error", "error": problem}}
         yield {"outcome": {"error": problem}}
         return
-    if ask is not None:
+    if ask is not None and name in code_runner.NEEDS_APPROVAL:
         pending = {**event, "status": "pending"}
         yield {"tool": pending}
         decision = await ask(pending)
@@ -732,7 +762,7 @@ async def _run_code_tool(runner, name: str, arguments: dict, event: dict, ask):
             elif "result" in item:
                 result = item["result"]
     else:
-        result = await runner.code(args)
+        result = await runner.call(name, args)
     shown = result.pop("shown", None)
     final = {**event, "status": "error" if "error" in result else "done"}
     for key in ("exit_code", "duration_s", "timed_out", "signal", "error"):
@@ -740,5 +770,58 @@ async def _run_code_tool(runner, name: str, arguments: dict, event: dict, ask):
             final[key] = result[key]
     if shown is not None or result.get("output"):
         final["output"] = shown if shown is not None else result.get("output")
+    yield {"tool": final}
+    yield {"outcome": result}
+
+
+def _git_summary(name: str, result: dict) -> str:
+    """Короткий текст для карточки в чате."""
+    if "error" in result:
+        return ""
+    if name == "git_status":
+        if not result.get("initialized"):
+            return "Проект не под Git"
+        changes = result.get("changes") or []
+        lines = [f"ветка {result.get('branch') or '—'} · изменений: {len(changes)}"
+                 + (f" · впереди на {result['ahead']}" if result.get("ahead") else "")]
+        lines += [f"{c['code'] or '?'} {c['path']}" for c in changes[:30]]
+        return "\n".join(lines)
+    if name == "git_log":
+        return "\n".join(f"{c['short']} {c['message']}" for c in result.get("commits", []))
+    if name == "git_diff":
+        return result.get("diff") or "Изменений нет"
+    if name == "git_commit":
+        commit = result.get("commit") or {}
+        return f"{commit.get('short', '')} {commit.get('message', '')}\n{commit.get('stat', '')}".strip()
+    return result.get("output") or ""
+
+
+async def _git_tool(git, name: str, arguments: dict, event: dict, ask, approve):
+    """git_*: подтверждение (пуш — всегда), выполнение, карточка и результат для модели."""
+    always = name in agent_git.ALWAYS_ASK
+    if always or (ask is not None and name in agent_git.GIT_MUTATING):
+        decider = approve if always else ask
+        if decider is None:
+            problem = "Пуш требует подтверждения пользователя, а в этом чате его запросить нельзя."
+            yield {"tool": {**event, "status": "error", "error": problem}}
+            yield {"outcome": {"error": problem}}
+            return
+        pending = {**event, "status": "pending"}
+        yield {"tool": pending}
+        decision = await decider(pending)
+        if decision == "approve_all" and not always:
+            yield {"ask_off": True}
+        elif decision not in ("approve", "approve_all"):
+            yield {"tool": {**event, "status": "rejected", "error": "Отклонено пользователем"}}
+            yield {"outcome": {"error": "Пользователь отклонил это действие."}}
+            return
+    yield {"tool": event}
+    result = await git.call(name, arguments)
+    final = {**event, "status": "error" if "error" in result else "done"}
+    if "error" in result:
+        final["error"] = result["error"]
+    summary = _git_summary(name, result)
+    if summary:
+        final["output"] = summary[:40_000]
     yield {"tool": final}
     yield {"outcome": result}

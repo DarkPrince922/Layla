@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Send, Bot, Plus, Loader2, Download, Square, Trash2, Eraser, Zap, ShieldCheck, ClipboardList, ChevronDown, Pencil, Check, Search, FoldVertical, Undo2, Play, SearchCheck, BookMarked, ListChecks, CircleCheck, CircleDot, Circle, X, type LucideIcon } from "lucide-react";
-import { ApiError, RUN_TOOLS, api, downloadProject, type FileContent, type Persona, type ModelInfo, type Chat, type ChatDetail, type FileChange, type Job, type ToolEvent } from "@/lib/api";
+import { ApiError, GIT_TOOLS, RUN_TOOLS, api, downloadProject, type FileContent, type Persona, type ModelInfo, type Chat, type ChatDetail, type FileChange, type Job, type ToolEvent } from "@/lib/api";
 import { useAuth } from "@/store/auth";
 import { FileDiff } from "@/components/FileDiff";
 import { RunCard } from "@/components/RunOutput";
@@ -168,9 +168,41 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
       const key = `${message.id}:${tool.id}`;
       // Превью на подтверждение — ещё не изменение: сообщаем только о применённых.
       if (tool.change && tool.status === "done" && !applied.current.has(key)) { applied.current.add(key); onFileChange?.(tool.change); }
+      // Агент запустил или остановил превью — панель «Превью» узнаёт сразу, без ожидания опроса.
+      if ((tool.name === "start_preview" || tool.name === "stop_preview") && tool.status !== "running" && tool.status !== "pending" && !applied.current.has(key)) {
+        applied.current.add(key);
+        qc.invalidateQueries({ queryKey: ["preview", projectId] });
+      }
     }
     if (scroll.current && scroll.current.scrollHeight - scroll.current.scrollTop - scroll.current.clientHeight < 300) scroll.current.scrollTo({ top: scroll.current.scrollHeight });
-  }, [messages, onFileChange]);
+  }, [messages, onFileChange, projectId, qc]);
+
+  // Задача извне (правка по клику в превью): отправляется, когда нужный чат открыт и свободен.
+  const queued = useRef<{ text: string; chat?: string } | null>(null);
+  const [queueTick, setQueueTick] = useState(0);
+  useEffect(() => {
+    const listen = (event: Event) => {
+      const detail = (event as CustomEvent<{ domain?: string; text?: string; chat_id?: string; project_id?: string }>).detail;
+      if (!detail?.text || detail.domain !== domain || (projectId && detail.project_id && detail.project_id !== projectId)) return;
+      queued.current = { text: detail.text, chat: detail.chat_id };
+      setQueueTick(tick => tick + 1);
+    };
+    window.addEventListener("layla:chat-send", listen);
+    return () => window.removeEventListener("layla:chat-send", listen);
+  }, [domain, projectId]);
+  useEffect(() => {
+    const next = queued.current;
+    if (!next || !ready || (next.chat && next.chat !== chatId) || loading || sending) return;
+    queued.current = null;
+    if (running) {
+      setInput(next.text);
+      setError("Агент ещё работает над прошлой задачей — новая подставлена в поле ввода, отправьте её, когда он закончит.");
+      return;
+    }
+    send({ text: next.text, mode });
+    // send читает актуальное состояние чата; запускаемся по новой задаче и смене готовности.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queueTick, ready, chatId, loading, running, sending]);
 
   async function send(override?: { text: string; mode: Mode }) {
     const content = (override?.text ?? input).trim();
@@ -362,7 +394,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
         {m.meta?.reasoning && <details className="mb-3 rounded-lg border border-ink-700 p-3"><summary className="cursor-pointer text-xs text-neutral-400">Размышление</summary><p className="mt-3 whitespace-pre-wrap break-words text-xs leading-relaxed text-neutral-400">{m.meta.reasoning}</p></details>}
         {!!m.meta?.todos?.length && <Todos items={m.meta.todos} />}
         <div className="whitespace-pre-wrap break-words text-sm leading-7">{m.content}</div>
-        {m.meta?.tools?.map(tool => <div key={tool.id} className="mt-3">{tool.status === "pending" ? <Approval tool={tool} active={approval?.id === tool.id} busy={deciding} onDecide={decide} /> : tool.status === "rejected" ? <p className="rounded-lg border border-ink-700 p-3 text-xs text-neutral-400">Отклонено вами · <span className="break-all font-mono">{tool.command || tool.path}</span></p> : RUN_TOOLS.has(tool.name) ? <RunCard tool={tool} /> : tool.change && tool.status === "done" ? <FileDiff change={tool.change} onOpen={onOpenFile} /> : <div className={`rounded-lg border p-3 text-xs ${tool.status === "error" ? "border-red-500/30 text-red-300" : "border-ink-700 text-neutral-400"}`}><span>{tool.status === "running" ? "Выполняется" : tool.status === "done" ? "Готово" : "Ошибка"} · {tool.name}</span><p className="mt-1 break-all font-mono">{tool.path}</p>{tool.error && <p>{tool.error}</p>}</div>}</div>)}
+        {m.meta?.tools?.map(tool => <div key={tool.id} className="mt-3">{tool.status === "pending" ? <Approval tool={tool} active={approval?.id === tool.id} busy={deciding} onDecide={decide} /> : tool.status === "rejected" ? <p className="rounded-lg border border-ink-700 p-3 text-xs text-neutral-400">Отклонено вами · <span className="break-all font-mono">{tool.command || tool.path}</span></p> : RUN_TOOLS.has(tool.name) || GIT_TOOLS.has(tool.name) ? <RunCard tool={tool} /> : tool.change && tool.status === "done" ? <FileDiff change={tool.change} onOpen={onOpenFile} /> : <div className={`rounded-lg border p-3 text-xs ${tool.status === "error" ? "border-red-500/30 text-red-300" : "border-ink-700 text-neutral-400"}`}><span>{tool.status === "running" ? "Выполняется" : tool.status === "done" ? "Готово" : "Ошибка"} · {tool.name}</span><p className="mt-1 break-all font-mono">{tool.path}</p>{tool.error && <p>{tool.error}</p>}</div>}</div>)}
         {m.meta?.error && <p role="alert" className="mt-3 text-sm text-red-300">{m.meta.error}</p>}
       </article>)}
     </div>
@@ -454,13 +486,16 @@ function RulesDialog({ projectId, onClose }: { projectId: string; onClose: () =>
 function Approval({ tool, active, busy, onDecide }: {
   tool: ToolEvent; active: boolean; busy: boolean; onDecide: (decision: Decision) => void;
 }) {
-  const run = RUN_TOOLS.has(tool.name);
+  const run = RUN_TOOLS.has(tool.name) || GIT_TOOLS.has(tool.name);
+  const question = tool.name === "run_code" ? "Запустить программу?" : tool.name === "run_command" ? "Выполнить команду в песочнице проекта?"
+    : tool.name === "start_preview" ? "Запустить приложение в песочнице для превью?"
+    : tool.name === "git_push" ? "Отправить коммиты в удалённый репозиторий?" : tool.name === "git_commit" ? "Сделать коммит?" : "Применить это изменение?";
   return <div className="rounded-xl border border-amber-400/40 bg-amber-500/5 p-2">
-    <p className="px-2 pt-1 text-xs font-medium text-amber-200">{!active ? "Ожидало подтверждения" : run ? (tool.name === "run_code" ? "Запустить программу?" : "Выполнить команду в песочнице проекта?") : "Применить это изменение?"}</p>
+    <p className="px-2 pt-1 text-xs font-medium text-amber-200">{active ? question : "Ожидало подтверждения"}</p>
     {run ? <pre className="m-2 overflow-x-auto whitespace-pre-wrap break-all rounded-lg bg-ink-950/70 p-3 font-mono text-xs text-neutral-200">{tool.name === "run_command" ? "$ " : ""}{tool.command}</pre>
       : tool.change ? <FileDiff change={tool.change} expanded={active} /> : <p className="p-2 break-all font-mono text-xs text-neutral-400">{tool.name} · {tool.path}</p>}
     {active && <div className="flex flex-wrap gap-2 px-2 pb-1">
-      <button className="primary-button !px-3 !py-1.5 text-xs" disabled={busy} onClick={() => onDecide("approve")}>{run ? "Запустить" : "Применить"}</button>
+      <button className="primary-button !px-3 !py-1.5 text-xs" disabled={busy} onClick={() => onDecide("approve")}>{tool.name === "git_push" ? "Отправить" : tool.name === "git_commit" ? "Закоммитить" : run ? "Запустить" : "Применить"}</button>
       <button className="secondary-button !px-3 !py-1.5 text-xs" disabled={busy} onClick={() => onDecide("reject")}>Отклонить</button>
       <button className="secondary-button !px-3 !py-1.5 text-xs" disabled={busy} onClick={() => onDecide("approve_all")} title="Остальные изменения и запуски этого ответа пройдут без вопросов">{run ? "Разрешить всё" : "Применять всё"}</button>
     </div>}

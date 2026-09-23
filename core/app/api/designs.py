@@ -15,15 +15,17 @@ from starlette.concurrency import run_in_threadpool
 
 from app.config import get_settings
 from app.db import get_session, get_sessionmaker
+from app.models.chat import Chat
 from app.models.design import Design
-from app.models.enums import DesignStack
+from app.models.enums import DesignStack, Domain
 from app.models.job import Job
 from app.models.provider import Provider
 from app.models.user import Project, User, Workspace
+from app.schemas.chat import ChatOut
 from app.schemas.design import DesignCreate, DesignOut
 from app.schemas.job import JobOut
 from app.schemas.project import ProjectOut
-from app.services import audit, design_gen, jobs, project_agent, provider_client
+from app.services import audit, design_gen, jobs, project_agent, provider_client, trash
 from app.services.auth import get_current_user
 from app.services.files import change_file
 
@@ -316,6 +318,50 @@ async def design_to_project(
         await run_in_threadpool(lambda: shutil.rmtree(dest, ignore_errors=True))
         raise HTTPException(status_code=400, detail="Не удалось создать проект из макета") from exc
     return project
+
+
+@router.post("/{design_id}/chat", response_model=ChatOut, status_code=201)
+async def design_to_chat(
+    design_id: str,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> Chat:
+    """Доработать версию в дизайн-чате: копия её файлов становится папкой нового чата.
+
+    Так правка по клику по элементу работает и для версий по брифу: сама версия не
+    меняется, а чат дорабатывает её копию.
+    """
+    design = await session.get(Design, design_id)
+    if design is None or design.owner_id != user.id:
+        raise HTTPException(status_code=404, detail="Дизайн не найден")
+    workspace = await session.scalar(select(Workspace).where(Workspace.owner_id == user.id).limit(1))
+    if workspace is None:
+        raise HTTPException(status_code=400, detail="Нет рабочего пространства")
+    project_id = str(uuid4())
+    base = Path(workspace.projects_dir or get_settings().projects_dir).resolve()
+    dest = base / project_id
+    await run_in_threadpool(lambda: dest.mkdir(parents=True, mode=0o755))
+    try:
+        for item in design.files or []:
+            name = str(item.get("name") or "index.html")
+            await run_in_threadpool(change_file, dest, name, item.get("content") or "", None)
+        brief = design.brief or {}
+        title = f"Правка версии · {brief.get('artifact_type') or design.stack.value}"[:300]
+        project = Project(id=project_id, workspace_id=workspace.id, kind=trash.CHAT_WORKSPACE,
+                          name=f"DESIGN · {title}"[:200], path=str(dest))
+        session.add(project)
+        await session.flush()
+        chat = Chat(owner_id=user.id, domain=Domain.design, title=title, project_id=project_id,
+                    workspace_id=workspace.id)
+        session.add(chat)
+        await audit.record(session, actor=user.id, action="design.to_chat", target=design_id)
+        await session.commit()
+        await session.refresh(chat)
+    except Exception as exc:
+        await session.rollback()
+        await run_in_threadpool(lambda: shutil.rmtree(dest, ignore_errors=True))
+        raise HTTPException(status_code=400, detail="Не удалось открыть версию в чате") from exc
+    return chat
 
 
 @router.delete("", status_code=204)

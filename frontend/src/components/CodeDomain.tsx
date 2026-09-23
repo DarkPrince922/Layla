@@ -12,6 +12,8 @@ import {
   Folder,
   FolderGit2,
   GitBranch,
+  GitCommitHorizontal,
+  MonitorPlay,
   Play,
   Plus,
   Save,
@@ -29,10 +31,12 @@ import { FileTree } from "@/components/FileTree";
 import { FileDiff } from "@/components/FileDiff";
 import { ChatPanel } from "@/components/ChatPanel";
 import { ProjectTerminal, type RunRequest } from "@/components/ProjectTerminal";
+import { GitPanel } from "@/components/GitPanel";
+import { PreviewPanel } from "@/components/PreviewPanel";
 import { confirmAction } from "@/components/ConfirmDialog";
 
 type OpenFile = Omit<FileContent, "sha256"> & { sha256: string | null };
-type Pane = "projects" | "editor" | "chat" | "terminal";
+type Pane = "projects" | "editor" | "chat" | "terminal" | "git" | "preview";
 const button =
   "secondary-button px-3 text-xs";
 
@@ -55,6 +59,9 @@ export function CodeDomain() {
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [runRequest, setRunRequest] = useState<RunRequest | null>(null);
+  // Превью монтируется при первом открытии и дальше живёт (iframe не перезагружается при смене панели).
+  const [previewOpened, setPreviewOpened] = useState(false);
+  const [filesChanged, setFilesChanged] = useState(0);
   const openSequence = useRef(0);
   const dirty =
     !!openFile && (openFile.sha256 === null || draft !== openFile.content);
@@ -75,6 +82,8 @@ export function CodeDomain() {
     }
   }, [projects, projectId, projectKey, refreshingProjects]);
   useEffect(() => { if (projectId) try { localStorage.setItem(projectKey, projectId); } catch {} }, [projectId, projectKey]);
+  useEffect(() => { if (pane === "preview") setPreviewOpened(true); }, [pane]);
+  useEffect(() => { setPreviewOpened(false); setFilesChanged(0); }, [projectId]);
   useEffect(() => {
     const open = (event: Event) => {
       const target = (event as CustomEvent).detail;
@@ -219,6 +228,7 @@ export function CodeDomain() {
           });
       setChange(result);
       setStale(false);
+      setFilesChanged(n => n + 1);
       if (remove) {
         setOpenFile(null);
         setDraft("");
@@ -236,6 +246,7 @@ export function CodeDomain() {
     }
   }
   async function agentChanged(result: FileChange) {
+    setFilesChanged(n => n + 1);
     await qc.invalidateQueries({ queryKey: ["project-files", projectId] });
     if (openFile?.path === result.path) {
       // Preserve drafts; the hash guard prevents an old editor overwriting the agent.
@@ -268,7 +279,7 @@ export function CodeDomain() {
             ["chat", "Чат", MessageCircle],
             ["projects", "Файлы и проекты", Folder],
             ...(openFile ? [["editor", "Редактор", FileCode2] as const] : []),
-            ...(projectId ? [["terminal", "Терминал", SquareTerminal] as const] : []),
+            ...(projectId ? [["preview", "Превью", MonitorPlay] as const, ["terminal", "Терминал", SquareTerminal] as const, ["git", "Git", GitCommitHorizontal] as const] : []),
           ] as const).map(([id, label, Icon]) => <button key={id} aria-pressed={pane === id} onClick={() => setPane(id)} className="segment"><Icon className="hidden h-3.5 w-3.5 sm:block" />{label}</button>)}
         </nav>
         <button onClick={() => { setForm("local"); setPane("projects"); }} aria-label="Новый проект" className="icon-button"><Plus className="h-5 w-5" /></button>
@@ -515,6 +526,17 @@ export function CodeDomain() {
             className={`code-pane code-terminal min-h-0 min-w-0 flex-1 flex-col ${pane === "terminal" ? "code-active" : ""}`}
           >
             <ProjectTerminal key={projectId} projectId={projectId} request={runRequest} />
+          </section>
+        )}
+        {projectId && (pane === "preview" || previewOpened) && (
+          <section className={`code-pane code-preview min-h-0 min-w-0 flex-1 flex-col ${pane === "preview" ? "code-active" : ""}`}>
+            <PreviewPanel key={projectId} projectId={projectId} changed={filesChanged}
+              onPicked={() => { if (window.matchMedia?.("(max-width: 1099px)").matches) setPane("chat"); }} />
+          </section>
+        )}
+        {projectId && pane === "git" && (
+          <section className="code-pane code-terminal code-active min-h-0 min-w-0 flex-1 flex-col">
+            <GitPanel key={projectId} projectId={projectId} onOpenFile={openPath} />
           </section>
         )}
         <section

@@ -205,9 +205,10 @@ class Workspace:
                 "prlimit", f"--nproc={config.NPROC}", f"--fsize={config.FSIZE}",
                 f"--nofile={config.NOFILE}", "--core=0", "--", *argv]
 
-    async def spawn(self, argv: list[str], stdin: bool) -> asyncio.subprocess.Process:
+    async def spawn(self, argv: list[str], stdin: bool, extra_env: dict[str, str] | None = None
+                    ) -> asyncio.subprocess.Process:
         return await asyncio.create_subprocess_exec(
-            *self._wrap(argv), cwd=str(self.path), env=self.env(),
+            *self._wrap(argv), cwd=str(self.path), env={**self.env(), **(extra_env or {})},
             stdin=asyncio.subprocess.PIPE if stdin else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
             start_new_session=True, **self._as_user(),
@@ -228,8 +229,13 @@ class Workspace:
         await proc.communicate()
         return proc.returncode == 0
 
-    async def run(self, command: str, timeout: int, stdin: str | None = None) -> AsyncIterator[dict]:
-        """Выполнить команду bash в рабочей копии: события output (по мере вывода) и exit."""
+    async def run(self, command: str, timeout: int, stdin: str | None = None, *,
+                  cleanup_all: bool = True) -> AsyncIterator[dict]:
+        """Выполнить команду bash в рабочей копии: события output (по мере вывода) и exit.
+
+        По окончании добиваются процессы сеанса команды; cleanup_all=False — только они, а не
+        все процессы пользователя (у него работает превью, его трогать нельзя).
+        """
         started = time.monotonic()
         proc = await self.spawn(["/bin/bash", "-c", command], stdin=stdin is not None)
         feeder = asyncio.create_task(_feed(proc, stdin)) if stdin is not None else None
@@ -273,7 +279,9 @@ class Workspace:
                     await asyncio.wait_for(proc.wait(), 5)
             if feeder is not None:
                 feeder.cancel()
-            await self.kill_all()
+            kill_session(proc.pid)
+            if cleanup_all:
+                await self.kill_all()
         tail = decoder.decode(b"", final=True)
         if tail:
             yield {"type": "output", "data": tail}
@@ -285,6 +293,32 @@ class Workspace:
             "timed_out": timed_out,
             "truncated": truncated,
         }
+
+
+def session_pids(sid: int) -> list[int]:
+    """Процессы сеанса sid (фоновые процессы команды остаются в её сеансе)."""
+    found = []
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/stat") as handle:
+                stat = handle.read()
+            if int(stat[stat.rindex(")") + 2:].split()[3]) == sid:
+                found.append(int(name))
+        except (OSError, ValueError, IndexError):
+            continue
+    return found
+
+
+def kill_session(sid: int, sig: int = signal.SIGKILL) -> None:
+    with suppress(OSError):
+        os.killpg(sid, sig)
+    for pid in session_pids(sid):
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            pass
 
 
 def _killpg(pid: int) -> None:
