@@ -192,7 +192,15 @@ export interface ChatMessage {
   reasoning?: string;
   tools?: ToolEvent[];
   error?: string | null;
-  meta?: { reasoning?: string; tools?: ToolEvent[]; error?: string | null; mode?: "auto" | "confirm" | "plan" };
+  meta?: {
+    reasoning?: string; tools?: ToolEvent[]; error?: string | null; mode?: "auto" | "confirm" | "plan";
+    /** Есть контрольная точка: ход можно откатить. */
+    checkpoint?: boolean;
+    rolled_back?: boolean;
+    /** Сводка сжатой истории (role = system). */
+    kind?: "summary";
+    count?: number;
+  };
 }
 
 export interface ChatDetail extends Chat {

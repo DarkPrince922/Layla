@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Send, Bot, Plus, Loader2, Download, Square, Trash2, Eraser, Zap, ShieldCheck, ClipboardList, ChevronDown, Pencil, Check, Search, type LucideIcon } from "lucide-react";
+import { Send, Bot, Plus, Loader2, Download, Square, Trash2, Eraser, Zap, ShieldCheck, ClipboardList, ChevronDown, Pencil, Check, Search, FoldVertical, Undo2, Play, type LucideIcon } from "lucide-react";
 import { api, downloadProject, type Persona, type ModelInfo, type Chat, type ChatDetail, type FileChange, type Job, type ToolEvent } from "@/lib/api";
 import { useAuth } from "@/store/auth";
 import { FileDiff } from "@/components/FileDiff";
@@ -275,7 +275,29 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
       setError(e instanceof Error ? e.message : "Не удалось очистить историю");
     } finally { setRemoving(false); }
   }
+  /** «Откатить к этой точке»: файлы — как до этого ответа (и всех следующих). */
+  async function rollback(messageId: string) {
+    if (!chatId || running) return;
+    if (!(await confirmAction("Вернуть файлы к состоянию до этого ответа? Изменения этого и всех следующих ответов агента будут отменены. Правки, сделанные вручную после них, тоже перезапишутся.", "Откатить"))) return;
+    setError(null);
+    try {
+      const result = await api.post<{ restored: string[]; messages: number }>(`/chats/${chatId}/messages/${messageId}/rollback`);
+      for (const path of result.restored) onFileChange?.({ path, operation: "edit", diff: "", before_sha256: null, after_sha256: null });
+      await qc.invalidateQueries({ queryKey: ["chat", owner, chatId] });
+    } catch (e) { setError(e instanceof Error ? e.message : "Не удалось откатить изменения"); }
+  }
+  /** «Сжать контекст»: старые сообщения — в сводку, свежие остаются как есть. */
+  async function compact() {
+    if (!chatId || running || sending) return;
+    setError(null);
+    try {
+      await api.post<Job>(`/chats/${chatId}/compact`);
+      await qc.invalidateQueries({ queryKey: ["chat", owner, chatId] });
+    } catch (e) { setError(e instanceof Error ? e.message : "Не удалось сжать контекст"); }
+  }
   const last = messages.at(-1);
+  // Ход прерван (ошибка, остановка, лимит шагов или длины) — можно продолжить с того же места.
+  const interrupted = !running && !sending && last?.role === "assistant" && (!!last.meta?.error || /«продолжай»/.test(last.content.slice(-200)));
   const planReady = !running && !sending && last?.role === "assistant" && last.meta?.mode === "plan" && !last.meta?.error && !!last.content.trim();
   return <div className="chat-panel flex h-full min-h-0 min-w-0 flex-col">
     <div className="relative flex items-center gap-2 border-b border-ink-700/50 px-4 py-3">
@@ -314,6 +336,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
           </div>
         </details>
       )}
+      {chatId && messages.length > 6 && <button aria-label="Сжать контекст" title="Сжать контекст: старые сообщения — в сводку для модели, чтобы разговор мог продолжаться без ограничений" onClick={compact} disabled={running || sending} className="icon-button"><FoldVertical className="h-4 w-4" /></button>}
       {chatId && renaming === null && <button aria-label="Переименовать чат" title="Переименовать" onClick={() => setRenaming(detail.data?.title || "")} className="icon-button"><Pencil className="h-4 w-4" /></button>}
       {detail.data?.project_id && <button onClick={zip} className="icon-button" aria-label="Скачать файлы чата ZIP"><Download className="h-4 w-4" /></button>}
       {chatId && <button aria-label="Удалить чат" title="Удалить чат" onClick={removeChat} disabled={sending || removing || !ready} className="icon-button hover:bg-red-500/15 hover:text-red-300">{removing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}</button>}
@@ -321,8 +344,15 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
     </div>
     <div ref={scroll} className="chat-scroll min-h-0 flex-1 space-y-5 overflow-y-auto p-5">
       {history.isError || detail.isError ? <p role="alert" className="text-red-300">Не удалось загрузить историю. <button onClick={() => { history.refetch(); detail.refetch(); }} className="underline">Повторить</button></p> : !ready || (chatId && detail.isPending) ? <p className="text-sm text-neutral-500">Загрузка истории…</p> : !messages.length && <div className="mx-auto my-12 max-w-sm text-center"><div className="empty-orb mx-auto mb-5"><Bot className="h-7 w-7" /></div><h2 className="text-xl font-semibold">Что сделаем сегодня?</h2><p className="mt-3 text-sm leading-relaxed text-neutral-400">Опишите задачу. Можно переключаться между разделами и создавать новые чаты — работа продолжится, история и файлы сохранятся.</p></div>}
-      {messages.map(m => <article key={m.id} className={`min-w-0 ${m.role === "user" ? "ml-auto max-w-[90%] rounded-2xl bg-accent-500/15 p-4" : "rounded-2xl bg-ink-800/40 p-4"}`}>
-        <p className="mb-2 text-xs font-semibold text-neutral-500">{m.role === "user" ? "Вы" : "Layla"}</p>
+      {messages.map(m => m.meta?.kind === "summary" ? <details key={m.id} className="rounded-xl border border-dashed border-ink-600 px-4 py-2 text-xs text-neutral-400">
+        <summary className="flex cursor-pointer list-none items-center gap-2 [&::-webkit-details-marker]:hidden"><FoldVertical className="h-3.5 w-3.5 shrink-0 text-accent-300" /><span className="flex-1">Контекст сжат · {m.meta.count || "старые"} сообщений выше модель видит как сводку</span><ChevronDown className="h-3.5 w-3.5" /></summary>
+        <p className="mt-2 whitespace-pre-wrap break-words leading-relaxed">{m.content}</p>
+      </details> : <article key={m.id} className={`min-w-0 ${m.role === "user" ? "ml-auto max-w-[90%] rounded-2xl bg-accent-500/15 p-4" : "rounded-2xl bg-ink-800/40 p-4"}`}>
+        <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-neutral-500">
+          <span className="flex-1">{m.role === "user" ? "Вы" : "Layla"}</span>
+          {m.meta?.rolled_back && <span className="rounded-full bg-amber-500/10 px-2 py-0.5 font-normal text-amber-200">Изменения откатены</span>}
+          {m.role === "assistant" && m.meta?.checkpoint && !m.meta.rolled_back && !running && <button onClick={() => rollback(m.id)} title="Вернуть файлы к состоянию до этого ответа" className="flex items-center gap-1 rounded-md px-1.5 py-0.5 font-normal text-neutral-500 hover:bg-ink-700 hover:text-neutral-200"><Undo2 className="h-3.5 w-3.5" />Откатить к этой точке</button>}
+        </div>
         {m.meta?.reasoning && <details className="mb-3 rounded-lg border border-ink-700 p-3"><summary className="cursor-pointer text-xs text-neutral-400">Размышление</summary><p className="mt-3 whitespace-pre-wrap break-words text-xs leading-relaxed text-neutral-400">{m.meta.reasoning}</p></details>}
         <div className="whitespace-pre-wrap break-words text-sm leading-7">{m.content}</div>
         {m.meta?.tools?.map(tool => <div key={tool.id} className="mt-3">{tool.status === "pending" ? <Approval tool={tool} active={approval?.id === tool.id} busy={deciding} onDecide={decide} /> : tool.status === "rejected" ? <p className="rounded-lg border border-ink-700 p-3 text-xs text-neutral-400">Отклонено вами · <span className="break-all font-mono">{tool.path}</span></p> : tool.change && tool.status === "done" ? <FileDiff change={tool.change} onOpen={onOpenFile} /> : <div className={`rounded-lg border p-3 text-xs ${tool.status === "error" ? "border-red-500/30 text-red-300" : "border-ink-700 text-neutral-400"}`}><span>{tool.status === "running" ? "Выполняется" : tool.status === "done" ? "Готово" : "Ошибка"} · {tool.name}</span><p className="mt-1 break-all font-mono">{tool.path}</p>{tool.error && <p>{tool.error}</p>}</div>}</div>)}
@@ -331,6 +361,10 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
     </div>
     {error && <p role="alert" className="mx-5 mb-3 text-sm text-red-300">{error}</p>}
     {job && <div role="status" className="mx-5 mb-3 flex items-center gap-2 text-xs text-neutral-400">{running && <Loader2 className="h-4 w-4 animate-spin" />}<span className="min-w-0 flex-1 break-words">{running ? job.steps.at(-1)?.text || "Задача в очереди" : job.status === "error" ? job.error || "Ошибка выполнения" : job.status === "cancelled" ? "Остановлено" : "Готово"}</span>{running && <button onClick={stop} className="icon-button" aria-label="Остановить задачу"><Square className="h-3 w-3" /></button>}</div>}
+    {interrupted && <div className="mx-5 mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-amber-400/30 bg-amber-500/5 p-3 text-xs">
+      <Play className="h-4 w-4 shrink-0 text-amber-200" /><span className="min-w-0 flex-1">Ход прерван. Уже сделанное сохранено — агент продолжит с того же места.</span>
+      <button className="primary-button !px-3 !py-1.5 text-xs" onClick={() => send({ text: "Продолжи с того места, где остановился.", mode })}>Продолжить</button>
+    </div>}
     {planReady && <div className="mx-5 mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-accent-500/30 bg-accent-500/10 p-3 text-xs">
       <ClipboardList className="h-4 w-4 shrink-0 text-accent-300" /><span className="min-w-0 flex-1">План готов. Выполнить?</span>
       <button className="primary-button !px-3 !py-1.5 text-xs" onClick={() => { pickMode("auto"); send({ text: "Выполни этот план.", mode: "auto" }); }}>Выполнить</button>

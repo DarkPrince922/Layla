@@ -95,6 +95,11 @@ export function DesignDomain() {
     },
     onError: e => setError(e instanceof Error ? e.message : "Ошибка генерации"),
   });
+  const resume = useMutation({
+    mutationFn: (id: string) => api.post<Job>(`/designs/generate/${id}/resume`),
+    onSuccess: next => { setLiveJobId(next.id); setWatching(true); setError(null); qc.invalidateQueries({ queryKey: ["jobs"] }); },
+    onError: e => setError(e instanceof Error ? e.message : "Не удалось продолжить генерацию"),
+  });
   const stop = useMutation({
     mutationFn: (id: string) => api.post<Job>(`/jobs/${id}/cancel`),
     onSettled: () => liveJob.refetch(),
@@ -320,6 +325,7 @@ export function DesignDomain() {
             <div className="min-h-0 flex-1 overflow-hidden bg-ink-950/40">
               <DesignLive job={liveJob.data} view={view} width={BREAKPOINTS[bp]} stopping={stop.isPending}
                 onStop={() => stop.mutate(liveJob.data!.id)}
+                onResume={() => resume.mutate(liveJob.data!.id)} resuming={resume.isPending}
                 onClose={() => { setLiveJobId(null); setWatching(false); }} />
             </div>
           ) : (

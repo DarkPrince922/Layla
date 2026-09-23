@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Brain, ChevronDown, CircleStop, Loader2, X } from "lucide-react";
+import { Brain, ChevronDown, CircleStop, Loader2, Play, X } from "lucide-react";
 import type { Job } from "@/lib/api";
 
 export const isActive = (job?: Job | null) => !!job && (job.status === "queued" || job.status === "running");
@@ -143,10 +143,13 @@ type Props = {
   onStop: () => void;
   onClose: () => void;
   stopping: boolean;
+  /** Продолжить сорвавшуюся генерацию с её черновика. */
+  onResume?: () => void;
+  resuming?: boolean;
 };
 
 /** Генерация по брифу в реальном времени: размышления, код и превью по ходу записи. */
-export function DesignLive({ job, view, width, onStop, onClose, stopping }: Props) {
+export function DesignLive({ job, view, width, onStop, onClose, stopping, onResume, resuming }: Props) {
   const active = isActive(job);
   const draft = typeof job.result.draft === "string" ? job.result.draft : "";
   const html = draftHtml(draft);
@@ -200,6 +203,11 @@ export function DesignLive({ job, view, width, onStop, onClose, stopping }: Prop
           <span>{elapsed(job.created_at, active ? now : new Date(job.updated_at || Date.now()).getTime())}</span>
           <span>{lines} строк · {Math.round(draft.length / 102.4) / 10} КБ</span>
           {failed && draft && <span className="text-amber-300">Черновик не сохранён как версия</span>}
+          {failed && draft && onResume && (
+            <button onClick={onResume} disabled={resuming} className="flex items-center gap-1 text-accent-200 hover:text-white disabled:opacity-50">
+              <Play className="h-3 w-3" />{resuming ? "Запускаю…" : "Продолжить с места остановки"}
+            </button>
+          )}
         </p>
       </div>
       {job.reasoning && <Reasoning text={job.reasoning} live={active && !draft} writing={!!draft} />}
