@@ -42,3 +42,19 @@ class Message(UUIDPk, Timestamps, Base):
     # Attachments / tool calls / branching metadata.
     meta: Mapped[dict] = mapped_column(JSONList, default=dict)
     parent_id: Mapped[str | None] = mapped_column(String(36))  # message branching
+
+
+class Checkpoint(UUIDPk, Base):
+    """Контрольная точка: файл проекта до первого изменения в ходе агента.
+
+    По ним «Откатить к этой точке» возвращает файлы к состоянию до сообщения.
+    content = None — файла до хода не было (откат его удалит).
+    """
+
+    __tablename__ = "checkpoints"
+
+    chat_id: Mapped[str] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"), index=True)
+    message_id: Mapped[str] = mapped_column(ForeignKey("messages.id", ondelete="CASCADE"), index=True)
+    path: Mapped[str] = mapped_column(String(4096), nullable=False)
+    content: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)

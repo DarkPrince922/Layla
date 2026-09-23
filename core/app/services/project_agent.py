@@ -176,6 +176,27 @@ def execute(root: str, name: str, arguments: dict, allowed_names: set[str] | Non
         return {"error": "Операция с файлом недоступна"}
 
 
+def snapshot(root: str, path, taken: set[str]) -> dict | None:
+    """Файл до первого изменения в этом ходе — для отката. None — уже снят или путь негоден."""
+    if not isinstance(path, str):
+        return None
+    try:
+        files.safe_join(root, path)
+        normalized = "/".join(files._parts(path))
+    except ValueError:
+        return None
+    if not normalized or normalized in taken:
+        return None
+    try:
+        content = files.read_file(root, normalized)["content"]
+    except FileNotFoundError:
+        content = None
+    except (ValueError, OSError):
+        return None  # не текст или слишком большой — агент его всё равно не изменит
+    taken.add(normalized)
+    return {"path": normalized, "content": content}
+
+
 def permitted_tools(permissions: list[str] | None) -> list[dict]:
     if permissions is None:
         return TOOLS
@@ -433,6 +454,7 @@ async def run(
     if caps.get("tools") is False:
         prompt += NO_TOOLS_NOTE
     ask = approve if mode == "confirm" else None
+    taken: set[str] = set()  # файлы, чьё исходное состояние уже сохранено в контрольной точке
     conversation = [{"role": "system", "content": prompt}, *messages]
     # Текущий запрос пользователя: при подгонке под контекст всё с него и дальше сохраняется.
     anchor = conversation[-1]
@@ -495,6 +517,11 @@ async def run(
                         })
                         yield {"tool": rejected}
                         continue
+                if name in MUTATING and name in allowed_names:
+                    # Контрольная точка: исходный файл сохраняется до изменения (для отката).
+                    saved = await run_in_threadpool(snapshot, root, arguments.get("path"), taken)
+                    if saved is not None:
+                        yield {"checkpoint": saved}
                 result = await run_in_threadpool(execute, root, name, arguments, allowed_names)
                 event = {**event, "status": "error" if "error" in result else "done"}
                 if "error" in result:

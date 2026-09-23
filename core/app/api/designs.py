@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from contextlib import suppress
 import shutil
 import time
 from pathlib import Path
@@ -15,6 +16,7 @@ from starlette.concurrency import run_in_threadpool
 from app.config import get_settings
 from app.db import get_session, get_sessionmaker
 from app.models.design import Design
+from app.models.enums import DesignStack
 from app.models.job import Job
 from app.models.provider import Provider
 from app.models.user import Project, User, Workspace
@@ -132,12 +134,34 @@ async def generate_design_bg(
     прогресс/шаги/размышление видны в панели «В работе».
     """
     model = await _pick_model(session, user, body.model)
+    return await _start_generation(session, sessionmaker, user, model, body.brief.model_dump(), body.stack)
+
+
+@router.post("/generate/{job_id}/resume", response_model=JobOut, status_code=202)
+async def resume_generation(
+    job_id: str,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+    sessionmaker=Depends(get_sessionmaker),
+) -> Job:
+    """Продолжить сорвавшуюся генерацию с её черновика, а не начинать заново."""
+    old = await session.get(Job, job_id)
+    if old is None or old.owner_id != user.id or old.kind != "design.generate":
+        raise HTTPException(status_code=404, detail="Генерация не найдена")
+    result = old.result or {}
+    if old.status in jobs.ACTIVE:
+        raise HTTPException(status_code=409, detail="Генерация ещё идёт")
+    if not result.get("draft") or not isinstance(result.get("brief"), dict) or not result.get("model"):
+        raise HTTPException(status_code=400, detail="Черновика нет — начните генерацию заново.")
+    return await _start_generation(session, sessionmaker, user, result["model"], result["brief"],
+                                   DesignStack(result.get("stack") or "html"), draft=result["draft"])
+
+
+async def _start_generation(session: AsyncSession, sessionmaker, user: User, model: str, brief: dict,
+                            stack: DesignStack, *, draft: str = "") -> Job:
     provider = await provider_client.resolve_provider(session, user.id, model)
     if provider is None:
         raise HTTPException(status_code=400, detail="Нет активного провайдера для генерации.")
-
-    brief = body.brief.model_dump()
-    stack = body.stack
     owner_id = user.id
     provider_id = provider.id
     messages = design_gen.build_prompt(brief, stack.value)
@@ -153,62 +177,76 @@ async def generate_design_bg(
         # Настройки модели из «Провайдеры» (длина ответа, температура, размышления…)
         # действуют и здесь; креативность брифа задаёт температуру этой генерации.
         caps = design_gen.design_caps((prov.model_caps or {}).get(model), brief)
-        await h.set_result({"model": model, "draft": ""})
-        await h.step(f"Генерирую макет · {model}", progress=0.1)
-        text = ""
+        # Бриф и черновик хранятся в задаче: если она сорвётся, её можно продолжить.
+        await h.set_result({"model": model, "draft": draft, "brief": brief, "stack": stack.value})
+        text = draft
+        conversation = list(messages)
+        if draft:
+            await h.step(f"Продолжаю с черновика ({draft.count(chr(10)) + 1} строк) · {model}", progress=0.3)
+            conversation += [{"role": "assistant", "content": draft},
+                             {"role": "user", "content": design_gen.CONTINUE_PROMPT}]
+        else:
+            await h.step(f"Генерирую макет · {model}", progress=0.1)
         draft_at = reason_at = 0.0  # когда черновик и размышления последний раз ушли в БД
         started = truncated = False
-        conversation = list(messages)
-        for part in range(design_gen.MAX_CONTINUATIONS + 1):
-            base, piece = text, ""
-            async for kind, value in project_agent._turn(prov, key, model, conversation, [], caps):
-                if kind == "delta":
-                    piece += value
-                    if not started:
-                        started = True
-                        await h.step("Модель пишет код", progress=0.3)
-                    now = time.monotonic()
-                    if now - draft_at >= DRAFT_INTERVAL:
-                        # Черновик виден в «Дизайне» по ходу генерации: код и превью.
-                        draft_at = now
+        base, piece = text, ""
+        try:
+            for part in range(design_gen.MAX_CONTINUATIONS + 1):
+                base, piece = text, ""
+                async for kind, value in project_agent._turn(prov, key, model, conversation, [], caps):
+                    if kind == "delta":
+                        piece += value
+                        if not started:
+                            started = True
+                            await h.step("Модель пишет код", progress=0.3)
+                        now = time.monotonic()
+                        if now - draft_at >= DRAFT_INTERVAL:
+                            # Черновик виден в «Дизайне» по ходу генерации: код и превью.
+                            draft_at = now
+                            await _push_draft(h, design_gen.join_continuation(base, piece))
+                    elif kind == "retract":
+                        # Ход повторяется с начала — уже показанный кусок убираем.
+                        piece = piece[: max(0, len(piece) - value)]
                         await _push_draft(h, design_gen.join_continuation(base, piece))
-                elif kind == "retract":
-                    # Ход повторяется с начала — уже показанный кусок убираем.
-                    piece = piece[: max(0, len(piece) - value)]
-                    await _push_draft(h, design_gen.join_continuation(base, piece))
-                elif kind == "reasoning":
-                    # Размышления тоже видны по ходу, а не пачками по 300 символов.
-                    now = time.monotonic()
-                    flush = now - reason_at >= DRAFT_INTERVAL
-                    if flush:
-                        reason_at = now
-                    await h.reason(value, flush=flush)
-                elif kind == "retry":
-                    await h.step(f"Нет связи с моделью — повтор {value['attempt']} из {value['max']} "
-                                 f"через {value['delay']:g} с")
-                elif kind == "key":
-                    await h.step(project_agent.key_label(value))
-                elif kind == "learned":
-                    # Запоминаем, чего модель не умеет, — так же, как в чатах.
-                    known = dict(prov.model_caps or {})
-                    known[model] = {**(known.get(model) or {}), **value}
-                    prov.model_caps = known
-                    await h.session.commit()
-                    await h.step(project_agent.learned_label(value))
-                elif kind == "done":
-                    piece = "".join(value[0])
-            truncated = piece.endswith(project_agent.LENGTH_NOTE)
-            if truncated:
-                piece = piece[: -len(project_agent.LENGTH_NOTE)]
-            text = design_gen.join_continuation(base, piece)
-            await _push_draft(h, text)
-            if not truncated or part == design_gen.MAX_CONTINUATIONS:
-                break
-            # Макет не влез в предельную длину ответа — модель продолжает с места обрыва.
-            await h.step(f"Макет длиннее одного ответа — модель продолжает с места обрыва "
-                         f"(часть {part + 2})")
-            conversation = [*messages, {"role": "assistant", "content": text},
-                            {"role": "user", "content": design_gen.CONTINUE_PROMPT}]
+                    elif kind == "reasoning":
+                        # Размышления тоже видны по ходу, а не пачками по 300 символов.
+                        now = time.monotonic()
+                        flush = now - reason_at >= DRAFT_INTERVAL
+                        if flush:
+                            reason_at = now
+                        await h.reason(value, flush=flush)
+                    elif kind == "retry":
+                        await h.step(f"Нет связи с моделью — повтор {value['attempt']} из {value['max']} "
+                                     f"через {value['delay']:g} с")
+                    elif kind == "key":
+                        await h.step(project_agent.key_label(value))
+                    elif kind == "learned":
+                        # Запоминаем, чего модель не умеет, — так же, как в чатах.
+                        known = dict(prov.model_caps or {})
+                        known[model] = {**(known.get(model) or {}), **value}
+                        prov.model_caps = known
+                        await h.session.commit()
+                        await h.step(project_agent.learned_label(value))
+                    elif kind == "done":
+                        piece = "".join(value[0])
+                truncated = piece.endswith(project_agent.LENGTH_NOTE)
+                if truncated:
+                    piece = piece[: -len(project_agent.LENGTH_NOTE)]
+                text = design_gen.join_continuation(base, piece)
+                await _push_draft(h, text)
+                if not truncated or part == design_gen.MAX_CONTINUATIONS:
+                    break
+                # Макет не влез в предельную длину ответа — модель продолжает с места обрыва.
+                await h.step(f"Макет длиннее одного ответа — модель продолжает с места обрыва "
+                             f"(часть {part + 2})")
+                conversation = [*messages, {"role": "assistant", "content": text},
+                                {"role": "user", "content": design_gen.CONTINUE_PROMPT}]
+        except BaseException:
+            # Сорвалось (ошибка, остановка): последний кусок черновика — в задачу, чтобы
+            # «Продолжить» подхватило его, а не начинало заново.
+            with suppress(Exception):
+                await _push_draft(h, design_gen.join_continuation(base, piece))
+            raise
         await h.reason("", flush=True)
         if truncated:
             await h.step("Макет упёрся в предельную длину ответа — сохраняю то, что успело сгенерироваться")

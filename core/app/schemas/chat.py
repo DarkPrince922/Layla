@@ -63,6 +63,11 @@ class ChatRename(BaseModel):
     title: str = Field(min_length=1, max_length=300)
 
 
+class RollbackOut(BaseModel):
+    restored: list[str]  # файлы, возвращённые к состоянию до выбранного ответа
+    messages: int  # сколько ответов агента откатано
+
+
 class ClearChatsOut(BaseModel):
     deleted: int
     skipped: int  # чаты с работающей задачей не удаляются

@@ -3,7 +3,7 @@ so Alembic autogeneration and metadata.create_all() see them all.
 """
 from app.models.agent import AgentConfig, AgentRun, AgentStep
 from app.models.audit import AuditLog
-from app.models.chat import Chat, Message
+from app.models.chat import Chat, Checkpoint, Message
 from app.models.combo import Combo
 from app.models.design import Design
 from app.models.job import Job
@@ -30,6 +30,7 @@ __all__ = [
     "AgentConfig",
     "AuditLog",
     "Chat",
+    "Checkpoint",
     "Message",
     "Combo",
     "Design",

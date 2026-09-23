@@ -56,6 +56,15 @@ def entry(message: Message) -> dict | None:
             content += f"\n[These project changes were later rolled back by the user: {listed}]"
         else:
             content += f"\n[Applied project changes: {listed}]"
+    if message.role == "assistant" and meta.get("error"):
+        # Ход прерван (ошибка, остановка, перезапуск сервера): модели нужно знать, что уже
+        # сделано, чтобы «Продолжить» подхватило работу, а не начало её заново.
+        steps = [f"{t.get('name')} {t.get('path') or ''} — {t.get('status')}".strip()
+                 for t in meta.get("tools", [])[-30:]]
+        done = ("; ".join(steps)) if steps else "ничего"
+        content += (f"\n[This turn was interrupted: {meta['error']} Steps done before that: {done}. "
+                    "Files already reflect the completed steps. When asked to continue, pick up from "
+                    "here without repeating completed steps.]")
     if not content:
         return None
     item = {"role": message.role, "content": content}

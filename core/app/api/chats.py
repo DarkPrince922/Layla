@@ -26,7 +26,7 @@ from starlette.concurrency import run_in_threadpool
 from app.api.projects import _default_workspace, _owned_project, _project_root
 from app.config import get_settings
 from app.db import get_session, get_sessionmaker
-from app.models.chat import Chat, Message
+from app.models.chat import Chat, Checkpoint, Message
 from app.models.enums import Domain
 from app.models.job import Job
 from app.models.persona import Persona
@@ -39,10 +39,11 @@ from app.schemas.chat import (
     ChatRename,
     ClearChatsOut,
     MessageOut,
+    RollbackOut,
     SendMessageRequest,
 )
 from app.schemas.job import JobOut
-from app.services import audit, history, jobs, project_agent, provider_client, trash
+from app.services import audit, files, history, jobs, project_agent, provider_client, trash
 from app.services.auth import get_current_user
 
 
@@ -269,6 +270,7 @@ async def send_message(
         tool_events: dict[str, dict] = {}
         stream_error = None
         completed = False
+        checkpointed = False
 
         async def persist(change: dict | None = None):
             async with maker() as session:
@@ -280,6 +282,7 @@ async def send_message(
                     "reasoning": "".join(reasoning),
                     "tools": list(tool_events.values()),
                     "error": stream_error,
+                    "checkpoint": checkpointed,
                 }
                 if change:
                     await audit.record(
@@ -303,6 +306,11 @@ async def send_message(
 
         try:
             async for event in events():
+                if "checkpoint" in event:
+                    # Служебное событие: сохраняем до изменения файла, клиенту не отправляем.
+                    await _save_checkpoint(maker, chat_id, msg_id, event["checkpoint"])
+                    checkpointed = True
+                    continue
                 if "delta" in event:
                     full.append(event["delta"])
                 elif "retract" in event:
@@ -346,6 +354,14 @@ async def send_message(
     )
 
 
+async def _save_checkpoint(maker, chat_id: str, message_id: str, point: dict) -> None:
+    """Исходное состояние файла — до того, как агент его изменит (для отката)."""
+    async with maker() as session:
+        session.add(Checkpoint(chat_id=chat_id, message_id=message_id, path=point["path"],
+                               content=point["content"], created_at=datetime.now(UTC)))
+        await session.commit()
+
+
 async def _step_for(h: jobs.JobHandle, kind: str, value) -> None:
     """Шаги «В работе» для служебных запросов к модели (сводка контекста)."""
     if kind == "retry":
@@ -384,6 +400,68 @@ async def _chat_provider(session: AsyncSession, chat: Chat, user: User) -> Provi
     if provider is None or not chat.model:
         raise HTTPException(status_code=400, detail="Не выбрана модель: отправьте сообщение с выбранной моделью.")
     return provider
+
+
+def _restore(root: str, points: list[Checkpoint]) -> list[str]:
+    """Вернуть файлы к сохранённому состоянию: от новых точек к старым."""
+    restored = []
+    for point in points:
+        try:
+            current = files.read_file(root, point.path)
+        except FileNotFoundError:
+            current = None
+        if point.content is None:
+            if current is not None:
+                files.change_file(root, point.path, None, current["sha256"])
+        elif current is None:
+            files.change_file(root, point.path, point.content, None)
+        elif current["content"] != point.content:
+            files.change_file(root, point.path, point.content, current["sha256"])
+        restored.append(point.path)
+    return restored
+
+
+@router.post("/{chat_id}/messages/{message_id}/rollback", response_model=RollbackOut)
+async def rollback_to(
+    chat_id: str,
+    message_id: str,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> RollbackOut:
+    """«Откатить к этой точке»: файлы — как до этого ответа агента (и всех следующих)."""
+    chat = await _owned_chat(session, user, chat_id)
+    active = await session.scalar(select(Job).where(Job.chat_id == chat_id, Job.status.in_(jobs.ACTIVE)))
+    if active is not None and not jobs.is_orphaned(active):
+        raise HTTPException(status_code=409, detail="Дождитесь окончания задачи в этом чате.")
+    rows = await history.messages(session, chat_id)
+    index = next((i for i, m in enumerate(rows) if m.id == message_id and m.role == "assistant"), None)
+    if index is None:
+        raise HTTPException(status_code=404, detail="Сообщение не найдено")
+    later = rows[index:]
+    points = list(await session.scalars(
+        select(Checkpoint).where(Checkpoint.message_id.in_([m.id for m in later]))
+        .order_by(Checkpoint.created_at.desc())))
+    if not points or not chat.project_id:
+        raise HTTPException(status_code=400, detail="Для этого ответа нет контрольной точки.")
+    project = await _owned_project(session, user, chat.project_id)
+    try:
+        restored = await run_in_threadpool(_restore, _project_root(project), points)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=f"Не удалось вернуть файлы: {exc}") from exc
+    rolled = 0
+    for message in later:
+        meta = dict(message.meta or {})
+        if meta.get("checkpoint") and not meta.get("rolled_back"):
+            meta["rolled_back"] = True
+            message.meta = meta
+            rolled += 1
+    for point in points:
+        await session.delete(point)
+    paths = sorted(set(restored))
+    await audit.record(session, actor=user.id, action="chat.rollback", target=chat_id,
+                       meta={"message_id": message_id, "paths": paths})
+    await session.commit()
+    return RollbackOut(restored=paths, messages=rolled)
 
 
 @router.post("/{chat_id}/compact", response_model=JobOut, status_code=202)
@@ -553,6 +631,7 @@ async def run_chat(
         tools: dict[str, dict] = {}
         error = None
         last_persist = 0.0
+        checkpointed = False  # есть контрольная точка — ход можно откатить
 
         async def persist(change: dict | None = None) -> None:
             nonlocal last_persist
@@ -562,7 +641,7 @@ async def run_chat(
                     return
                 msg.content = "".join(full)
                 msg.meta = {"reasoning": "".join(reasoning), "tools": list(tools.values()), "error": error,
-                            "mode": mode}
+                            "mode": mode, "checkpoint": checkpointed}
                 if change:
                     await audit.record(output_session, actor=owner_id,
                                        action="project.agent." + change["operation"],
@@ -613,6 +692,11 @@ async def run_chat(
                     await h.step(project_agent.key_label(event["key"]))
                 elif "cut" in event:
                     await h.step(project_agent.cut_label(event["cut"]))
+                elif "checkpoint" in event:
+                    await _save_checkpoint(maker, chat_id, msg_id, event["checkpoint"])
+                    if not checkpointed:
+                        checkpointed = True
+                        await persist()
                 elif "shrunk" in event:
                     await h.step(f"Длинная задача: {event['shrunk']} старых результатов инструментов "
                                  "ужато, чтобы не упереться в контекст")
