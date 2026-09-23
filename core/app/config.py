@@ -67,6 +67,13 @@ class Settings(BaseSettings):
     tor_addr: str = Field(default="127.0.0.1:9050", alias="LAYLA_TOR_ADDR")
     proxy_addr: str = Field(default="", alias="LAYLA_PROXY_ADDR")
 
+    # --- Запуск кода ---
+    # Песочница проекта (свой сервис sandbox/): команды с зависимостями в рабочей копии.
+    # unix:///путь/к/сокету или http://хост:порт. Пусто — запуск команд недоступен.
+    sandbox_url: str = Field(default="unix:///run/layla-sandbox/sandbox.sock", alias="LAYLA_SANDBOX_URL")
+    # Piston: компиляция и запуск программ на десятках языков без зависимостей.
+    piston_url: str = Field(default="http://piston:2000", alias="LAYLA_PISTON_URL")
+
     # --- LiteLLM ---
     litellm_base_url: str = Field(default="http://localhost:4000", alias="LITELLM_BASE_URL")
     litellm_master_key: str = Field(default="", alias="LITELLM_MASTER_KEY")

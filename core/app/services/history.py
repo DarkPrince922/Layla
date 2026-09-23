@@ -65,6 +65,14 @@ def entry(message: Message) -> dict | None:
         content += (f"\n[This turn was interrupted: {meta['error']} Steps done before that: {done}. "
                     "Files already reflect the completed steps. When asked to continue, pick up from "
                     "here without repeating completed steps.]")
+    runs = [t for t in meta.get("tools", []) if t.get("name") in ("run_command", "run_code")
+            and t.get("status") in ("done", "error")]
+    if runs:
+        listed = "; ".join(
+            f"`{(t.get('command') or '')[:200]}` → "
+            + (f"exit {t.get('exit_code')}" if t.get("status") == "done" else f"error: {str(t.get('error'))[:120]}")
+            for t in runs[-10:])
+        content += f"\n[Commands run in the sandbox: {listed}]"
     todos = meta.get("todos") if message.role == "assistant" else None
     if todos:
         marks = {"done": "✓", "in_progress": "→", "pending": "☐"}
@@ -205,6 +213,9 @@ def _shrink_tool(message: dict) -> dict | None:
         data = None
     if isinstance(data, dict) and "content" in data and "sha256" in data:
         slim = {"path": data.get("path"), "sha256": data["sha256"], "note": _HIDDEN}
+    elif isinstance(data, dict) and "exit_code" in data and len(str(data.get("output") or "")) > 1500:
+        # Вывод команды: важен конец (итог тестов, текст ошибки).
+        slim = {**data, "output": "…" + data["output"][-1200:]}
     elif isinstance(data, dict) and isinstance(data.get("files"), list) and len(data["files"]) > 40:
         slim = {"files": data["files"][:40], "note": f"ещё {len(data['files']) - 40} — список сокращён"}
     elif len(message.get("content") or "") > 2000:

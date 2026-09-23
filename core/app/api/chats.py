@@ -43,7 +43,17 @@ from app.schemas.chat import (
     SendMessageRequest,
 )
 from app.schemas.job import JobOut
-from app.services import audit, design_gen, files, history, jobs, project_agent, provider_client, trash
+from app.services import (
+    audit,
+    code_runner,
+    design_gen,
+    files,
+    history,
+    jobs,
+    project_agent,
+    provider_client,
+    trash,
+)
 from app.services.auth import get_current_user
 
 
@@ -61,6 +71,8 @@ _TOOL_LABELS = {
     "edit_file": "Правка",
     "append_file": "Дозапись",
     "delete_file": "Удаление",
+    "run_command": "Команда",
+    "run_code": "Запуск программы",
 }
 
 router = APIRouter(prefix="/chats", tags=["chats"])
@@ -299,6 +311,7 @@ async def send_message(
                 async for event in project_agent.run(
                     provider, key, model, payload, root, permissions,
                     extra=await run_in_threadpool(project_agent.project_rules, root),
+                    runner=code_runner.Runner(user.id, chat.project_id, root),
                 ):
                     yield event
             else:
@@ -351,8 +364,17 @@ async def send_message(
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
     )
+
+
+async def _audit_run(maker, owner_id: str, project_id: str, tool: dict) -> None:
+    """Каждый запуск кода агентом — в аудит: что выполнено и с каким итогом."""
+    async with maker() as session:
+        await audit.record(session, actor=owner_id, action="project.agent.run", target=project_id,
+                           meta={"tool": tool["name"], "command": (tool.get("command") or "")[:500],
+                                 "exit_code": tool.get("exit_code"), "error": tool.get("error")})
+        await session.commit()
 
 
 async def _save_checkpoint(maker, chat_id: str, message_id: str, point: dict) -> None:
@@ -661,9 +683,11 @@ async def run_chat(
             async def approve(pending: dict) -> str:
                 """Режим «С подтверждением»: ждём решения пользователя по изменению."""
                 label = _TOOL_LABELS.get(pending["name"], pending["name"])
+                target = pending.get("path") or pending.get("command", "")[:120]
                 await h.set_result({"approval": {"id": pending["id"], "name": pending["name"],
-                                                 "path": pending.get("path", "")}})
-                await h.step(f"Ждёт подтверждения — {label}: {pending.get('path', '')}")
+                                                 "path": pending.get("path", ""),
+                                                 "command": pending.get("command", "")}})
+                await h.step(f"Ждёт подтверждения — {label}: {target}")
                 try:
                     return await jobs.wait_decision(h.job.id, pending["id"])
                 finally:
@@ -679,8 +703,10 @@ async def run_chat(
                 # История не влезает в бюджет контекста — старое сворачивается в сводку,
                 # а не отбрасывается. Не вышло — ниже просто уйдут последние сообщения.
                 messages = await _compact_before_turn(h, maker, chat_id, prov, key, model, caps) or messages
+            runner = code_runner.Runner(owner_id, project_id, root)
             async for event in project_agent.run(prov, key, model, messages, root, permissions,
-                                                 mode=mode, approve=approve, caps=caps, extra=extra):
+                                                 mode=mode, approve=approve, caps=caps, extra=extra,
+                                                 runner=runner):
                 if "delta" in event:
                     full.append(event["delta"])
                 elif "retract" in event:
@@ -726,13 +752,23 @@ async def run_chat(
                     await h.reason(event["reasoning"])
                 elif "tool" in event:
                     tool = event["tool"]
+                    previous = tools.get(tool["id"])
                     tools[tool["id"]] = tool
-                    label = _TOOL_LABELS.get(tool["name"], tool["name"])
-                    suffix = {"error": " — ошибка", "done": " — готово", "rejected": " — отклонено"}.get(tool["status"], "")
-                    if tool["status"] != "pending":
-                        await h.step(f"{label}: {tool.get('path', '')}{suffix}")
-                    # В аудит — только применённые изменения, не превью на подтверждение.
-                    await persist(tool.get("change") if tool["status"] == "done" else None)
+                    if previous is not None and previous["status"] == tool["status"] == "running":
+                        # Живой вывод команды: шаг не повторяем, сохраняется ниже не чаще раза в 0.7 с.
+                        pass
+                    else:
+                        label = _TOOL_LABELS.get(tool["name"], tool["name"])
+                        target = tool.get("path") or tool.get("command", "")[:120]
+                        suffix = {"error": " — ошибка", "done": " — готово", "rejected": " — отклонено"}.get(tool["status"], "")
+                        if tool["name"] in code_runner.RUN_TOOLS and tool["status"] == "done":
+                            suffix = f" — код выхода {tool.get('exit_code')}"
+                        if tool["status"] != "pending":
+                            await h.step(f"{label}: {target}{suffix}")
+                        # В аудит — только применённые изменения, не превью на подтверждение.
+                        await persist(tool.get("change") if tool["status"] == "done" else None)
+                        if tool["name"] in code_runner.RUN_TOOLS and tool["status"] in ("done", "error"):
+                            await _audit_run(maker, owner_id, project_id, tool)
                 if time.monotonic() - last_persist >= 0.7:
                     await persist()
             await h.step("Ответ сохранён", progress=1.0)

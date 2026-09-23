@@ -12,6 +12,9 @@ os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("LAYLA_ENV", "dev")
 # Тесты создают пользователей через открытую регистрацию (в проде она закрыта).
 os.environ.setdefault("LAYLA_ALLOW_OPEN_REGISTRATION", "1")
+# Запуск кода в тестах — только через подменённые клиенты, без настоящих сервисов.
+os.environ.setdefault("LAYLA_SANDBOX_URL", "")
+os.environ.setdefault("LAYLA_PISTON_URL", "")
 import tempfile  # noqa: E402
 os.environ.setdefault("LAYLA_PROJECTS_DIR", tempfile.mkdtemp(prefix="layla-proj-"))
 

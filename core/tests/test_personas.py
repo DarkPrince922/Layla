@@ -82,4 +82,5 @@ async def test_custom_role_prompt_reaches_the_model(client, monkeypatch):
         if (await client.get(f"/api/jobs/{job['id']}")).json()["status"] not in ("queued", "running"):
             break
     assert seen["system"] == {"role": "system", "content": "Отвечай как пират."}
-    assert seen["permissions"] == ["files.read", "files.write"]
+    # Новая роль по умолчанию: файлы и запуск кода в песочнице.
+    assert seen["permissions"] == ["files.read", "files.write", "code.run"]

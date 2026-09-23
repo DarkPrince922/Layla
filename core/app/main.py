@@ -31,6 +31,7 @@ from app.api import (
     personas,
     projects,
     providers,
+    sandbox,
     servers,
     telegram,
     trash,
@@ -115,6 +116,7 @@ app.include_router(personas.router, prefix=api_prefix)
 app.include_router(models.router, prefix=api_prefix)
 app.include_router(chats.router, prefix=api_prefix)
 app.include_router(projects.router, prefix=api_prefix)
+app.include_router(sandbox.router, prefix=api_prefix)
 app.include_router(designs.router, prefix=api_prefix)
 app.include_router(jobs.router, prefix=api_prefix)
 app.include_router(knowledge.router, prefix=api_prefix)

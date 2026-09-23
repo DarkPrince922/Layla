@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 
 from app.schemas.project import FileWrite
-from app.services import files, provider_client, provider_errors, tool_chat
+from app.services import code_runner, files, provider_client, provider_errors, tool_chat
 
 # Страховочные пределы, а не рабочие: на обычных задачах агент до них не доходит.
 # Достигнув предела, агент останавливается мягко (ответ сохраняется как обычный),
@@ -64,9 +64,8 @@ the first part (at most ~250 lines), then append_file for each next part.
 Read existing files before editing/deleting. For write_file/delete_file pass the sha256 from
 read_file as expected_sha256; for a new file use expected_sha256=null. write_file creates parent
 directories. If a conflict occurs, read again and preserve newer changes. Delete files only when
-needed for the user's request. You cannot execute commands, install packages, or
-verify runtime behavior; do not claim tests ran. Describe applied changes and any
-remaining work honestly. Tool results determine success. Diffs are shown to the user.
+needed for the user's request. Describe applied changes and any remaining work honestly.
+Tool results determine success. Diffs are shown to the user.
 
 How to work — step by step, with short reasoning:
 - Keep your private reasoning brief: a few lines about the next step. Never write code, file
@@ -282,6 +281,16 @@ def preview(root: str, name: str, arguments: dict) -> dict | None:
 
 
 NO_TOOLS_NOTE = "\nFile tools are unavailable for this model: answer directly, without tool calls."
+NO_RUN_NOTE = (
+    "\nYou cannot execute commands, install packages, or verify runtime behavior here; do not claim "
+    "tests ran."
+)
+RUN_NOTE = (
+    "\nYou can run code: run_command executes bash in this project's sandbox (a copy of the project "
+    "with its own dependencies){code}. Verify your work: after changing code, run the relevant tests, "
+    "build or script, read the errors, fix them and run again. Install dependencies there when "
+    "needed. Report honestly which commands ran and their results; never claim a check you did not run."
+)
 MAX_ADJUSTMENTS = 4  # сколько раз за ход можно подстроиться под ограничения модели
 MAX_OUTPUT_CEILING = 65536  # выше лимит длины ответа сами не поднимаем
 LENGTH_NOTE = (
@@ -540,20 +549,35 @@ async def _turn(provider, key, model, conversation, available, caps, anchor=None
 
 async def run(
     provider, key, model: str, messages: list[dict], root: str, permissions=None,
-    *, mode: str = "auto", approve=None, caps: dict | None = None, extra: str = "",
+    *, mode: str = "auto", approve=None, caps: dict | None = None, extra: str = "", runner=None,
 ):
     """approve(event) -> "approve" | "reject" | "approve_all" — только для режима confirm.
 
     caps — известные ограничения модели (меняются по ходу работы, см. _turn).
     extra — дополнение к системному промпту: указания домена, правила проекта из LAYLA.md.
+    runner — запуск кода (code_runner.Runner): без него инструментов run_* нет.
     """
     caps = caps if caps is not None else {}
     available = permitted_tools(permissions)
     if mode in READ_ONLY_MODES:
         available = [t for t in available if t["function"]["name"] not in MUTATING]
+    # Запуск кода: только если песочница/Piston работают, роль это разрешает и режим не «План».
+    run_specs = []
+    if runner is not None and code_runner.can_run(permissions) and mode != "plan":
+        run_specs = await runner.tools()
+    available = available + run_specs
     allowed_names = {t["function"]["name"] for t in available}
+    run_note = NO_RUN_NOTE
+    if "run_command" in allowed_names:
+        code = (", and run_code runs standalone programs in other languages"
+                if "run_code" in allowed_names else "")
+        run_note = RUN_NOTE.format(code=code)
+    elif "run_code" in allowed_names:
+        run_note = ("\nrun_code compiles and runs standalone programs in an isolated runner; use it "
+                    "to check code where it helps. You cannot install packages here.")
     prompt = (
         SYSTEM_PROMPT
+        + run_note
         + "\nOnly these tools are permitted for your persona: "
         + ", ".join(sorted(allowed_names))
         + _MODE_PROMPTS.get(mode, "")
@@ -612,6 +636,20 @@ async def run(
                     "path": arguments.get("path") if isinstance(arguments.get("path"), str) else "",
                     "status": "running",
                 }
+                if name in code_runner.RUN_TOOLS and name in allowed_names:
+                    event["command"] = code_runner.label(name, arguments)
+                    outcome = None
+                    async for item in _run_code_tool(runner, name, arguments, event, ask):
+                        if "ask_off" in item:
+                            ask = None
+                        elif "outcome" in item:
+                            outcome = item["outcome"]
+                        else:
+                            yield item
+                    conversation.append({"role": "tool", "tool_call_id": call["id"],
+                                         "content": json.dumps(outcome, ensure_ascii=False),
+                                         "is_error": "error" in outcome})
+                    continue
                 yield {"tool": event}
                 if ask is not None and name in MUTATING and name in allowed_names:
                     change = await run_in_threadpool(preview, root, name, arguments)
@@ -663,3 +701,44 @@ async def run(
                 )
                 yield {"tool": event}
         yield {"delta": LIMIT_NOTE}
+
+
+async def _run_code_tool(runner, name: str, arguments: dict, event: dict, ask):
+    """Выполнить run_command / run_code. Выдаёт события карточки ({"tool": ...}), затем
+    {"outcome": результат для модели}; {"ask_off": True} — пользователь разрешил всё."""
+    args, problem = code_runner.validate(name, arguments)
+    if problem:
+        yield {"tool": {**event, "status": "error", "error": problem}}
+        yield {"outcome": {"error": problem}}
+        return
+    if ask is not None:
+        pending = {**event, "status": "pending"}
+        yield {"tool": pending}
+        decision = await ask(pending)
+        if decision == "approve_all":
+            yield {"ask_off": True}
+        elif decision != "approve":
+            yield {"tool": {**event, "status": "rejected", "error": "Отклонено пользователем"}}
+            yield {"outcome": {"error": "Пользователь отклонил этот запуск."}}
+            return
+    yield {"tool": event}
+    if name == "run_command":
+        result: dict = {"error": "Песочница не вернула результат"}
+        async for item in runner.command(args):
+            if "output" in item:
+                yield {"tool": {**event, "output": item["output"]}}
+            elif "info" in item:
+                yield {"tool": {**event, "note": item["info"]}}
+            elif "result" in item:
+                result = item["result"]
+    else:
+        result = await runner.code(args)
+    shown = result.pop("shown", None)
+    final = {**event, "status": "error" if "error" in result else "done"}
+    for key in ("exit_code", "duration_s", "timed_out", "signal", "error"):
+        if result.get(key) is not None:
+            final[key] = result[key]
+    if shown is not None or result.get("output"):
+        final["output"] = shown if shown is not None else result.get("output")
+    yield {"tool": final}
+    yield {"outcome": result}
