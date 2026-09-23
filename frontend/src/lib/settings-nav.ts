@@ -12,7 +12,8 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
   { slug: "appearance", label: "Внешний вид", blurb: "Темы и акценты." },
   { slug: "providers", label: "Провайдеры", blurb: "Профили подключения LLM (через LiteLLM)." },
   { slug: "agent", label: "Агент", blurb: "Оркестрация Ultracode, бюджеты, диагностика." },
-  { slug: "personas", label: "Персоны", blurb: "Роли ИИ, доступ к инструментам и рамки." },
+  { slug: "personas", label: "Роли", blurb: "Промты ролей, доступ к файлам, свои роли." },
+  { slug: "sandbox", label: "Песочница", blurb: "Запуск кода: зависимости, тесты, языки Piston." },
   { slug: "knowledge", label: "База знаний", blurb: "Документы RAG, индексация в pgvector." },
   { slug: "security", label: "Безопасность", blurb: "Политики доступа, подтверждения, аудит-лог." },
   { slug: "integrations", label: "Интеграции", blurb: "MCP-серверы, Telegram, intelligence-API." },
@@ -20,4 +21,5 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
   { slug: "data", label: "Данные", blurb: "Экспорт, импорт, ретеншн, очистка." },
   { slug: "accounts-lab", label: "Accounts Lab", blurb: "Подключение провайдеров, ротация, combos." },
   { slug: "privacy-chain", label: "Privacy Chain", blurb: "Глобальный egress-профиль (Direct/Tor/Proxy)." },
+  { slug: "trash", label: "Корзина", blurb: "Удалённые чаты и проекты: 7 дней на восстановление." },
 ];

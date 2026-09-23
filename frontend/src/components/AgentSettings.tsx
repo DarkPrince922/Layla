@@ -67,7 +67,7 @@ export function AgentSettings() {
         <div className="flex gap-1">
           {PRESETS.map((p) => (
             <button key={p.v} onClick={() => setPreset(p.v)}
-              className={`rounded px-3 py-1.5 text-xs ${preset === p.v ? "bg-indigo-600 text-white" : "bg-ink-800 text-neutral-400"}`}>
+              className={`rounded px-3 py-1.5 text-xs ${preset === p.v ? "bg-accent-600 text-white" : "bg-ink-800 text-neutral-400"}`}>
               {p.l}
             </button>
           ))}
@@ -124,7 +124,7 @@ export function AgentSettings() {
       </section>
 
       <button onClick={() => save.mutate()}
-        className="rounded-md bg-indigo-600 px-4 py-2 text-sm text-white">
+        className="rounded-md bg-accent-600 px-4 py-2 text-sm text-white">
         {save.isPending ? "Сохранение…" : saved ? "Сохранено ✓" : "Сохранить"}
       </button>
     </div>

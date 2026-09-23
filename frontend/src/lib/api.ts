@@ -41,7 +41,8 @@ export const api = {
     request<T>(p, { method: "PUT", body: body ? JSON.stringify(body) : undefined }),
   patch: <T>(p: string, body?: unknown) =>
     request<T>(p, { method: "PATCH", body: body ? JSON.stringify(body) : undefined }),
-  del: <T>(p: string) => request<T>(p, { method: "DELETE" }),
+  del: <T>(p: string, body?: unknown) =>
+    request<T>(p, { method: "DELETE", body: body ? JSON.stringify(body) : undefined }),
 };
 
 // ---- OSINT / intelligence (M3) ----
@@ -100,6 +101,9 @@ export interface JobStep {
 }
 
 export interface Job {
+  chat_id?: string | null;
+  created_at?: string;
+  updated_at?: string;
   id: string;
   domain: string;
   kind: string;
@@ -155,11 +159,15 @@ export interface Persona {
   id: string;
   name: string;
   kind: string;
+  icon?: string | null;
   color?: string | null;
   instructions?: string | null;
   is_builtin: boolean;
   hitl_required: boolean;
   allowed_tools?: string[];
+  /** Что подставить в чат при выборе роли. */
+  default_model?: string | null;
+  default_mode?: "auto" | "confirm" | "plan" | null;
 }
 
 export interface ModelInfo {
@@ -175,6 +183,7 @@ export interface Chat {
   title?: string | null;
   persona_id?: string | null;
   model?: string | null;
+  provider_id?: string | null;
 }
 
 export interface ChatMessage {
@@ -184,10 +193,21 @@ export interface ChatMessage {
   reasoning?: string;
   tools?: ToolEvent[];
   error?: string | null;
-  meta?: { reasoning?: string; tools?: ToolEvent[]; error?: string | null };
+  meta?: {
+    reasoning?: string; tools?: ToolEvent[]; error?: string | null; mode?: "auto" | "confirm" | "plan" | "review";
+    /** План агента (update_todos). */
+    todos?: { content: string; status: "pending" | "in_progress" | "done" }[];
+    /** Есть контрольная точка: ход можно откатить. */
+    checkpoint?: boolean;
+    rolled_back?: boolean;
+    /** Сводка сжатой истории (role = system). */
+    kind?: "summary";
+    count?: number;
+  };
 }
 
 export interface ChatDetail extends Chat {
+  last_job?: Job | null;
   messages: ChatMessage[];
 }
 
@@ -236,9 +256,152 @@ export interface ToolEvent {
   id: string;
   name: string;
   path: string;
-  status: "running" | "done" | "error";
+  status: "running" | "pending" | "done" | "error" | "rejected";
   error?: string;
   change?: FileChange;
+  /** run_command / run_code: команда (или «язык: файлы»), вывод и итог. */
+  command?: string;
+  output?: string;
+  note?: string;
+  exit_code?: number | null;
+  duration_s?: number;
+  timed_out?: boolean;
+  signal?: string | number | null;
+}
+
+export const RUN_TOOLS = new Set(["run_command", "run_code", "start_preview", "check_preview", "stop_preview"]);
+/** Превью приложения проекта: состояние процесса в песочнице и ссылка для браузера. */
+export type PreviewState = {
+  state: "none" | "starting" | "running" | "no_port" | "exited" | "stopped" | "idle" | "lifetime" | "unavailable" | string;
+  command?: string | null;
+  suggested?: string | null;
+  port?: number | null;
+  started?: number | null;
+  exit_code?: number | null;
+  logs?: string;
+  base?: string;
+  url?: string;
+  error?: string;
+};
+
+export const GIT_TOOLS = new Set(["git_status", "git_log", "git_diff", "git_commit", "git_push"]);
+
+// ---- Git проекта ----
+export interface GitCommit {
+  sha: string;
+  short: string;
+  author: string;
+  email: string;
+  date: string;
+  message: string;
+  stat?: string;
+}
+
+export interface GitStatus {
+  initialized: boolean;
+  branch?: string;
+  upstream?: string | null;
+  ahead?: number;
+  behind?: number;
+  changes?: { path: string; status: "new" | "added" | "modified" | "deleted" | "renamed"; code: string }[];
+  remote?: string | null;
+  remote_host?: string | null;
+  has_token?: boolean;
+  last_commit?: GitCommit | null;
+}
+
+export interface GitCredential {
+  host: string;
+  username?: string | null;
+  masked: string;
+}
+
+/** Разобрать вывод git diff на изменения по файлам — для FileDiff. */
+export function splitGitDiff(text: string): FileChange[] {
+  const out: FileChange[] = [];
+  for (const block of text.split(/^(?=diff --git )/m)) {
+    if (!block.startsWith("diff --git ")) continue;
+    const plus = /^\+\+\+ b\/(.+)$/m.exec(block)?.[1];
+    const minus = /^--- a\/(.+)$/m.exec(block)?.[1];
+    const header = /^diff --git a\/(.+?) b\/(.+)$/m.exec(block);
+    const path = plus || minus || header?.[2] || "?";
+    const operation = /^new file mode/m.test(block) ? "create" : /^deleted file mode/m.test(block) ? "delete" : "edit";
+    const start = block.search(/^@@/m);
+    out.push({ path, operation, diff: start >= 0 ? block.slice(start) : "", before_sha256: null, after_sha256: null });
+  }
+  return out;
+}
+
+// ---- Запуск кода: песочница проекта и Piston ----
+export interface SandboxStatus {
+  sandbox: {
+    available: boolean;
+    tools?: Record<string, string>;
+    network?: "proxy" | "off";
+    limits?: { max_timeout: number; default_timeout: number; max_output: number; max_parallel: number };
+  };
+  piston: { available: boolean; runtimes: { language: string; version: string; aliases?: string[]; runtime?: string }[] };
+}
+
+export interface PistonPackage {
+  language: string;
+  language_version: string;
+  installed: boolean;
+}
+
+export type RunEvent =
+  | { type: "info"; data: string }
+  | { type: "output"; data: string }
+  | { type: "error"; data: string }
+  | { type: "exit"; code: number | null; signal: number | null; duration: number; timed_out: boolean; truncated: boolean };
+
+/** Команда в песочнице проекта; события приходят по мере выполнения. */
+export async function runInProject(
+  projectId: string,
+  body: { command: string; timeout?: number; stdin?: string },
+  onEvent: (event: RunEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch(`${BASE}/projects/${projectId}/run`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!res.ok || !res.body) {
+    const detail = await res.json().catch(() => ({}));
+    throw new ApiError(res.status, typeof detail.detail === "string" ? detail.detail : `Ошибка ${res.status}`);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const frame = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 2);
+        if (frame.startsWith("data:")) onEvent(JSON.parse(frame.slice(5).trim()) as RunEvent);
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+export interface RunCodeResult {
+  language: string;
+  version: string;
+  exit_code?: number | null;
+  output?: string;
+  signal?: string | null;
+  message?: string;
+  compile?: { exit_code: number | null; output: string };
+  shown?: string;
 }
 
 export async function downloadProject(project: Project): Promise<void> {
@@ -325,6 +488,7 @@ export interface Design {
   brief: Record<string, unknown>;
   files: DesignFile[];
   design_system_ref?: string | null;
+  project_id?: string | null;
 }
 
 export interface KnowledgeDoc {
@@ -417,7 +581,10 @@ export interface PentestServer {
   user: string;
   status: string;
   egress_route: string;
+  auth: "key" | "password";
   has_key: boolean;
+  has_secret: boolean;
+  host_key?: string | null;
 }
 
 // ---- Типы M5 (Agent) ----
@@ -465,4 +632,42 @@ export interface AcunetixImportResult {
 export interface ProviderModel {
   name: string;
   enabled: boolean;
+  /** Умеет ли модель работать с файлами (инструментами). */
+  tools: boolean;
+  /** Макс. токенов ответа; max_output_manual=false — «Авто» (значение подобрано Layla). */
+  max_output?: number | null;
+  max_output_manual?: boolean;
+  /** Контекст модели в токенах: сколько истории отправлять. */
+  context?: number | null;
+  temperature?: number | null;
+  reasoning_effort?: "low" | "medium" | "high" | null;
+  /** Бюджет размышлений на шаг, токенов: null — «Авто» (6000), 0 — без ограничения. */
+  reasoning_budget?: number | null;
+  /** Параметры, от которых провайдер отказался. */
+  dropped?: string[];
+  /** Только в запросе: забыть подобранное автоматически. */
+  reset?: boolean;
+}
+
+// ---- Корзина ----
+export interface TrashChat {
+  id: string;
+  title?: string | null;
+  domain: string;
+  deleted_at: string;
+  purge_at: string;
+}
+
+export interface TrashProject {
+  id: string;
+  name: string;
+  chats: number;
+  deleted_at: string;
+  purge_at: string;
+}
+
+export interface TrashList {
+  days: number;
+  chats: TrashChat[];
+  projects: TrashProject[];
 }

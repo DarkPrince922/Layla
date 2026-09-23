@@ -54,7 +54,7 @@ export default function LoginPage() {
     <div className="grid min-h-screen place-items-center bg-ink-950 px-4">
       <div className="w-full max-w-sm">
         <div className="mb-6 flex items-center justify-center gap-2">
-          <div className="grid h-8 w-8 place-items-center rounded-md bg-gradient-to-br from-fuchsia-500 to-indigo-500 font-bold text-white">
+          <div className="grid h-8 w-8 place-items-center rounded-md bg-gradient-to-br from-fuchsia-500 to-accent-500 font-bold text-white">
             L
           </div>
           <span className="text-2xl font-semibold">Layla</span>
@@ -65,7 +65,7 @@ export default function LoginPage() {
         </div>
 
         {boot && (
-          <div className="mb-4 rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 text-xs">
+          <div className="mb-4 rounded-2xl border border-amber-500/40 bg-amber-500/10 p-4 text-xs">
             <p className="mb-2 font-semibold text-amber-300">
               Первый запуск — учётная запись администратора создана
             </p>
@@ -85,10 +85,10 @@ export default function LoginPage() {
           </div>
         )}
 
-        <form onSubmit={submit} className="space-y-3 rounded-lg border border-ink-700 bg-ink-900 p-5">
+        <form onSubmit={submit} className="space-y-3 rounded-2xl border border-ink-700 bg-ink-900 p-5">
           <h1 className="text-sm font-semibold text-neutral-200">{t("login.signin")}</h1>
           <input
-            className="w-full rounded-md border border-ink-700 bg-ink-800 px-3 py-2 text-sm outline-none focus:border-indigo-500"
+            className="w-full rounded-md border border-ink-700 bg-ink-800 px-3 py-2 text-sm outline-none focus:border-accent-500"
             placeholder={t("login.email")}
             type="email"
             required
@@ -96,7 +96,7 @@ export default function LoginPage() {
             onChange={(e) => setEmail(e.target.value)}
           />
           <input
-            className="w-full rounded-md border border-ink-700 bg-ink-800 px-3 py-2 text-sm outline-none focus:border-indigo-500"
+            className="w-full rounded-md border border-ink-700 bg-ink-800 px-3 py-2 text-sm outline-none focus:border-accent-500"
             placeholder={t("login.password")}
             type="password"
             required
@@ -112,7 +112,7 @@ export default function LoginPage() {
 
           <button
             disabled={busy}
-            className="w-full rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+            className="w-full rounded-md bg-accent-600 px-3 py-2 text-sm font-medium text-white hover:bg-accent-500 disabled:opacity-50"
           >
             {busy ? "…" : t("login.signin")}
           </button>

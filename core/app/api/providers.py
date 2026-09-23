@@ -6,6 +6,8 @@ flag and, on demand, a masked form.
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -119,6 +121,7 @@ async def list_keys(
     await _owned_provider(session, user, provider_id)
     rows = await session.scalars(
         select(ProviderKey).where(ProviderKey.provider_id == provider_id)
+        .order_by(ProviderKey.created_at, ProviderKey.id)  # в этом порядке ключи и используются
     )
     return [_key_out(k) for k in rows]
 
@@ -136,6 +139,8 @@ async def add_key(
         label=body.label,
         secret_ref=crypto.encrypt(body.api_key),
         status=KeyStatus.active,
+        # Точное время: по нему ключи берутся по порядку (func.now() в SQLite — до секунды).
+        created_at=datetime.now(UTC),
     )
     session.add(key)
     await session.flush()
@@ -220,7 +225,9 @@ async def get_provider_models(
     session: AsyncSession = Depends(get_session),
 ) -> list[ProviderModelInfo]:
     provider = await _owned_provider(session, user, provider_id)
-    return [ProviderModelInfo(**m) for m in (provider.models or [])]
+    # Список не загружали — в чатах работает модель по умолчанию; её тоже можно настроить.
+    entries = provider.models or ([{"name": provider.default_model, "enabled": True}] if provider.default_model else [])
+    return _with_caps(provider, entries)
 
 
 @router.post("/{provider_id}/fetch-models", response_model=list[ProviderModelInfo])
@@ -245,7 +252,7 @@ async def fetch_provider_models(
     merged = [{"name": n, "enabled": prev.get(n, True)} for n in names]
     provider.models = merged
     await session.commit()
-    return [ProviderModelInfo(**m) for m in merged]
+    return _with_caps(provider, merged)
 
 
 @router.put("/{provider_id}/models", response_model=list[ProviderModelInfo])
@@ -256,6 +263,38 @@ async def set_provider_models(
     session: AsyncSession = Depends(get_session),
 ) -> list[ProviderModelInfo]:
     provider = await _owned_provider(session, user, provider_id)
-    provider.models = [m.model_dump() for m in body.models]
+    provider.models = [{"name": m.name, "enabled": m.enabled} for m in body.models]
+    caps = dict(provider.model_caps or {})
+    for m in body.models:
+        entry = {"tools": m.tools} if m.reset else {**(caps.get(m.name) or {}), "tools": m.tools}
+        if m.max_output_manual and m.max_output:
+            entry.update(max_output=m.max_output, max_output_cap=m.max_output, max_output_manual=True)
+        elif entry.get("max_output_manual"):
+            # Вернули «Авто»: снимаем ручной потолок, дальше лимит подбирается сам.
+            for key in ("max_output", "max_output_cap", "max_output_manual"):
+                entry.pop(key, None)
+        for key in ("context", "temperature", "reasoning_effort", "reasoning_budget"):
+            value = getattr(m, key)
+            if value is None:
+                entry.pop(key, None)
+            else:
+                entry[key] = value
+        caps[m.name] = entry
+    provider.model_caps = caps
     await session.commit()
-    return body.models
+    return _with_caps(provider, provider.models)
+
+
+def _with_caps(provider: Provider, entries: list[dict]) -> list[ProviderModelInfo]:
+    caps = provider.model_caps or {}
+    out = []
+    for m in entries:
+        c = caps.get(m["name"]) or {}
+        out.append(ProviderModelInfo(
+            name=m["name"], enabled=bool(m.get("enabled", True)), tools=c.get("tools") is not False,
+            max_output=c.get("max_output"), max_output_manual=bool(c.get("max_output_manual")),
+            context=c.get("context"), temperature=c.get("temperature"),
+            reasoning_effort=c.get("reasoning_effort"), reasoning_budget=c.get("reasoning_budget"),
+            dropped=list(c.get("drop") or []),
+        ))
+    return out

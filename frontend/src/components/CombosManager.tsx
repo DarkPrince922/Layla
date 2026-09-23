@@ -52,14 +52,14 @@ export function CombosManager() {
         Наборы моделей с маршрутизацией: выбирается первая здоровая модель, при
         сбое/лимите — lockout и переход к следующей (circuit breaker).
       </p>
-      <div className="mb-3 flex flex-wrap items-end gap-2 rounded-lg border border-ink-700 bg-ink-900 p-3">
+      <div className="mb-3 flex flex-wrap items-end gap-2 rounded-xl border border-ink-700/70 bg-ink-800/30 p-5">
         <input value={name} onChange={(e) => setName(e.target.value)} placeholder="название"
           className="rounded-md border border-ink-700 bg-ink-800 px-2 py-1.5 text-xs" />
         <input value={models} onChange={(e) => setModels(e.target.value)}
           placeholder="модели через запятую (в порядке приоритета)"
           className="min-w-[240px] flex-1 rounded-md border border-ink-700 bg-ink-800 px-2 py-1.5 text-xs" />
         <button onClick={() => create.mutate()} disabled={!name || !models}
-          className="flex items-center gap-1 rounded-md bg-indigo-600 px-3 py-1.5 text-xs text-white disabled:opacity-50">
+          className="flex items-center gap-1 rounded-md bg-accent-600 px-3 py-1.5 text-xs text-white disabled:opacity-50">
           <Plus className="h-3.5 w-3.5" /> Создать
         </button>
       </div>
@@ -69,7 +69,7 @@ export function CombosManager() {
       ) : (
         <ul className="space-y-2">
           {combos.map((c) => (
-            <li key={c.id} className="rounded-lg border border-ink-700 bg-ink-900 p-3 text-xs">
+            <li key={c.id} className="rounded-xl border border-ink-700/70 bg-ink-800/30 p-5 text-xs">
               <div className="flex items-center gap-2">
                 <span className="font-medium text-neutral-200">{c.name}</span>
                 <span className="text-neutral-500">{c.models.join(" → ")}</span>

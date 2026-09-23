@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { KeyRound, ShieldCheck, ShieldOff, Trash2, UserPlus, Power } from "lucide-react";
 import { api, type AdminUser, type AdminUserCreated } from "@/lib/api";
 import { useAuth } from "@/store/auth";
+import { confirmAction } from "@/components/ConfirmDialog";
 
 interface Credential {
   email: string;
@@ -122,7 +123,7 @@ export function UsersSettings() {
       {/* Создание пользователя */}
       <div className="mt-6 rounded-lg border border-ink-700 bg-ink-900 p-4">
         <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
-          <UserPlus className="h-4 w-4 text-indigo-400" /> Добавить пользователя
+          <UserPlus className="h-4 w-4 text-accent-400" /> Добавить пользователя
         </div>
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
           <input
@@ -130,19 +131,19 @@ export function UsersSettings() {
             onChange={(e) => setEmail(e.target.value)}
             type="email"
             placeholder="e-mail"
-            className="rounded-md border border-ink-700 bg-ink-800 px-2.5 py-1.5 text-sm outline-none focus:border-indigo-500"
+            className="rounded-md border border-ink-700 bg-ink-800 px-2.5 py-1.5 text-sm outline-none focus:border-accent-500"
           />
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="Имя (необязательно)"
-            className="rounded-md border border-ink-700 bg-ink-800 px-2.5 py-1.5 text-sm outline-none focus:border-indigo-500"
+            className="rounded-md border border-ink-700 bg-ink-800 px-2.5 py-1.5 text-sm outline-none focus:border-accent-500"
           />
           <input
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             placeholder="Пароль (пусто — сгенерировать)"
-            className="rounded-md border border-ink-700 bg-ink-800 px-2.5 py-1.5 text-sm outline-none focus:border-indigo-500"
+            className="rounded-md border border-ink-700 bg-ink-800 px-2.5 py-1.5 text-sm outline-none focus:border-accent-500"
           />
           <label className="flex items-center gap-2 px-1 text-xs text-neutral-300">
             <input
@@ -156,7 +157,7 @@ export function UsersSettings() {
         <button
           onClick={() => create.mutate()}
           disabled={!email.trim() || create.isPending}
-          className="mt-3 rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
+          className="mt-3 rounded-md bg-accent-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-accent-500 disabled:opacity-40"
         >
           {create.isPending ? "Создание…" : "Создать"}
         </button>
@@ -176,7 +177,7 @@ export function UsersSettings() {
                 <div className="flex items-center gap-2">
                   <span className="truncate text-sm text-neutral-200">{u.email}</span>
                   {u.is_admin && (
-                    <span className="rounded bg-indigo-500/20 px-1.5 py-0.5 text-[10px] text-indigo-300">
+                    <span className="rounded bg-accent-500/20 px-1.5 py-0.5 text-[10px] text-accent-300">
                       админ
                     </span>
                   )}
@@ -220,8 +221,8 @@ export function UsersSettings() {
                 {u.id !== meId && (
                   <button
                     title="Удалить"
-                    onClick={() => {
-                      if (confirm(`Удалить пользователя ${u.email}? Данные будут удалены безвозвратно.`))
+                    onClick={async () => {
+                      if (await confirmAction(`Удалить пользователя ${u.email}? Данные будут удалены безвозвратно.`))
                         remove.mutate(u.id);
                     }}
                     className="rounded p-1.5 text-neutral-400 hover:bg-red-500/20 hover:text-red-300"

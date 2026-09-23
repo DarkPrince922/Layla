@@ -1,289 +1,419 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Sparkles, Monitor, Tablet, Smartphone, Code2, Eye } from "lucide-react";
-import { api, type Design, type Job, type ModelInfo } from "@/lib/api";
+import { useRouter } from "next/navigation";
+import {
+  ArrowLeft, ArrowRight, ChevronDown, Code2, Columns2, Eye, History, Loader2, Monitor, MousePointerClick, Palette,
+  Smartphone, Sparkles, Tablet, Trash2,
+} from "lucide-react";
+import { ChatPanel } from "@/components/ChatPanel";
+import { PickBar, PickFrame } from "@/components/PickBar";
+import { pickMessage, type PickedElement } from "@/lib/pick";
+import { DesignBriefForm } from "@/components/DesignBriefForm";
+import { CodeStream, DesignLive, isActive } from "@/components/DesignLive";
+import { api, type Chat, type Design, type FileContent, type FileNode, type Job, type ModelInfo, type Project } from "@/lib/api";
+import { DEFAULT_BRIEF, briefPayload, loadBrief, saveBrief, type Brief } from "@/lib/design-brief";
+import { useAuth } from "@/store/auth";
+import { confirmAction } from "@/components/ConfirmDialog";
 
-const STACKS = ["html", "react", "vue"];
-const ARTIFACTS = ["Landing", "Dashboard", "Pricing", "Mobile app", "Email", "Editorial", "Slides"];
-const DIRECTIONS = ["Editorial", "Modern minimal", "Tech utility", "Brutalist", "Soft warm"];
-const THEMES = ["light", "dark", "both"];
-const PAGES = ["Single", "Multi"];
+const BREAKPOINTS = { desktop: "100%", tablet: "768px", mobile: "390px" } as const;
 
-const BREAKPOINTS = {
-  desktop: "100%",
-  tablet: "768px",
-  mobile: "390px",
-} as const;
+/** Что показываем в превью: файлы открытого чата или сохранённую версию брифа. */
+type Source = { kind: "chat" } | { kind: "design"; id: string };
 
 export function DesignDomain() {
   const qc = useQueryClient();
-  const [brief, setBrief] = useState({
-    artifact_type: "Landing",
-    direction: "Modern minimal",
-    tone: "",
-    theme: "both",
-    pages: "Single",
-    reference: "",
-    brand: "",
-    notes: "",
-  });
+  const router = useRouter();
+  const [brief, setBrief] = useState<Brief>(DEFAULT_BRIEF);
+  const briefLoaded = useRef(false);
   const [stack, setStack] = useState("html");
   const [model, setModel] = useState("");
-  const [active, setActive] = useState<Design | null>(null);
-  const [view, setView] = useState<"preview" | "code">("preview");
+  const [briefOpen, setBriefOpen] = useState(false);
+  const [source, setSource] = useState<Source>({ kind: "chat" });
+  const [chatProject, setChatProject] = useState<string | null>(null);
+  const [view, setView] = useState<"preview" | "code" | "split">("preview");
   const [bp, setBp] = useState<keyof typeof BREAKPOINTS>("desktop");
+  const [pane, setPane] = useState<"chat" | "result">("chat");
+  const [busy, setBusy] = useState(false);
+  const versionsMenu = useRef<HTMLDetailsElement>(null);
   const [error, setError] = useState<string | null>(null);
-  const [note, setNote] = useState<string | null>(null);
+  // Генерация по брифу, которую показываем вживую; watching=false — пользователь смотрит другое.
+  const [liveJobId, setLiveJobId] = useState<string | null>(null);
+  const [watching, setWatching] = useState(false);
+  // Правка по клику: режим выбора и выбранный в превью элемент.
+  const [picking, setPicking] = useState(false);
+  const [pickedEl, setPickedEl] = useState<PickedElement | null>(null);
+  const [pickBusy, setPickBusy] = useState(false);
 
-  const { data: models = [] } = useQuery({
-    queryKey: ["models"],
-    queryFn: () => api.get<ModelInfo[]>("/models"),
-  });
-  const { data: designs = [] } = useQuery({
-    queryKey: ["designs"],
-    queryFn: () => api.get<Design[]>("/designs"),
+  const { data: models = [] } = useQuery({ queryKey: ["models"], queryFn: () => api.get<ModelInfo[]>("/models") });
+  const { data: designs = [], isSuccess: designsLoaded } = useQuery({ queryKey: ["designs"], queryFn: () => api.get<Design[]>("/designs") });
+  // Тот же ключ, что у истории в ChatPanel, — общий кеш, без лишнего запроса.
+  const owner = useAuth(s => s.user?.id);
+  const { data: chats = [], isSuccess: chatsLoaded } = useQuery({
+    queryKey: ["chats", owner, "design", undefined],
+    queryFn: () => api.get<Chat[]>("/chats?domain=design"),
   });
 
-  // Генерация идёт в ФОНЕ: можно уйти в другой домен, прогресс виден в панели
-  // «В работе». Готовый дизайн подтянется в историю по завершении задачи.
+  // Файлы чата: их пишет агент, поэтому превью показывает актуальный результат.
+  const tree = useQuery({
+    queryKey: ["design-files", chatProject],
+    enabled: !!chatProject,
+    queryFn: () => api.get<FileNode[]>(`/projects/${chatProject}/files`),
+  });
+  const page = useMemo(() => {
+    const list = (tree.data || []).filter(f => !f.is_dir);
+    return list.find(f => f.name === "index.html") || list.find(f => f.name.endsWith(".html")) || null;
+  }, [tree.data]);
+  const live = useQuery({
+    queryKey: ["design-file", chatProject, page?.path],
+    enabled: !!chatProject && !!page,
+    queryFn: () => api.get<FileContent>(`/projects/${chatProject}/file?path=${encodeURIComponent(page!.path)}`),
+  });
+
+  const liveJob = useQuery({
+    queryKey: ["design-job", liveJobId],
+    enabled: !!liveJobId,
+    queryFn: () => api.get<Job>(`/jobs/${liveJobId}`),
+    refetchInterval: q => (!q.state.data || isActive(q.state.data) ? 700 : false),
+    refetchIntervalInBackground: true,
+  });
+  // Генерация, начатая раньше (до перезагрузки страницы или в другом разделе), — продолжаем показывать.
+  const running = useQuery({
+    queryKey: ["design-running-jobs"],
+    queryFn: () => api.get<Job[]>("/jobs?active=true&limit=50"),
+    // Только при открытии раздела и всегда свежий список: старый кеш вернул бы давно законченную задачу.
+    staleTime: Infinity,
+    gcTime: 0,
+    refetchOnWindowFocus: false,
+  });
+
   const generate = useMutation({
-    mutationFn: () =>
-      api.post<Job>("/designs/generate", { stack, brief, model: model || undefined }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["jobs", "active"] });
+    mutationFn: () => api.post<Job>("/designs/generate", { stack, brief: briefPayload(brief), model: model || undefined }),
+    onSuccess: job => {
+      setLiveJobId(job.id);
+      setWatching(true);
+      setView("split");
+      setPane("result");
+      qc.invalidateQueries({ queryKey: ["jobs"] });
+      setBriefOpen(false);
       setError(null);
-      setNote("Генерация запущена в фоне — следите за прогрессом в панели «В работе» слева. Можно переключиться в другой домен.");
     },
-    onError: (e) => setError(e instanceof Error ? e.message : "Ошибка генерации"),
+    onError: e => setError(e instanceof Error ? e.message : "Ошибка генерации"),
+  });
+  const resume = useMutation({
+    mutationFn: (id: string) => api.post<Job>(`/designs/generate/${id}/resume`),
+    onSuccess: next => { setLiveJobId(next.id); setWatching(true); setError(null); qc.invalidateQueries({ queryKey: ["jobs"] }); },
+    onError: e => setError(e instanceof Error ? e.message : "Не удалось продолжить генерацию"),
+  });
+  const stop = useMutation({
+    mutationFn: (id: string) => api.post<Job>(`/jobs/${id}/cancel`),
+    onSettled: () => liveJob.refetch(),
+    onError: e => setError(e instanceof Error ? e.message : "Не удалось остановить"),
   });
 
-  const html = active?.files?.[0]?.content ?? "";
+  useEffect(() => {
+    if (briefLoaded.current) { saveBrief(brief); return; }
+    briefLoaded.current = true;
+    setBrief(loadBrief());
+  }, [brief]);
+  useEffect(() => {
+    const job = running.data?.find(j => j.kind === "design.generate");
+    if (job) { setLiveJobId(id => id ?? job.id); setWatching(true); }
+  }, [running.data]);
+  // Генерация закончилась: готовую версию сразу показываем в превью.
+  const finished = liveJob.data?.status === "done" ? liveJob.data.result.design_id : undefined;
+  useEffect(() => {
+    if (typeof finished !== "string") return;
+    let cancelled = false;
+    qc.invalidateQueries({ queryKey: ["designs"] }).then(() => {
+      if (cancelled) return;
+      setSource({ kind: "design", id: finished });
+      setLiveJobId(null);
+      setWatching(false);
+    });
+    qc.invalidateQueries({ queryKey: ["providers"] });  // модель могла подстроить свои настройки
+    return () => { cancelled = true; };
+  }, [finished, qc]);
+
+  // Бриф раскрывается сам только на совсем пустом разделе. Раньше он открывался,
+  // когда не было версий, и прятал чат — вместе с кнопками удаления и очистки истории.
+  useEffect(() => {
+    if (designsLoaded && chatsLoaded && !designs.length && !chats.length) setBriefOpen(true);
+  }, [designsLoaded, chatsLoaded, designs.length, chats.length]);
+  useEffect(() => {
+    const linked = new URLSearchParams(window.location.search).get("design");
+    if (linked && designs.some(d => d.id === linked)) setSource({ kind: "design", id: linked });
+  }, [designs]);
+  useEffect(() => {
+    const mine = (e: Event) => (e as CustomEvent<{ domain?: string }>).detail?.domain === "design";
+    // Клик по готовой генерации в «В работе» открывает именно эту версию.
+    const result = (e: Event) => {
+      if (!mine(e)) return;
+      const detail = (e as CustomEvent<{ design_id?: unknown; job_id?: unknown }>).detail;
+      if (typeof detail.design_id === "string") {
+        setSource({ kind: "design", id: detail.design_id });
+        setWatching(false);
+      } else if (typeof detail.job_id === "string") {
+        // Идущая или сорвавшаяся генерация — показываем её ход и черновик.
+        setLiveJobId(detail.job_id);
+        setWatching(true);
+      }
+      setPane("result");
+    };
+    const chat = (e: Event) => { if (mine(e)) setPane("chat"); };
+    window.addEventListener("layla:open-workspace", result);
+    window.addEventListener("layla:open-chat", chat);
+    return () => { window.removeEventListener("layla:open-workspace", result); window.removeEventListener("layla:open-chat", chat); };
+  }, []);
+
+  // Агент дописал файл — перечитываем превью, чтобы оно не отставало от чата.
+  const refresh = useCallback(() => {
+    qc.invalidateQueries({ queryKey: ["design-files", chatProject] });
+    qc.invalidateQueries({ queryKey: ["design-file", chatProject] });
+  }, [qc, chatProject]);
+  const bindProject = useCallback((id: string | null) => setChatProject(id), []);
+
+  const showLive = !!liveJobId && watching;
+  const picked = source.kind === "design" ? designs.find(d => d.id === source.id) || null : null;
+  // Пока чат не создал страницу, показывать нечего — тогда видна последняя версия брифа.
+  const version = picked || (page ? null : designs[0] || null);
+  const html = version ? version.files?.[0]?.content ?? "" : live.data?.content ?? "";
+
+  const versionLabel = (d: Design) => {
+    const i = designs.findIndex(x => x.id === d.id);
+    return `Версия ${designs.length - i} · ${String((d.brief as Record<string, string>)?.artifact_type || "Design")} · ${d.stack}`;
+  };
+  function choose(next: Source) {
+    setSource(next);
+    setWatching(false);
+    if (versionsMenu.current) versionsMenu.current.open = false;
+  }
+  async function clearVersions() {
+    if (!designs.length || !(await confirmAction(`Удалить все версии (${designs.length})? Проекты, созданные из них в «Коде», останутся.`))) return;
+    setBusy(true);
+    try {
+      await api.del("/designs");
+      setSource({ kind: "chat" });
+      await qc.invalidateQueries({ queryKey: ["designs"] });
+      if (versionsMenu.current) versionsMenu.current.open = false;
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось удалить версии");
+    } finally { setBusy(false); }
+  }
+
+  async function removeVersion(id: string) {
+    if (!(await confirmAction("Удалить эту версию макета? Проект, созданный из неё, останется."))) return;
+    setBusy(true);
+    try {
+      await api.del(`/designs/${id}`);
+      if (source.kind === "design" && source.id === id) setSource({ kind: "chat" });
+      await qc.invalidateQueries({ queryKey: ["designs"] });
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось удалить версию");
+    } finally { setBusy(false); }
+  }
+
+  function stopPicking() { setPicking(false); setPickedEl(null); }
+  /** Задача по выбранному элементу — в дизайн-чат. Версию по брифу сначала копируем в новый чат. */
+  async function sendPick(request: string) {
+    if (!pickedEl) return;
+    setPickBusy(true);
+    try {
+      const text = pickMessage(pickedEl, request, version ? "index.html" : page?.path);
+      if (version) {
+        const chat = await api.post<Chat>(`/designs/${version.id}/chat`);
+        await qc.invalidateQueries({ queryKey: ["chats"] });
+        window.dispatchEvent(new CustomEvent("layla:open-chat", { detail: chat }));
+        window.dispatchEvent(new CustomEvent("layla:chat-send", { detail: { domain: "design", text, chat_id: chat.id } }));
+        setSource({ kind: "chat" });
+      } else {
+        window.dispatchEvent(new CustomEvent("layla:chat-send", { detail: { domain: "design", text } }));
+      }
+      stopPicking();
+      setError(null);
+      // На телефоне превью и чат — разные экраны: показываем чат, где агент уже работает.
+      if (window.matchMedia?.("(max-width: 760px)").matches) setPane("chat");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось отправить правку");
+    } finally { setPickBusy(false); }
+  }
+
+  /** Передать увиденное в домен «Код»: там файловое дерево, редактор и агент. */
+  async function openInCode() {
+    setBusy(true);
+    try {
+      let projectId = chatProject;
+      if (version) {
+        const project = await api.post<Project>(`/designs/${version.id}/project`);
+        projectId = project.id;
+        await Promise.all([
+          qc.invalidateQueries({ queryKey: ["designs"] }),
+          qc.invalidateQueries({ queryKey: ["projects"] }),
+        ]);
+      }
+      if (!projectId) { setError("Сначала сгенерируйте макет или начните чат."); return; }
+      // Папка чата становится проектом «Кода»: появляется в списке и не удаляется вместе с чатом.
+      if (!version) await api.post<Project>(`/projects/${projectId}/promote`);
+      // Сбрасываем кеш списка проектов: «Код» загрузит его заново уже с этим проектом.
+      qc.removeQueries({ queryKey: ["projects"] });
+      router.push(`/code?project=${projectId}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось передать макет в Код");
+    } finally { setBusy(false); }
+  }
 
   return (
-    <div className="flex h-full">
-      {/* Левая колонка: бриф */}
-      <div className="flex w-80 shrink-0 flex-col overflow-y-auto border-r border-ink-700 bg-ink-900 p-4">
-        <h2 className="mb-3 text-sm font-semibold">Бриф дизайна</h2>
-
-        <label className="mb-1 block text-[11px] uppercase text-neutral-500">Стек</label>
-        <div className="mb-3 flex gap-1">
-          {STACKS.map((s) => (
-            <button
-              key={s}
-              onClick={() => setStack(s)}
-              className={`flex-1 rounded px-2 py-1 text-xs ${
-                stack === s ? "bg-indigo-600 text-white" : "bg-ink-800 text-neutral-400"
-              }`}
-            >
-              {s === "html" ? "Plain HTML" : s === "react" ? "React" : "Vue"}
-            </button>
-          ))}
-        </div>
-
-        <Field label="Тип артефакта">
-          <select
-            value={brief.artifact_type}
-            onChange={(e) => setBrief({ ...brief, artifact_type: e.target.value })}
-            className="w-full rounded-md border border-ink-700 bg-ink-800 px-2 py-1.5 text-xs"
-          >
-            {ARTIFACTS.map((a) => (
-              <option key={a}>{a}</option>
-            ))}
-          </select>
-        </Field>
-
-        <Field label="Направление">
-          <select
-            value={brief.direction}
-            onChange={(e) => setBrief({ ...brief, direction: e.target.value })}
-            className="w-full rounded-md border border-ink-700 bg-ink-800 px-2 py-1.5 text-xs"
-          >
-            {DIRECTIONS.map((d) => (
-              <option key={d}>{d}</option>
-            ))}
-          </select>
-        </Field>
-
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-          <Field label="Тема">
-            <select
-              value={brief.theme}
-              onChange={(e) => setBrief({ ...brief, theme: e.target.value })}
-              className="w-full rounded-md border border-ink-700 bg-ink-800 px-2 py-1.5 text-xs"
-            >
-              {THEMES.map((t) => (
-                <option key={t}>{t}</option>
-              ))}
-            </select>
-          </Field>
-          <Field label="Страницы">
-            <select
-              value={brief.pages}
-              onChange={(e) => setBrief({ ...brief, pages: e.target.value })}
-              className="w-full rounded-md border border-ink-700 bg-ink-800 px-2 py-1.5 text-xs"
-            >
-              {PAGES.map((p) => (
-                <option key={p}>{p}</option>
-              ))}
-            </select>
-          </Field>
-        </div>
-
-        <Field label="Тон">
-          <input
-            value={brief.tone}
-            onChange={(e) => setBrief({ ...brief, tone: e.target.value })}
-            placeholder="напр. дружелюбный, деловой"
-            className="w-full rounded-md border border-ink-700 bg-ink-800 px-2 py-1.5 text-xs"
-          />
-        </Field>
-        <Field label="Референс (URL)">
-          <input
-            value={brief.reference}
-            onChange={(e) => setBrief({ ...brief, reference: e.target.value })}
-            className="w-full rounded-md border border-ink-700 bg-ink-800 px-2 py-1.5 text-xs"
-          />
-        </Field>
-        <Field label="Доп. требования">
-          <textarea
-            value={brief.notes}
-            onChange={(e) => setBrief({ ...brief, notes: e.target.value })}
-            rows={3}
-            className="w-full resize-none rounded-md border border-ink-700 bg-ink-800 px-2 py-1.5 text-xs"
-          />
-        </Field>
-
-        <div className="mb-3 mt-1">
-          <label className="mb-1 block text-[11px] uppercase text-neutral-500">Модель</label>
-          <select
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            className="w-full rounded-md border border-ink-700 bg-ink-800 px-2 py-1.5 text-xs"
-          >
-            {models.length === 0 && <option value="">Нет активных моделей</option>}
-            {models.map((m) => (
-              <option key={m.provider_id} value={m.name}>
-                {m.name}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        {error && <p className="mb-2 text-xs text-red-400">{error}</p>}
-
-        <button
-          onClick={() => generate.mutate()}
-          disabled={generate.isPending}
-          className="flex items-center justify-center gap-1.5 rounded-md bg-indigo-600 px-3 py-2 text-sm text-white hover:bg-indigo-500 disabled:opacity-50"
-        >
-          <Sparkles className="h-4 w-4" />
-          {generate.isPending ? "Запуск…" : "Сгенерировать в фоне"}
+    <div className="domain-workspace flex h-full min-w-0 flex-col">
+      <header className="workspace-toolbar">
+        <span className="grid h-10 w-10 place-items-center rounded-xl bg-accent-500/10 text-accent-300"><Palette className="h-5 w-5" /></span>
+        <div className="workspace-title"><h1>Дизайн</h1><p>Бриф даёт первый макет, чат его дорабатывает, «Код» превращает в сайт</p></div>
+        <button className="secondary-button ml-auto text-xs" onClick={openInCode} disabled={busy || (!version && !chatProject)}>
+          <Code2 className="h-4 w-4" /><span>Открыть в Коде</span>
         </button>
+      </header>
 
-        {note && (
-          <p className="mt-2 rounded border border-indigo-500/30 bg-indigo-500/10 px-2 py-1.5 text-[11px] leading-relaxed text-indigo-200">
-            {note}
-          </p>
-        )}
-
-        {designs.length > 0 && (
-          <div className="mt-4">
-            <div className="mb-1 text-[11px] uppercase text-neutral-500">История</div>
-            <div className="space-y-1">
-              {designs.map((d) => (
-                <button
-                  key={d.id}
-                  onClick={() => setActive(d)}
-                  className={`block w-full truncate rounded px-2 py-1 text-left text-xs ${
-                    active?.id === d.id ? "bg-ink-700 text-white" : "text-neutral-400 hover:bg-ink-800"
-                  }`}
-                >
-                  {String((d.brief as Record<string, string>)?.artifact_type || "Design")} · {d.stack}
-                </button>
-              ))}
-            </div>
+      <div className="domain-columns" data-detail={pane === "result"}>
+        {/* Левая колонка: быстрый старт по брифу + чат-доработка */}
+        <div className="domain-list is-chat">
+          <button className="domain-back items-center gap-2 px-4 py-3 text-sm text-neutral-400" onClick={() => setPane("result")}>Превью<ArrowRight className="h-4 w-4" /></button>
+          {/* Бриф и чат раскрываются по очереди: вдвоём в одной колонке они
+              зажимают друг друга, и поле ввода чата обрезается. */}
+          <div className={`flex flex-col border-b border-ink-700/50 ${briefOpen ? "min-h-0 flex-1" : "shrink-0"}`}>
+            <button onClick={() => setBriefOpen(v => !v)} aria-expanded={briefOpen} className="flex w-full items-center gap-2 px-4 py-3 text-sm text-neutral-300">
+              <Sparkles className="h-4 w-4 text-accent-300" />
+              <span className="flex-1 text-left">Быстрый старт по брифу</span>
+              <ChevronDown className={`h-4 w-4 transition-transform ${briefOpen ? "rotate-180" : ""}`} />
+            </button>
+            {briefOpen && (
+              <DesignBriefForm brief={brief} onChange={setBrief} stack={stack} onStack={setStack}
+                model={model} onModel={setModel} models={models} pending={generate.isPending}
+                onGenerate={() => generate.mutate()} />
+            )}
           </div>
-        )}
-      </div>
-
-      {/* Правая часть: превью / код */}
-      <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex items-center gap-2 border-b border-ink-700 bg-ink-900 px-4 py-2">
-          <div className="flex gap-1">
-            <ToolbarBtn active={view === "preview"} onClick={() => setView("preview")}>
-              <Eye className="h-3.5 w-3.5" /> Preview
-            </ToolbarBtn>
-            <ToolbarBtn active={view === "code"} onClick={() => setView("code")}>
-              <Code2 className="h-3.5 w-3.5" /> Code
-            </ToolbarBtn>
+          {error && <p role="alert" className="border-b border-ink-700/50 px-4 py-2 text-xs text-red-300">{error}</p>}
+          <div className={briefOpen ? "hidden" : "min-h-0 flex-1"}>
+            <ChatPanel domain="design" onProject={bindProject} onFileChange={refresh} />
           </div>
-          {view === "preview" && (
-            <div className="ml-auto flex gap-1">
-              <ToolbarBtn active={bp === "desktop"} onClick={() => setBp("desktop")}>
-                <Monitor className="h-3.5 w-3.5" />
-              </ToolbarBtn>
-              <ToolbarBtn active={bp === "tablet"} onClick={() => setBp("tablet")}>
-                <Tablet className="h-3.5 w-3.5" />
-              </ToolbarBtn>
-              <ToolbarBtn active={bp === "mobile"} onClick={() => setBp("mobile")}>
-                <Smartphone className="h-3.5 w-3.5" />
-              </ToolbarBtn>
-            </div>
-          )}
         </div>
 
-        <div className="min-h-0 flex-1 overflow-auto bg-neutral-950 p-4">
-          {!active ? (
-            <div className="grid h-full place-items-center text-sm text-neutral-600">
-              Заполните бриф и нажмите «Сгенерировать».
+        {/* Правая колонка: живое превью того, что сейчас выбрано */}
+        <div className="domain-detail">
+          <button className="domain-back items-center gap-2 px-4 py-3 text-sm text-neutral-400" onClick={() => setPane("chat")}><ArrowLeft className="h-4 w-4" />К чату</button>
+          <div className="flex flex-wrap items-center gap-2 border-b border-ink-700/60 px-4 py-3">
+            <div className="flex gap-1">
+              <ToolbarBtn active={view === "preview"} onClick={() => setView("preview")}><Eye className="h-3.5 w-3.5" /> Превью</ToolbarBtn>
+              <ToolbarBtn active={view === "code"} onClick={() => setView("code")}><Code2 className="h-3.5 w-3.5" /> Код</ToolbarBtn>
+              <ToolbarBtn active={view === "split"} label="Код и превью рядом" onClick={() => setView("split")}><Columns2 className="h-3.5 w-3.5" /><span className="hidden sm:inline">Вместе</span></ToolbarBtn>
             </div>
-          ) : view === "preview" ? (
-            <div className="mx-auto h-full bg-white" style={{ width: BREAKPOINTS[bp], maxWidth: "100%" }}>
-              {/* Изолированный sandbox: скрипты выполняются, доступа к родителю нет. */}
-              <iframe
-                title="preview"
-                sandbox="allow-scripts"
-                srcDoc={html}
-                className="h-full w-full border-0"
-              />
+            {liveJob.data && !showLive && (
+              <button onClick={() => setWatching(true)} className="flex items-center gap-1.5 rounded-lg bg-accent-500/15 px-2.5 py-1.5 text-xs text-accent-100 hover:bg-accent-500/25">
+                {isActive(liveJob.data) && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                {isActive(liveJob.data) ? `Генерация · ${Math.round(liveJob.data.progress * 100)}%` : "Последняя генерация"}
+              </button>
+            )}
+            {/* Версии: выбор для превью и удаление — у каждой своя корзина. */}
+            <details ref={versionsMenu} className="relative min-w-0">
+              <summary aria-label="Версии и источник превью" className="flex cursor-pointer list-none items-center gap-1.5 rounded-lg bg-ink-900 px-2.5 py-1.5 text-xs [&::-webkit-details-marker]:hidden">
+                <History className="h-3.5 w-3.5 shrink-0 text-accent-300" />
+                <span className="max-w-[14rem] truncate">{showLive ? "Генерация по брифу" : version ? versionLabel(version) : page ? `Файлы чата · ${page.name}` : "Файлы чата"}</span>
+                <span className="shrink-0 text-neutral-500">{designs.length ? `· ${designs.length}` : ""}</span>
+                <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+              </summary>
+              <div className="absolute left-0 top-full z-20 mt-2 w-72 max-w-[calc(100vw-48px)] rounded-xl border border-ink-600 bg-ink-900 p-1.5 shadow-floating">
+                <button disabled={!page} onClick={() => choose({ kind: "chat" })} className={`block w-full truncate rounded-lg px-2 py-1.5 text-left text-xs disabled:opacity-50 ${!version && !showLive ? "bg-ink-800 text-white" : "hover:bg-ink-800"}`}>
+                  {page ? `Файлы чата · ${page.name}` : "Файлы чата — пока пусто"}
+                </button>
+                <p className="px-2 pb-1 pt-2 text-[11px] uppercase text-neutral-500">Версии по брифу</p>
+                {!designs.length && <p className="px-2 py-1 text-xs text-neutral-500">Пока нет — сгенерируйте по брифу.</p>}
+                <div className="max-h-64 overflow-y-auto">
+                  {designs.map(d => (
+                    <div key={d.id} className={`flex items-center rounded-lg ${version?.id === d.id && !showLive ? "bg-ink-800 text-white" : "hover:bg-ink-800"}`}>
+                      <button onClick={() => choose({ kind: "design", id: d.id })} className="min-w-0 flex-1 truncate px-2 py-1.5 text-left text-xs">{versionLabel(d)}</button>
+                      <button onClick={() => removeVersion(d.id)} disabled={busy} aria-label={`Удалить ${versionLabel(d)}`} title="Удалить версию" className="shrink-0 rounded p-1.5 text-neutral-500 hover:bg-red-500/15 hover:text-red-300">
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                {designs.length > 1 && (
+                  <button onClick={clearVersions} disabled={busy} className="mt-1 w-full rounded-lg px-2 py-1.5 text-left text-xs text-red-300 hover:bg-red-500/10">Удалить все версии</button>
+                )}
+              </div>
+            </details>
+            {view !== "code" && html && !showLive && (
+              <button onClick={() => (picking || pickedEl ? stopPicking() : setPicking(true))} aria-pressed={picking || !!pickedEl}
+                title="Нажмите на элемент в превью и опишите, что в нём изменить"
+                className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs ${picking || pickedEl ? "bg-accent-500/25 text-accent-100" : "bg-ink-900 text-neutral-300 hover:bg-ink-800"}`}>
+                <MousePointerClick className="h-3.5 w-3.5" />Правка по клику
+              </button>
+            )}
+            {view !== "code" && (
+              <div className="ml-auto hidden gap-1 sm:flex">
+                <ToolbarBtn label="Компьютер" active={bp === "desktop"} onClick={() => setBp("desktop")}><Monitor className="h-3.5 w-3.5" /></ToolbarBtn>
+                <ToolbarBtn label="Планшет" active={bp === "tablet"} onClick={() => setBp("tablet")}><Tablet className="h-3.5 w-3.5" /></ToolbarBtn>
+                <ToolbarBtn label="Телефон" active={bp === "mobile"} onClick={() => setBp("mobile")}><Smartphone className="h-3.5 w-3.5" /></ToolbarBtn>
+              </div>
+            )}
+          </div>
+
+          {showLive && liveJob.data ? (
+            <div className="min-h-0 flex-1 overflow-hidden bg-ink-950/40">
+              <DesignLive job={liveJob.data} view={view} width={BREAKPOINTS[bp]} stopping={stop.isPending}
+                onStop={() => stop.mutate(liveJob.data!.id)}
+                onResume={() => resume.mutate(liveJob.data!.id)} resuming={resume.isPending}
+                onClose={() => { setLiveJobId(null); setWatching(false); }} />
             </div>
           ) : (
-            <pre className="whitespace-pre-wrap text-xs leading-relaxed text-neutral-300">
-              <code>{html}</code>
-            </pre>
+          <div className={`min-h-0 flex-1 bg-ink-950/40 ${view === "split" && html ? "overflow-hidden" : "overflow-auto p-4"}`}>
+            {!html ? (
+              <div className="grid h-full place-items-center p-4 text-center">
+                <div className="max-w-sm">
+                  <span className="empty-orb"><Palette className="h-6 w-6" /></span>
+                  <h2 className="text-xl font-semibold">Каким будет ваш следующий проект?</h2>
+                  <p className="mt-3 text-sm leading-7 text-neutral-400">
+                    Заполните бриф для первого макета или просто опишите задачу в чате. Здесь появится живое превью,
+                    а кнопка «Открыть в Коде» перенесёт результат в домен Код — дорабатывать его до сайта.
+                  </p>
+                </div>
+              </div>
+            ) : view === "preview" ? (
+              <div className="mx-auto h-full bg-white" style={{ width: BREAKPOINTS[bp], maxWidth: "100%" }}>
+                {/* Изолированный sandbox: скрипты выполняются, доступа к родителю нет. */}
+                <PickFrame html={html} picking={picking} onPicked={el => { setPickedEl(el); setPicking(false); }} onCancel={stopPicking} />
+              </div>
+            ) : view === "code" ? (
+              <pre className="whitespace-pre-wrap text-xs leading-relaxed text-neutral-300"><code>{html}</code></pre>
+            ) : (
+              <div className="grid h-full min-h-0 grid-rows-2 lg:grid-cols-2 lg:grid-rows-1">
+                <div className="min-h-0 border-b border-ink-700/60 lg:border-b-0 lg:border-r"><CodeStream code={html} live={false} /></div>
+                <div className="min-h-0 p-3">
+                  <div className="mx-auto h-full bg-white" style={{ width: BREAKPOINTS[bp], maxWidth: "100%" }}>
+                    <PickFrame html={html} picking={picking} onPicked={el => { setPickedEl(el); setPicking(false); }} onCancel={stopPicking} />
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
           )}
+          {!showLive && <PickBar picking={picking} element={pickedEl} onSend={sendPick} onCancel={stopPicking} busy={pickBusy} />}
         </div>
       </div>
     </div>
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="mb-3">
-      <label className="mb-1 block text-[11px] uppercase text-neutral-500">{label}</label>
-      {children}
-    </div>
-  );
-}
-
-function ToolbarBtn({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
+function ToolbarBtn({ active, onClick, children, label }: {
+  active: boolean; label?: string; onClick: () => void; children: React.ReactNode;
 }) {
   return (
     <button
       onClick={onClick}
-      className={`flex items-center gap-1 rounded px-2 py-1 text-xs ${
-        active ? "bg-ink-700 text-white" : "text-neutral-400 hover:bg-ink-800"
-      }`}
+      aria-label={label}
+      aria-pressed={active}
+      className={`flex items-center gap-1 rounded px-2 py-1 text-xs ${active ? "bg-ink-700 text-white" : "text-neutral-400 hover:bg-ink-800"}`}
     >
       {children}
     </button>

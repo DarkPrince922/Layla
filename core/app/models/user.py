@@ -1,7 +1,9 @@
 """Users, workspaces, projects."""
 from __future__ import annotations
 
-from sqlalchemy import ForeignKey, String, Text
+import datetime as dt
+
+from sqlalchemy import DateTime, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -52,3 +54,8 @@ class Project(UUIDPk, Timestamps, Base):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     repo_url: Mapped[str | None] = mapped_column(String(1024))
     path: Mapped[str | None] = mapped_column(String(1024))
+    # project — проект домена «Код»; chat_workspace — рабочая папка чата
+    # Дизайна/OSINT/Пентеста: в списке проектов её нет, удаляется вместе с чатом.
+    kind: Mapped[str] = mapped_column(String(20), default="project", server_default="project")
+    # Корзина: не пусто — проект удалён и через 7 дней будет стёрт окончательно.
+    deleted_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), index=True)

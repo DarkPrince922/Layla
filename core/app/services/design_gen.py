@@ -1,9 +1,9 @@
 """Генерация UI-артефактов по брифу (спец. §5.6).
 
-Из брифа собирается промпт; модель через LiteLLM возвращает самодостаточный
-код. Для превью в изолированном iframe нужен один HTML-документ, поэтому даже
-для React/Vue просим модель вернуть цельный index.html (React — через CDN +
-Babel standalone). Результат нарезается на файлы для панели Code.
+Из брифа собирается промпт; модель возвращает самодостаточный код. Для превью в
+изолированном iframe нужен один HTML-документ, поэтому даже для React/Vue просим
+модель вернуть цельный index.html (React — через CDN + Babel standalone).
+Результат нарезается на файлы для панели Code.
 """
 from __future__ import annotations
 
@@ -16,41 +16,188 @@ _STACK_HINT = {
     "vue": "Vue 3 через CDN (global build), всё в одном index.html",
 }
 
+# Креативность: (температура, указание модели). None — температура из настроек модели.
+CREATIVITY = {
+    "safe": (0.35, "Сдержанно: проверенные паттерны, спокойная сетка, никаких экспериментов."),
+    "balanced": (None, "Баланс: современный узнаваемый стиль и пара запоминающихся деталей."),
+    "bold": (0.85, "Смело: выразительная типографика, необычная композиция, яркие акценты."),
+    "wild": (1.0, "Эксперимент: нарушай привычные шаблоны, удиви неожиданной композицией и "
+                  "деталями — но текст должен читаться, а интерфейс работать."),
+}
+# Принципы качественного фронтенда — общие для генерации по брифу и дизайн-чата.
+DESIGN_PRINCIPLES = (
+    "Принципы дизайна:\n"
+    "- Выбери одно ясное эстетическое направление и держись его. Избегай «типичного ИИ-шаблона»: "
+    "Inter/Roboto/Arial по умолчанию, фиолетово-синий градиент на белом, ряд одинаковых карточек, "
+    "всё по центру.\n"
+    "- Типографика: выразительный акцидентный шрифт для заголовков в паре с удобочитаемым для текста "
+    "(Google Fonts), чёткая шкала размеров, свободный межстрочный интервал.\n"
+    "- Цвет: цельная палитра через CSS-переменные — доминирующий цвет, акцент, нейтральные; "
+    "контраст не ниже WCAG AA.\n"
+    "- Композиция: осознанная сетка, асимметрия и наложения там, где уместно, продуманная воздушность "
+    "или плотность, явная иерархия.\n"
+    "- Атмосфера: фон с глубиной — градиентные пятна, шум, узоры, формы, а не пустая плоскость.\n"
+    "- Движение: несколько осмысленных анимаций (поочерёдное появление, hover), а не россыпь "
+    "эффектов; уважай prefers-reduced-motion.\n"
+    "- Детали: реалистичные тексты, состояния hover/focus/active/disabled, адаптивность от 360px, "
+    "семантичная разметка.\n"
+    "- Не повторяйся: разные задачи — разные решения."
+)
+# Дизайн-чат: те же принципы плюс работа правками, а не переписыванием страницы.
+DESIGN_CHAT_NOTE = (
+    DESIGN_PRINCIPLES + "\n"
+    "Работай по шагам: для правок существующей страницы — edit_file маленькими фрагментами; новую "
+    "большую страницу пиши частями (write_file, затем append_file)."
+)
+
+# Макет — один большой ответ: стартовый лимит длины выше, чем у хода чата.
+DESIGN_MAX_OUTPUT = 16384
+
+_THEMES = {
+    "light": "светлая",
+    "dark": "тёмная",
+    "both": "светлая и тёмная с переключателем (по умолчанию — как в системе)",
+}
+_PAGES = {
+    "Single": "одна страница",
+    "Multi": "несколько экранов в одном файле (навигация по якорям или вкладкам)",
+}
+
+# (ключ брифа, подпись в промпте) — в этом порядке поля попадают в задание.
+_FIELDS = (
+    ("brand", "Бренд / название"),
+    ("industry", "Сфера"),
+    ("audience", "Аудитория"),
+    ("tone", "Тон"),
+    ("layout", "Композиция"),
+    ("palette", "Палитра"),
+    ("accent_color", "Акцентный цвет"),
+    ("fonts", "Шрифты"),
+    ("density", "Плотность"),
+    ("radius", "Скругления"),
+    ("effects", "Эффекты"),
+    ("sections", "Секции (по порядку)"),
+    ("content", "Наполнение"),
+    ("imagery", "Изображения"),
+    ("icons", "Иконки"),
+    ("animation", "Анимации"),
+    ("interactivity", "Интерактивность"),
+    ("device", "Приоритет устройств"),
+    ("css", "CSS"),
+    ("reference", "Референс"),
+)
+
+
+def _text(value) -> str:
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(v).strip() for v in value if str(v).strip())
+    return str(value or "").strip()
+
+
+def temperature(brief: dict) -> float | None:
+    return CREATIVITY.get(brief.get("creativity") or "balanced", CREATIVITY["balanced"])[0]
+
 
 def build_prompt(brief: dict, stack: str) -> list[dict[str, str]]:
     """Собрать сообщения для LLM из брифа дизайна."""
     hint = _STACK_HINT.get(stack, _STACK_HINT["html"])
+    theme = brief.get("theme") or "both"
+    pages = brief.get("pages") or "Single"
     parts = [
-        f"Тип артефакта: {brief.get('artifact_type', 'Landing')}",
-        f"Направление: {brief.get('direction', 'Modern minimal')}",
-        f"Тон: {brief.get('tone', 'нейтральный')}",
-        f"Тема: {brief.get('theme', 'both')}",
-        f"Страницы: {brief.get('pages', 'Single')}",
+        f"Тип артефакта: {_text(brief.get('artifact_type')) or 'Landing'}",
+        f"Стилевое направление: {_text(brief.get('direction')) or 'Modern minimal'}",
+        f"Тема: {_THEMES.get(theme, theme)}",
+        f"Страницы: {_PAGES.get(pages, pages)}",
     ]
-    if brief.get("reference"):
-        parts.append(f"Референс: {brief['reference']}")
-    if brief.get("brand"):
-        parts.append(f"Бренд: {brief['brand']}")
+    for key, label in _FIELDS:
+        value = _text(brief.get(key))
+        if value:
+            parts.append(f"{label}: {value}")
+    language = _text(brief.get("language")) or "русский"
+    parts.append(f"Язык всех текстов интерфейса: {language}")
+    if brief.get("accessibility"):
+        parts.append("Доступность: WCAG AA — контраст, семантика, aria-атрибуты, видимый фокус, "
+                     "работа с клавиатуры, prefers-reduced-motion")
+    creativity = CREATIVITY.get(brief.get("creativity") or "balanced", CREATIVITY["balanced"])[1]
+    parts.append(f"Креативность: {creativity}")
     if brief.get("notes"):
-        parts.append(f"Доп. требования: {brief['notes']}")
+        parts.append(f"Доп. требования: {_text(brief['notes'])}")
 
     system = (
-        "Ты — дизайн-инженер. Сгенерируй красивый, отзывчивый UI-артефакт. "
+        "Ты — ведущий дизайн-инженер. Сделай законченный, красивый и отзывчивый UI-артефакт "
+        "уровня лучших продуктовых студий: продуманная типографическая шкала, сетка и ритм "
+        "отступов, согласованная палитра через CSS-переменные, состояния hover/focus/active, "
+        "реалистичные тексты по теме (не lorem ipsum), корректная вёрстка от 360px до широких экранов. "
         f"Стек: {hint}. Верни ЕДИНСТВЕННЫЙ полный документ index.html в одном блоке "
-        "```html ... ```, без пояснений. Никаких внешних сборок, только CDN."
+        "```html ... ```, без пояснений до и после. Никаких внешних сборок, только CDN. "
+        "Пиши документ по порядку: сначала <head> со всеми стилями, затем разметку секций "
+        "сверху вниз, скрипты — в конце <body>: так превью можно показывать по ходу генерации. "
+        "Картинки — только встроенный SVG, CSS-графика или https://picsum.photos; шрифты — Google Fonts.\n"
+        + DESIGN_PRINCIPLES + "\n"
+        "Размышляй коротко: несколько строк плана (направление, палитра, шрифты, секции). Не пиши код "
+        "и черновики в размышлениях — весь код только в ответе."
     )
-    user = "Бриф дизайна:\n" + "\n".join(parts)
+    user = "Бриф дизайна:\n" + "\n".join(f"- {p}" for p in parts)
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
 
 
+def design_caps(model_caps: dict | None, brief: dict) -> dict:
+    """Настройки модели из «Провайдеры → модель» с поправками для генерации макета."""
+    caps = dict(model_caps or {})
+    if not caps.get("max_output_manual"):
+        # «Авто»: макет длинный, начинаем не меньше DESIGN_MAX_OUTPUT, но не выше
+        # известного предела модели. Если и так не влезет — _turn поднимет лимит сам.
+        want = max(caps.get("max_output") or 0, DESIGN_MAX_OUTPUT)
+        cap = caps.get("max_output_cap")
+        caps["max_output"] = min(want, cap) if cap else want
+    value = temperature(brief)
+    if value is not None:
+        caps["temperature"] = value  # явный выбор в брифе важнее общей настройки модели
+    return caps
+
+
+# Макет не влез в предельную длину ответа: просим модель продолжить с места обрыва.
+MAX_CONTINUATIONS = 4
+CONTINUE_PROMPT = (
+    "Ответ оборвался на лимите длины. Продолжи документ ровно с места обрыва: без повторов уже "
+    "написанного, без пояснений и без открывающего ```html — только продолжение кода. "
+    "Когда документ будет готов, закрой блок ```."
+)
+_REOPEN = re.compile(r"^\s*```[ \t]*(?:html|htm)?[ \t]*\n", re.IGNORECASE)
+
+
+def join_continuation(base: str, piece: str) -> str:
+    """Склеить уже написанное с продолжением: убрать повторно открытый блок и нахлёст."""
+    if not base:
+        return piece
+    piece = _REOPEN.sub("", piece, count=1)
+    tail = base[-400:]
+    # Модели часто повторяют последнюю строку перед продолжением — срезаем нахлёст (от 20 символов).
+    for size in range(min(len(tail), len(piece)), 19, -1):
+        if tail.endswith(piece[:size]):
+            return base + piece[size:]
+    return base + piece
+
+
+_FENCE = re.compile(r"```[ \t]*(?:html|htm)?[ \t]*\n?", re.IGNORECASE)
+
+
 def extract_html(text: str) -> str:
-    """Извлечь HTML из ответа модели (из ```html```-блока или как есть)."""
-    m = re.search(r"```(?:html)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
-    code = m.group(1).strip() if m else text.strip()
-    return code
+    """Извлечь HTML из ответа модели (из ```html```-блока или как есть).
+
+    Незакрытый блок (ответ оборвался на лимите длины) тоже годится: берём всё после
+    открывающей ```html — браузер сам закроет недописанные теги.
+    """
+    m = re.search(r"```(?:html|htm)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    opening = _FENCE.search(text)
+    if opening:
+        return text[opening.end():].strip()
+    return text.strip()
 
 
 def to_files(html: str) -> list[dict]:

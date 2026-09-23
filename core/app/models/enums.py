@@ -98,6 +98,11 @@ class ServerStatus(str, enum.Enum):
     error = "error"
 
 
+class ServerAuth(str, enum.Enum):
+    key = "key"            # приватный SSH-ключ (рекомендуется)
+    password = "password"  # пароль (осознанно слабее ключа)
+
+
 class AgentRunStatus(str, enum.Enum):
     queued = "queued"
     running = "running"

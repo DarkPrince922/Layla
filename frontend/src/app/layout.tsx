@@ -1,6 +1,5 @@
+import { ConfirmHost } from "@/components/ConfirmDialog";
 import type { Metadata } from "next";
-// Self-hosted Manrope (variable, вкл. кириллицу) — шрифт не зависит от доступа
-// к Google Fonts ни при сборке, ни в рантайме: файлы едут внутри npm-пакета.
 import "@fontsource-variable/manrope";
 import "../styles/globals.css";
 import { Providers } from "./providers";
@@ -14,7 +13,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="ru" suppressHydrationWarning>
       <body>
-        <Providers>{children}</Providers>
+        <Providers>{children}<ConfirmHost /></Providers>
       </body>
     </html>
   );

@@ -29,6 +29,9 @@ class Provider(UUIDPk, Timestamps, Base):
     secret_ref: Mapped[str | None] = mapped_column(Text)
     # Кэш моделей провайдера: [{"name": str, "enabled": bool}] (Settings→Providers).
     models: Mapped[list] = mapped_column(JSONList, default=list)
+    # Что умеет каждая модель: {"<модель>": {"tools": false, "token_param": ...}}.
+    # Заполняется само, когда провайдер отклоняет неподдерживаемое, и правится в настройках.
+    model_caps: Mapped[dict] = mapped_column(JSONList, default=dict)
 
 
 class ProviderKey(UUIDPk, Timestamps, Base):

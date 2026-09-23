@@ -46,7 +46,7 @@ export function KnowledgeSettings() {
         Поиск по смыслу (косинусное сходство эмбеддингов).
       </p>
 
-      <div className="mb-6 space-y-2 rounded-lg border border-ink-700 bg-ink-900 p-4">
+      <div className="mb-6 space-y-2 rounded-xl border border-ink-700/70 bg-ink-800/30 p-5">
         <div className="flex gap-2">
           <input
             value={title}
@@ -76,13 +76,13 @@ export function KnowledgeSettings() {
         <button
           onClick={() => upload.mutate()}
           disabled={!title || !content || upload.isPending}
-          className="flex items-center gap-1.5 rounded-md bg-indigo-600 px-3 py-1.5 text-sm text-white disabled:opacity-50"
+          className="flex items-center gap-1.5 rounded-md bg-accent-600 px-3 py-1.5 text-sm text-white disabled:opacity-50"
         >
           <Upload className="h-4 w-4" /> {upload.isPending ? "Индексация…" : "Загрузить и проиндексировать"}
         </button>
       </div>
 
-      <div className="mb-6 rounded-lg border border-ink-700 bg-ink-900 p-4">
+      <div className="mb-6 rounded-xl border border-ink-700/70 bg-ink-800/30 p-5">
         <div className="flex gap-2">
           <input
             value={query}
@@ -104,7 +104,7 @@ export function KnowledgeSettings() {
             {hits.length === 0 && <p className="text-xs text-neutral-600">Ничего не найдено.</p>}
             {hits.map((h) => (
               <div key={h.chunk_id} className="rounded-md border border-ink-700 bg-ink-800 p-2 text-xs">
-                <div className="mb-1 text-[10px] text-neutral-500">
+                <div className="mb-1 text-[11px] text-neutral-500">
                   релевантность {h.score.toFixed(3)}
                 </div>
                 <div className="text-neutral-300">{h.content.slice(0, 300)}</div>
@@ -126,7 +126,7 @@ export function KnowledgeSettings() {
               <FileText className="h-4 w-4 text-neutral-500" />
               <span className="flex-1 truncate">{d.title}</span>
               {d.domain && (
-                <span className="rounded bg-ink-700 px-1.5 py-0.5 text-[10px] text-neutral-400">
+                <span className="rounded bg-ink-700 px-1.5 py-0.5 text-[11px] text-neutral-400">
                   {d.domain}
                 </span>
               )}

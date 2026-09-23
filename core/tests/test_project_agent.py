@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from app.config import get_settings
-from app.services import files, project_agent, tool_chat
+from app.services import agent_git, files, project_agent, tool_chat
 
 
 def call(name, arguments, ident="call1"):
@@ -182,7 +182,8 @@ async def test_agent_creates_reads_edits_deletes_and_persists(
         body = json.loads(request.content)
         requests.append(body)
         round_number = len(requests) - 1
-        assert len(body["tools"]) == 4
+        # Файловые инструменты и git проекта (запуск кода — только если песочница подключена).
+        assert len(body["tools"]) == len(project_agent.TOOLS) + len(agent_git.GIT_TOOLS)
         history = results(body, native)
         if round_number == 0:
             return provider_response(native, [call("list_files", {"path": "."})])
@@ -339,7 +340,7 @@ async def test_chat_project_binding_and_ownership(client, project_chat):
     project, chat = project_chat
     assert (
         await client.post("/api/chats", json={"project_id": project["id"], "domain": "osint"})
-    ).status_code == 400
+    ).status_code == 201
     await client.post("/api/auth/logout")
     await client.post(
         "/api/auth/register", json={"email": "otheragent@example.com", "password": "hunter2hunter2"}
@@ -431,3 +432,86 @@ async def test_round_limit_keeps_completed_changes(client, project_chat, monkeyp
     assert "лимит" in response.text and (Path(project["path"]) / "saved").read_text() == "ok"
     detail = (await client.get(f"/api/chats/{chat['id']}")).json()
     assert detail["messages"][-1]["meta"]["tools"][0]["change"]["path"] == "saved"
+
+
+@pytest.mark.parametrize("domain", ["code", "osint", "design", "pentest"])
+async def test_background_tools_every_domain(client, monkeypatch, tmp_path, domain):
+    import asyncio
+    import io
+    import zipfile
+    monkeypatch.setattr(get_settings(), "projects_dir", str(tmp_path))
+    await client.post("/api/auth/register", json={"email": "domains@example.com", "password": "hunter2hunter2"})
+    await add_provider(client)
+    personas = (await client.get("/api/personas")).json()
+    persona = next((p["id"] for p in personas if p["kind"] == domain), None)
+    chat = (await client.post("/api/chats", json={"domain": domain, "model": "test-model", "persona_id": persona})).json()
+    turns = []
+    def handler(request):
+        body = json.loads(request.content)
+        turns.append(body)
+        if len(turns) == 1:
+            response = provider_response(False, [call("write_file", {"path": "report.md", "content": "# Saved"})])
+            # Thinking providers require this field to be replayed along with tool calls.
+            prefix = 'data: ' + json.dumps({"choices": [{"delta": {"reasoning_content": "Plan a report"}}]}) + '\n\n'
+            # Some compatible gateways repeat the complete tool name/id on later chunks.
+            wire = response.text
+            if domain == "code":
+                first = wire.split("\n\n", 1)[0] + "\n\n"
+                wire = first + wire
+            return httpx.Response(200, text=prefix + wire)
+        assistant = next(m for m in reversed(body["messages"]) if m["role"] == "assistant")
+        assert assistant["reasoning_content"] == "Plan a report"
+        assert results(body, False)[-1]["change"]["operation"] == "create"
+        return provider_response(False, text="Report saved")
+    mock_provider(monkeypatch, handler)
+    response = await client.post(f"/api/chats/{chat['id']}/run", json={"content": "Create report", "request_id": "once"})
+    assert response.status_code == 202, response.text
+    job_id = response.json()["id"]
+    for _ in range(150):
+        state = (await client.get(f"/api/jobs/{job_id}")).json()
+        if state["status"] in ("done", "error"): break
+        await asyncio.sleep(.02)
+    assert state["status"] == "done", state
+    detail = (await client.get(f"/api/chats/{chat['id']}")).json()
+    assert detail["last_job"]["id"] == job_id
+    assert detail["messages"][-1]["meta"]["tools"][0]["change"]["path"] == "report.md"
+    archive = await client.get(f"/api/projects/{detail['project_id']}/archive")
+    assert archive.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(archive.content)) as zipped:
+        assert zipped.read("report.md") == b"# Saved"
+    # Retrying a lost HTTP response must never execute the same turn twice.
+    retry = await client.post(f"/api/chats/{chat['id']}/run", json={"content": "Create report", "request_id": "once"})
+    assert retry.json()["id"] == job_id
+    assert len((await client.get(f"/api/chats/{chat['id']}")).json()["messages"]) == 2
+    assert len(turns) == 2
+
+
+async def test_native_proxy_replays_signed_thinking(client, project_chat, monkeypatch):
+    project, chat = project_chat
+    response = await client.post('/api/providers', json={
+        'name': 'Native proxy', 'kind': 'anthropic', 'active': True,
+        'base_url': 'https://proxy.example/v1', 'default_model': 'test-model',
+    })
+    assert response.status_code == 201
+    turns = []
+    def handler(request):
+        assert str(request.url) == 'https://proxy.example/v1/messages'
+        body = json.loads(request.content)
+        turns.append(body)
+        if len(turns) == 1:
+            thinking = [
+                {'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'thinking', 'thinking': '', 'signature': ''}},
+                {'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'thinking_delta', 'thinking': 'Need a file'}},
+                {'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'signature_delta', 'signature': 'signed-proof'}},
+            ]
+            prefix = ''.join('data: ' + json.dumps(e) + '\n\n' for e in thinking)
+            wire = provider_response(True, [call('write_file', {'path': 'native.md', 'content': 'saved'})]).text.replace('"index": 0', '"index": 1')
+            return httpx.Response(200, text=prefix + wire)
+        assistant = next(m for m in body['messages'] if m['role'] == 'assistant')
+        assert assistant['content'][0] == {'type': 'thinking', 'thinking': 'Need a file', 'signature': 'signed-proof'}
+        assert results(body, True)[-1]['change']['operation'] == 'create'
+        return provider_response(True, text='Saved through native proxy')
+    mock_provider(monkeypatch, handler)
+    result = await client.post(f"/api/chats/{chat['id']}/messages", json={'content': 'create'})
+    assert 'Saved through native proxy' in result.text
+    assert (Path(project['path']) / 'native.md').read_text() == 'saved'

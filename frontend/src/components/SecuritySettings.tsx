@@ -39,10 +39,10 @@ export function SecuritySettings() {
         <ul className="divide-y divide-ink-700 rounded-lg border border-ink-700 text-xs">
           {entries.map((e) => (
             <li key={e.id} className="flex items-center gap-2 px-3 py-2">
-              <span className="font-mono text-[10px] text-neutral-600">
+              <span className="font-mono text-[11px] text-neutral-600">
                 {new Date(e.ts).toLocaleString()}
               </span>
-              <span className="rounded bg-ink-700 px-1.5 py-0.5 text-[10px] text-neutral-300">
+              <span className="rounded bg-ink-700 px-1.5 py-0.5 text-[11px] text-neutral-300">
                 {e.action}
               </span>
               <span className="truncate text-neutral-500">{e.target || ""}</span>

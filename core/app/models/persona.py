@@ -27,3 +27,6 @@ class Persona(UUIDPk, Timestamps, Base):
     is_builtin: Mapped[bool] = mapped_column(default=False)
     # HITL: pause on dangerous steps for this persona (spec §7.8).
     hitl_required: Mapped[bool] = mapped_column(default=True)
+    # Что подставить в чат при выборе роли (пусто — не менять выбор пользователя).
+    default_model: Mapped[str | None] = mapped_column(String(200))
+    default_mode: Mapped[str | None] = mapped_column(String(16))

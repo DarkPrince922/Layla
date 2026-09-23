@@ -178,6 +178,19 @@ def _change(path: str, before: str | None, after: str | None) -> dict:
     }
 
 
+def preview_change(base: str | Path, rel: str, content: str | None) -> dict:
+    """Diff, который дал бы change_file, — без записи на диск (для подтверждения)."""
+    safe_join(base, rel)
+    parts = _parts(rel)
+    if not parts:
+        raise ValueError("Укажите путь файла")
+    try:
+        before = read_file(base, rel)["content"]
+    except FileNotFoundError:
+        before = None
+    return _change("/".join(parts), before, content)
+
+
 def change_file(
     base: str | Path,
     rel: str,

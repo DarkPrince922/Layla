@@ -58,10 +58,101 @@ services:
     # пересборку. projects_dir по умолчанию — ./data/projects, а WORKDIR=/app,
     # т.е. /app/data/projects. Без этого тома проекты терялись при rebuild,
     # а строки в БД оставались указывать на исчезнувшие каталоги.
+    environment:
+      # Запуск кода: песочница — через unix-сокет (у неё нет сети до ядра и базы), Piston — по сети piston.
+      LAYLA_SANDBOX_URL: ${LAYLA_SANDBOX_URL:-unix:///run/layla-sandbox/sandbox.sock}
+      LAYLA_PISTON_URL: ${LAYLA_PISTON_URL:-http://piston:2000}
+      # Порт превью снаружи (как опубликован у caddy) или полный адрес, если превью на своём домене.
+      LAYLA_PREVIEW_PORT: ${LAYLA_PREVIEW_PORT:-8090}
+      LAYLA_PREVIEW_URL: ${LAYLA_PREVIEW_URL:-}
     volumes:
       - projectsdata:/app/data/projects
+      - sandboxsock:/run/layla-sandbox
+    networks:
+      - default
+      - piston
     expose:
       - "8000"
+    restart: unless-stopped
+
+  # Песочница проекта: команды агента и терминала в рабочей копии проекта — pip/npm install,
+  # тесты, сборка. Каждый пользователь Layla — свой uid; без привилегий, корень только для
+  # чтения, пределы памяти/CPU/процессов. В сети — только прокси (реестры пакетов).
+  sandbox:
+    build:
+      context: ./sandbox
+      args:
+        SANDBOX_WITH_GO: ${SANDBOX_WITH_GO:-false}
+        SANDBOX_WITH_RUST: ${SANDBOX_WITH_RUST:-false}
+        SANDBOX_WITH_JAVA: ${SANDBOX_WITH_JAVA:-false}
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    # Сервер запускает команды от uid пользователя и добивает их процессы; писать в чужие
+    # файлы (DAC_OVERRIDE) не может.
+    cap_add: [CHOWN, SETUID, SETGID, KILL, DAC_READ_SEARCH]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: ${SANDBOX_MEMORY:-4g}
+    cpus: ${SANDBOX_CPUS:-2}
+    pids_limit: 2048
+    environment:
+      SANDBOX_PROXY: ${SANDBOX_PROXY:-http://sandbox-proxy:3128}
+      SANDBOX_MAX_TIMEOUT: ${SANDBOX_MAX_TIMEOUT:-900}
+      # Превью: остановить после простоя / через столько секунд работы; сколько превью на пользователя.
+      SANDBOX_SERVICE_IDLE: ${SANDBOX_SERVICE_IDLE:-1800}
+      SANDBOX_SERVICE_LIFETIME: ${SANDBOX_SERVICE_LIFETIME:-21600}
+      SANDBOX_MAX_SERVICES_PER_USER: ${SANDBOX_MAX_SERVICES_PER_USER:-3}
+    volumes:
+      - sandboxwork:/work
+      - sandboxsock:/run/layla-sandbox
+    networks:
+      - sandbox
+    restart: unless-stopped
+
+  # Единственный выход песочницы в интернет: только HTTPS и только к реестрам пакетов
+  # (свои хосты — SANDBOX_ALLOW_HOSTS, «*» — любые публичные). Локальная сеть закрыта всегда.
+  sandbox-proxy:
+    image: python:3.12-slim
+    command: ["python", "/app/proxy.py"]
+    user: "65534:65534"
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      SANDBOX_ALLOW_HOSTS: ${SANDBOX_ALLOW_HOSTS:-}
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ./sandbox/layla_sandbox/proxy.py:/app/proxy.py:ro
+    networks:
+      - sandbox
+      - egress
+    restart: unless-stopped
+
+  # Piston: компиляция и запуск программ на десятках языков (Go, Rust, Java, C#, Kotlin…),
+  # без сети и зависимостей. Языки ставятся в Настройки → Песочница. Изоляция isolate
+  # требует privileged и cgroup v2 на хосте; порт наружу не открыт — доступ только у ядра.
+  piston:
+    image: ghcr.io/engineer-man/piston
+    privileged: true
+    tmpfs:
+      - /tmp:exec
+    environment:
+      PISTON_RUN_TIMEOUT: ${PISTON_RUN_TIMEOUT:-15000}
+      PISTON_RUN_CPU_TIME: ${PISTON_RUN_TIMEOUT:-15000}
+      PISTON_COMPILE_TIMEOUT: ${PISTON_COMPILE_TIMEOUT:-60000}
+      PISTON_COMPILE_CPU_TIME: ${PISTON_COMPILE_TIMEOUT:-60000}
+      PISTON_RUN_MEMORY_LIMIT: ${PISTON_RUN_MEMORY_LIMIT:-536870912}
+      PISTON_OUTPUT_MAX_SIZE: "65536"
+      PISTON_MAX_PROCESS_COUNT: "128"
+    volumes:
+      - pistondata:/piston/packages
+    networks:
+      - piston
     restart: unless-stopped
 
   layla-frontend:
@@ -84,10 +175,14 @@ services:
     ports:
       - "80:80"
       - "443:443"
+      # Превью приложений из песочницы (отдельный адрес — изоляция от Лейлы).
+      - "${LAYLA_PREVIEW_PORT:-8090}:8090"
     environment:
       # Адрес сайта для Caddy. По умолчанию http://localhost — простой HTTP без
       # авто-TLS и без редиректа. Для HTTPS укажите голый домен (example.com).
       LAYLA_SITE_ADDRESS: ${LAYLA_SITE_ADDRESS:-http://localhost}
+      # Адрес превью: :8090 — HTTP для любого хоста; для HTTPS — example.com:8090.
+      LAYLA_PREVIEW_ADDRESS: ${LAYLA_PREVIEW_ADDRESS:-:8090}
     volumes:
       - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddydata:/data
@@ -100,3 +195,15 @@ volumes:
   projectsdata:
   caddydata:
   caddyconfig:
+  sandboxwork:
+  sandboxsock:
+  pistondata:
+
+networks:
+  default: {}
+  # Песочница без выхода наружу: видит только свой прокси.
+  sandbox:
+    internal: true
+  egress: {}
+  # Ядро ↔ Piston; Piston отсюда же скачивает языки.
+  piston: {}

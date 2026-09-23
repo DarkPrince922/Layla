@@ -8,12 +8,62 @@ The internal conversation uses OpenAI messages; Anthropic conversion is explicit
 from __future__ import annotations
 
 import json
+import logging
 
 import httpx
 
-from app.services.provider_client import _base, _headers, _is_anthropic_native
+from app.services.provider_client import _headers, _is_anthropic_native, endpoint
+from app.services.provider_errors import (
+    OutputLimitError,
+    ProviderError,
+    classify_rejection,
+    http_error,
+    provider_message,
+    transient_payload,
+)
+
+logger = logging.getLogger("layla.provider")
 
 MAX_TURN_BYTES = 4_000_000
+# Стартовый лимит длины одного хода. Если ответ в него не влез, _turn в project_agent
+# поднимает лимит и запоминает его для модели (caps["max_output"]).
+DEFAULT_MAX_OUTPUT = 8192
+# Разные провайдеры по-разному называют одну и ту же причину завершения.
+_FINISH_ALIASES = {
+    "end_turn": "stop", "stop_sequence": "stop", "eos": "stop", "eos_token": "stop",
+    "complete": "stop", "completed": "stop",
+    "tool_use": "tool_calls", "tool_call": "tool_calls", "function_call": "tool_calls",
+    "max_tokens": "length", "model_length": "length", "max_output_tokens": "length",
+}
+
+
+def normalize_finish(value) -> str | None:
+    if not value:
+        return None
+    reason = str(value).strip().lower()
+    return _FINISH_ALIASES.get(reason, reason)
+
+
+def _wire(message: dict, skip: set[str], empty=None) -> dict:
+    out = {k: v for k, v in message.items() if k not in skip and not k.startswith("_")}
+    if out.get("role") == "assistant" and out.get("tool_calls") and not out.get("content"):
+        # Ход только с вызовом инструмента: по спецификации OpenAI content = null. Пустую строку
+        # шлюзы к Claude (OpenRouter, LiteLLM, Bedrock) превращают в пустой текстовый блок и
+        # отклоняют весь запрос — «через раз», на каждом ходе после вызова инструмента.
+        # Серверу, который требует строку, шлём "" (caps["tool_content"], запоминается само).
+        out["content"] = empty
+    return out
+
+
+def _mark_cache(messages: list[dict]) -> None:
+    """Claude через OpenAI-совместимый шлюз (OpenRouter, LiteLLM): метка кеша на системном промпте."""
+    last = None
+    for message in messages:
+        if message.get("role") != "system":
+            break
+        last = message
+    if last and isinstance(last.get("content"), str) and last["content"]:
+        last["content"] = [{"type": "text", "text": last["content"], "cache_control": {"type": "ephemeral"}}]
 
 
 def anthropic_messages(messages: list[dict]) -> tuple[str, list[dict]]:
@@ -35,6 +85,7 @@ def anthropic_messages(messages: list[dict]) -> tuple[str, list[dict]]:
                 }
             )
         else:
+            blocks.extend(message.get("_anthropic_thinking", []))
             if message.get("content"):
                 blocks.append({"type": "text", "text": message["content"]})
             for call in message.get("tool_calls", []):
@@ -55,7 +106,13 @@ def anthropic_messages(messages: list[dict]) -> tuple[str, list[dict]]:
     return system, converted
 
 
-async def stream_turn(provider, key, model: str, messages: list[dict], tools: list[dict]):
+async def stream_turn(provider, key, model: str, messages: list[dict], tools: list[dict],
+                      caps: dict | None = None):
+    """caps — ограничения и настройки модели: tools, token_param, replay_reasoning,
+    max_output, temperature, reasoning_effort, drop (см. project_agent._turn)."""
+    caps = caps or {}
+    if caps.get("tools") is False:
+        tools = []
     native = _is_anthropic_native(provider)
     if native:
         system, conversation = anthropic_messages(messages)
@@ -64,7 +121,7 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
             "system": system,
             "messages": conversation,
             "stream": True,
-            "max_tokens": 8192,
+            "max_tokens": caps.get("max_output") or DEFAULT_MAX_OUTPUT,
             "tools": [
                 {
                     "name": t["function"]["name"],
@@ -74,23 +131,53 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
                 for t in tools
             ],
         }
-        url = f"{_base(provider)}/v1/messages"
+        url = endpoint(provider, "messages")
     else:
+        skip = {"is_error"} if caps.get("replay_reasoning", True) else {"is_error", "reasoning_content"}
         payload = {
             "model": model,
-            "messages": [{k: v for k, v in m.items() if k != "is_error"} for m in messages],
+            "messages": [_wire(m, skip, caps.get("tool_content")) for m in messages],
             "stream": True,
             "tools": tools,
             "tool_choice": "auto",
-            "max_tokens": 8192,
+            # o-серия и новые модели OpenAI принимают только max_completion_tokens.
+            caps.get("token_param") or "max_tokens": caps.get("max_output") or DEFAULT_MAX_OUTPUT,
         }
-        url = f"{_base(provider)}/chat/completions"
+        url = endpoint(provider, "chat/completions")
 
     if not tools:
         payload.pop("tools", None)
         payload.pop("tool_choice", None)
+    # Настройки модели из «Провайдеры → модель». Параметры, от которых провайдер уже
+    # отказывался (caps["drop"]), не шлём.
+    drop = set(caps.get("drop") or ())
+    if caps.get("temperature") is not None and "temperature" not in drop:
+        payload["temperature"] = caps["temperature"]
+    effort = caps.get("reasoning_effort") if "reasoning_effort" not in drop else None
+    budget = caps.get("reasoning_budget") or 0
+    host = str(getattr(provider, "base_url", "") or "").lower()
+    if native:
+        if effort:
+            payload["output_config"] = {"effort": effort}  # глубина размышлений у Claude
+        if "cache_control" not in drop:
+            # Кеш промпта: метка на системном промпте (он же кеширует инструменты) плюс
+            # автоматическая метка на растущем хвосте разговора.
+            payload["cache_control"] = {"type": "ephemeral"}
+            if system:
+                payload["system"] = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+    else:
+        if budget and "reasoning" not in drop and "openrouter.ai" in host:
+            payload["reasoning"] = {"max_tokens": budget}  # у OpenRouter бюджет вместо effort
+        elif effort:
+            payload["reasoning_effort"] = effort
+        if budget and "thinking_budget" not in drop and "dashscope" in host:
+            payload["thinking_budget"] = budget  # Qwen
+        if "cache_control" not in drop and "claude" in model.lower():
+            _mark_cache(payload["messages"])
 
     calls: dict[int, dict] = {}
+    initial_inputs: dict[int, dict] = {}
+    thinking: dict[int, dict] = {}
     finish = None
     stopped = False
     size = 0
@@ -99,9 +186,14 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
             "POST", url, headers=_headers(provider, key), json=payload
         ) as resp:
             if resp.is_error:
-                raise RuntimeError(
-                    f"Провайдер отклонил запрос инструментов (HTTP {resp.status_code})"
-                )
+                body = (await resp.aread())[:4000].decode("utf-8", "replace")
+                # Полная причина — в лог сервера (docker compose logs layla-core).
+                logger.warning("Провайдер %s отклонил запрос к %s: HTTP %s %s", getattr(provider, "name", ""),
+                               model, resp.status_code, provider_message(body, 1000, raw=True, secret=key))
+                mismatch = classify_rejection(resp.status_code, body)
+                if mismatch:
+                    raise mismatch
+                raise http_error(resp.status_code, body, resp.headers, tools=bool(tools), secret=key)
             async for line in resp.aiter_lines():
                 size += len(line.encode("utf-8"))
                 if size > MAX_TURN_BYTES:
@@ -117,13 +209,20 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
                 except json.JSONDecodeError as exc:
                     raise RuntimeError("Некорректный поток провайдера") from exc
                 if event.get("error") or event.get("type") == "error":
-                    raise RuntimeError("Провайдер вернул ошибку при работе с инструментами")
+                    reason = provider_message(json.dumps(event, ensure_ascii=False), secret=key)
+                    logger.warning("Провайдер прислал ошибку посреди ответа %s: %s", model, reason)
+                    raise ProviderError(f"Провайдер прервал ответ ошибкой: {reason}" if reason
+                                        else "Провайдер прервал ответ ошибкой",
+                                        retryable=transient_payload(event.get("error") or event))
                 if native:
                     kind = event.get("type")
                     index = event.get("index", 0)
                     if kind == "content_block_start":
                         block = event.get("content_block", {})
+                        if block.get("type") in ("thinking", "redacted_thinking"):
+                            thinking[index] = dict(block)
                         if block.get("type") == "tool_use":
+                            initial_inputs[index] = block.get("input") or {}
                             calls[index] = {
                                 "id": block["id"],
                                 "type": "function",
@@ -136,7 +235,11 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
                         elif delta.get("text"):
                             yield "content", delta["text"]
                         elif delta.get("thinking"):
+                            block = thinking.setdefault(index, {"type": "thinking", "thinking": "", "signature": ""})
+                            block["thinking"] = block.get("thinking", "") + delta["thinking"]
                             yield "reasoning", delta["thinking"]
+                        elif delta.get("type") == "signature_delta" and index in thinking:
+                            thinking[index]["signature"] = thinking[index].get("signature", "") + delta.get("signature", "")
                     elif kind == "message_delta":
                         finish = event.get("delta", {}).get("stop_reason")
                     elif kind == "message_stop":
@@ -150,7 +253,7 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
                     finish = choice.get("finish_reason") or finish
                     delta = choice.get("delta") or {}
                     for part in delta.get("tool_calls") or []:
-                        index = part["index"]
+                        index = part.get("index", 0)
                         call = calls.setdefault(
                             index,
                             {
@@ -159,9 +262,15 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
                                 "function": {"name": "", "arguments": ""},
                             },
                         )
-                        call["id"] += part.get("id") or ""
-                        for field in ("name", "arguments"):
-                            call["function"][field] += part.get("function", {}).get(field) or ""
+                        # Some compatible gateways repeat id/name in every chunk.
+                        for target, field, value in (
+                            (call, "id", part.get("id") or ""),
+                            (call["function"], "name", part.get("function", {}).get("name") or ""),
+                        ):
+                            old = target[field]
+                            if value and value != old:
+                                target[field] = value if value.startswith(old) else old + value
+                        call["function"]["arguments"] += part.get("function", {}).get("arguments") or ""
                     if delta.get("content"):
                         yield "content", delta["content"]
                     reasoning = delta.get("reasoning_content") or delta.get("reasoning")
@@ -169,14 +278,28 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
                         yield "reasoning", reasoning
                 if len(calls) > 48:
                     raise RuntimeError("Провайдер запросил слишком много инструментов")
-    allowed = ("tool_use", "end_turn", "stop_sequence") if native else ("tool_calls", "stop")
-    if not stopped or finish not in allowed:
+    finish = normalize_finish(finish)
+    if stopped and finish is None:
+        # Сервер штатно закрыл поток ([DONE]/message_stop), просто не назвал причину.
+        finish = "tool_calls" if calls else "stop"
+    if finish == "length":
+        raise OutputLimitError("Ответ модели не поместился в лимит длины", has_calls=bool(calls))
+    if not stopped and (finish is None or calls):
+        # Поток оборвался без финала — это обрыв связи, такой ход можно повторить.
+        # Вызовы инструментов без явного конца потока не выполняем никогда.
+        raise ProviderError("Связь с моделью оборвалась посреди ответа", retryable=True)
+    if finish not in ("stop", "tool_calls"):
         raise RuntimeError(
-            "Ответ модели прерван или достиг лимита. Незавершённые вызовы не применены."
+            f"Модель остановила ответ ({finish}). Незавершённые вызовы не применены."
         )
+    if thinking:
+        yield "provider_context", {"_anthropic_thinking": [thinking[i] for i in sorted(thinking)]}
     if calls:
-        if finish != ("tool_use" if native else "tool_calls"):
+        if finish not in (("tool_calls",) if native else ("tool_calls", "stop")):
             raise RuntimeError("Провайдер не завершил вызов инструментов")
+        for index, call in calls.items():
+            if not call["function"]["arguments"] and index in initial_inputs:
+                call["function"]["arguments"] = json.dumps(initial_inputs[index], ensure_ascii=False)
         result = [calls[i] for i in sorted(calls)]
         ids = [c["id"] for c in result]
         if len(set(ids)) != len(ids) or any(not i or len(i) > 200 for i in ids):

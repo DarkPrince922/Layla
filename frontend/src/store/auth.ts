@@ -32,5 +32,7 @@ export const useAuth = create<AuthState>((set) => ({
   logout: async () => {
     await api.post("/auth/logout");
     set({ user: null });
+    // A full navigation clears cached data from the previous account.
+    window.location.replace("/login");
   },
 }));
