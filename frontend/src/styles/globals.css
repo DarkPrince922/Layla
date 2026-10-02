@@ -231,3 +231,5 @@ dialog::backdrop { background: rgb(4 8 16 / .72); backdrop-filter: blur(6px); }
 .agent-markdown th, .agent-markdown td { min-width: 7rem; padding: .6rem .8rem; border: 1px solid theme("colors.ink.700"); vertical-align: top; }
 .agent-markdown th { background: theme("colors.ink.900"); font-weight: 650; }
 .agent-markdown tr:nth-child(even) { background: rgb(255 255 255 / .025); }
+/* Only validated critical finding cards get large type in pentest responses. */
+.pentest-prose h1, .pentest-prose h2, .pentest-prose h3, .pentest-prose h4, .pentest-prose h5, .pentest-prose h6 { font-size: inherit; }

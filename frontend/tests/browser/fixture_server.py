@@ -27,7 +27,7 @@ async def provider(request: Request):
     )
     task = messages[1]['content']
     if task == 'QA rich response':
-        action = json.dumps({'action': 'finish', 'text': (Path(__file__).parent / 'rich-response.md').read_text()})
+        action = json.dumps({'action': 'list_files', 'path': '.', 'intent': 'Посмотрю доступные файлы перед анализом.'} if not any(m['role'] == 'assistant' for m in messages) else {'action': 'finish', 'text': (Path(__file__).parent / 'rich-response.md').read_text()})
     elif task == 'QA workbench':
         index = sum(m['role'] == 'assistant' for m in messages)
         actions = [

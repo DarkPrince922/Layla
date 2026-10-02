@@ -90,10 +90,10 @@ const components: Components = {
   img: ({ src, alt }) => <a href={src} target="_blank" rel="noopener noreferrer">{alt || src}</a>,
 };
 
-export function MarkdownResponse({ content }: { content: string }) {
+export function MarkdownResponse({ content, compactHeadings = false }: { content: string; compactHeadings?: boolean }) {
   const locale = useLocale(s => s.locale);
   return <div className="min-w-0 max-w-full">
-    <div className="agent-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} components={components} skipHtml>{content}</ReactMarkdown></div>
+    <div className={`agent-markdown ${compactHeadings ? "pentest-prose" : ""}`}><ReactMarkdown remarkPlugins={[remarkGfm]} components={components} skipHtml>{content}</ReactMarkdown></div>
     {!!content && <div className="mt-2"><CopyButton value={content} label={locale === "ru" ? "Копировать ответ" : "Copy response"} /></div>}
   </div>;
 }

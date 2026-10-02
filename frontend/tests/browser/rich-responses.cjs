@@ -18,9 +18,24 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
   await context.request.post(base+'/api/providers',{data:{name:'QA rich',kind:'openai_compatible',base_url:'http://127.0.0.1:8219/test-provider',default_model:'qa-model',active:true}});
   const e=await(await context.request.post(base+'/api/engagements',{data:{target:'rich.example.com'}})).json();
   const run=await(await context.request.post(base+`/api/engagements/${e.id}/agent/chat`,{data:{content:'QA rich response',model:'qa-model',mode:'plan'}})).json();
+  // Synthetic presentation fixtures only; no target commands or real findings.
+  const finding=(id,type,status='confirmed',severity='CRITICAL')=>({id,kind:'finding',status,title:'Fixture '+id,data:{type,severity,evidence_step_ids:['proof'],control_step_id:'control',observed:'Synthetic result'}});
+  const records=[finding('sqli','SQLi'),finding('rce','RCE'),finding('hypothesis','SQLi','hypothesis'),finding('high','RCE','confirmed','HIGH'),finding('ssti','SSTI'),finding('title-rce','SSRF'),{...finding('no-proof','RCE'),data:{type:'RCE',severity:'CRITICAL'}}];
+  await page.route(`**/api/engagements/${e.id}/workbench`,route=>route.fulfill({json:{records,tasks:[],workers:[],recovery:[],coverage:{total:0,completed:0,blocked:0,skipped:0},tools:[]}}));
   await page.goto(base+`/pentest?engagement=${e.id}&run=${run.id}`);
   const response=page.locator('.chat-model').filter({has:page.getByRole('heading',{name:'Результаты проверки'})});
   await response.getByRole('table').waitFor();
+  await page.getByLabel('Следующий шаг').filter({hasText:'Посмотрю доступные файлы перед анализом.'}).waitFor();
+  const critical=page.getByRole('region',{name:'Подтверждённые критические находки'});
+  assert.deepEqual(await critical.locator('h3').allTextContents(),['SQLi','RCE']);
+  assert.equal(await critical.locator('article').count(),2);
+  assert.ok(await critical.locator('h3').first().evaluate(el=>parseFloat(getComputedStyle(el).fontSize)>=24));
+  assert.ok(await response.locator('h2').evaluate(el=>parseFloat(getComputedStyle(el).fontSize)<=14));
+  const journal=page.getByLabel('Журнал работы агента');
+  assert.equal(await journal.evaluate(el=>el.open),false);
+  await journal.locator(':scope > summary').click();
+  assert.equal(await journal.evaluate(el=>el.open),true);
+  await journal.locator(':scope > summary').click();
   assert.equal(await response.locator('th').count(),3);
   assert.equal(await response.locator('tbody tr').count(),2);
   assert.equal(await response.locator('blockquote').count(),1);
@@ -46,6 +61,6 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
   }
   if(process.env.LAYLA_QA_SCREENSHOTS){fs.mkdirSync(process.env.LAYLA_QA_SCREENSHOTS,{recursive:true});await response.screenshot({path:path.join(process.env.LAYLA_QA_SCREENSHOTS,'rich-response-mobile.png')});}
   assert.deepEqual(errors,[]);
-  console.log('Rich responses: tables, code, clipboard, fallback, XSS and mobile checks passed');
+  console.log('Rich responses: intents, folded log, confirmed critical-only cards, tables, clipboard, XSS and mobile passed');
  } finally {await browser.close();}
 })().catch(e=>{console.error(e);process.exit(1);});
