@@ -1,11 +1,14 @@
 """Engagements, Scope и authorized-gate (спец. §5.4, §7.1, §7.2)."""
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
+from app.models.agent import AgentConfig
 from app.models.enums import VenueMode
 from app.models.pentest import Engagement, Scope, Server, Venue
 from app.models.user import User
@@ -21,7 +24,13 @@ from app.schemas.pentest import (
     VenueOut,
     VenueUpdate,
 )
+from app.schemas.pentest_authorization import (
+    AuthorizationAccept,
+    AuthorizationCreate,
+    AuthorizationDefaults,
+)
 from app.services import audit
+from app.services import pentest_authorization as authorization
 from app.services import scope as scope_svc
 from app.services.auth import get_current_user
 
@@ -45,6 +54,9 @@ async def _venue(session: AsyncSession, eid: str) -> Venue | None:
 
 async def _to_out(session: AsyncSession, e: Engagement) -> EngagementOut:
     out = EngagementOut.model_validate(e)
+    document = await authorization.read(session, e)
+    out.authorized = document["valid"]
+    out.offensive_enabled = e.offensive_enabled and out.authorized
     sc = await _scope(session, e.id)
     if sc is not None:
         out.scope = ScopeOut(allow=sc.allow or [], deny=sc.deny or [], confirmed=sc.confirmed)
@@ -84,6 +96,75 @@ async def create_engagement(
     return await _to_out(session, e)
 
 
+async def _write_owned(session, user, eid):
+    # Start with a write lock rather than upgrading a stale SQLite read snapshot.
+    owner_id = user.id
+    await session.rollback()
+    result = await session.execute(update(Engagement).where(
+        Engagement.id == eid, Engagement.owner_id == owner_id).values(target=Engagement.target))
+    if result.rowcount != 1:
+        raise HTTPException(404, "Engagement не найден")
+    return await session.get(Engagement, eid, populate_existing=True)
+
+
+@router.get("/authorization/defaults")
+async def authorization_defaults(user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session)):
+    return await authorization.defaults(session, user.id)
+
+
+@router.put("/authorization/defaults")
+async def save_authorization_defaults(body: AuthorizationDefaults, user: User = Depends(get_current_user),
+                                      session: AsyncSession = Depends(get_session)):
+    config = await session.scalar(select(AgentConfig).where(AgentConfig.owner_id == user.id))
+    if config is None:
+        config = AgentConfig(owner_id=user.id)
+        session.add(config)
+    config.context = {**(config.context or {}), "authorization_defaults": body.model_dump()}
+    await session.commit()
+    return body
+
+
+@router.get("/{eid}/authorization")
+async def get_authorization(eid: str, user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session)):
+    return await authorization.read(session, await _owned(session, user, eid))
+
+
+@router.put("/{eid}/authorization")
+async def create_authorization(eid: str, body: AuthorizationCreate, user: User = Depends(get_current_user),
+                               session: AsyncSession = Depends(get_session)):
+    e = await _write_owned(session, user, eid)
+    if body.expires_at and body.expires_at <= datetime.now(UTC):
+        raise HTTPException(400, "Срок действия должен быть в будущем")
+    await authorization.create(session, e, body.model_dump(exclude={"content", "expires_at"}),
+                               content=body.content, expires_at=body.expires_at)
+    await session.commit()
+    return await authorization.read(session, e)
+
+
+@router.post("/{eid}/authorization/accept")
+async def accept_authorization(eid: str, body: AuthorizationAccept, user: User = Depends(get_current_user),
+                               session: AsyncSession = Depends(get_session)):
+    e = await _write_owned(session, user, eid)
+    document = await authorization.latest(session, eid)
+    if document is None or document.content_sha256 != body.content_sha256:
+        raise HTTPException(409, "Документ изменился: перечитайте текущую версию")
+    await authorization.accept(session, e, document)
+    await session.commit()
+    return await authorization.read(session, e)
+
+
+@router.post("/{eid}/authorization/revoke")
+async def revoke_authorization(eid: str, user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session)):
+    e = await _write_owned(session, user, eid)
+    document = await authorization.latest(session, eid)
+    if document:
+        document.status = "revoked"
+    e.authorized, e.offensive_enabled = False, False
+    await audit.record(session, actor=e.owner_id, action="authorization.revoke", target=eid)
+    await session.commit()
+    return await authorization.read(session, e)
+
+
 @router.get("/{eid}", response_model=EngagementOut)
 async def get_engagement(
     eid: str,
@@ -102,6 +183,8 @@ async def update_engagement(
     session: AsyncSession = Depends(get_session),
 ) -> EngagementOut:
     e = await _owned(session, user, eid)
+    if body.target is not None and body.target != e.target:
+        e.authorized, e.offensive_enabled = False, False
     for f, v in body.model_dump(exclude_unset=True).items():
         setattr(e, f, v)
     await session.commit()
@@ -126,7 +209,7 @@ async def set_scope(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> EngagementOut:
-    e = await _owned(session, user, eid)
+    e = await _write_owned(session, user, eid)
     sc = await _scope(session, eid)
     if sc is None:
         sc = Scope(engagement_id=eid)
@@ -138,9 +221,11 @@ async def set_scope(
     e.offensive_enabled = False
     if e.authorized:
         e.authorized = False
-        await audit.record(session, actor=user.id, action="engagement.deauthorized",
+        await audit.record(session, actor=e.owner_id, action="engagement.deauthorized",
                            target=eid, note="scope изменён")
-    await audit.record(session, actor=user.id, action="scope.update", target=eid,
+    await session.flush()
+    await authorization.generate_from_scope(session, e)
+    await audit.record(session, actor=e.owner_id, action="scope.update", target=eid,
                        meta={"allow": body.allow, "deny": body.deny})
     await session.commit()
     return await _to_out(session, e)
@@ -152,12 +237,15 @@ async def confirm_scope(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> EngagementOut:
-    e = await _owned(session, user, eid)
+    e = await _write_owned(session, user, eid)
     sc = await _scope(session, eid)
     if sc is None or not (sc.allow or sc.deny):
         raise HTTPException(status_code=400, detail="Scope пуст — нечего подтверждать")
     sc.confirmed = True
-    await audit.record(session, actor=user.id, action="scope.confirm", target=eid)
+    await session.flush()
+    if await authorization.latest(session, eid) is None:
+        await authorization.generate_from_scope(session, e)
+    await audit.record(session, actor=e.owner_id, action="scope.confirm", target=eid)
     await session.commit()
     return await _to_out(session, e)
 
@@ -169,26 +257,21 @@ async def set_authorized(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> EngagementOut:
-    """Authorized-workspace gate (§7.1): включается явным действием оператора.
-
-    Требует подтверждённого scope. Каждое изменение фиксируется в AuditLog.
-    """
-    e = await _owned(session, user, eid)
+    """Compatibility endpoint: explicitly accepts an existing separate declaration."""
+    e = await _write_owned(session, user, eid)
+    document = await authorization.latest(session, eid)
     if authorized:
         sc = await _scope(session, eid)
         if sc is None or not sc.confirmed:
-            raise HTTPException(
-                status_code=400,
-                detail="Нельзя авторизовать: сначала подтвердите Scope",
-            )
-    e.authorized = authorized
-    if not authorized:
-        e.offensive_enabled = False
-    await audit.record(
-        session, actor=user.id,
-        action="engagement.authorize" if authorized else "engagement.deauthorize",
-        target=eid,
-    )
+            raise HTTPException(400, "Нельзя авторизовать: сначала подтвердите Scope")
+        if document is None:
+            raise HTTPException(400, "Сначала оформите отдельную декларацию авторизации")
+        await authorization.accept(session, e, document)
+    else:
+        e.authorized, e.offensive_enabled = False, False
+        if document:
+            document.status = "revoked"
+        await audit.record(session, actor=e.owner_id, action="engagement.deauthorize", target=eid)
     await session.commit()
     return await _to_out(session, e)
 
@@ -201,7 +284,7 @@ async def set_offensive(
 ) -> EngagementOut:
     e = await _owned(session, user, eid)
     sc = await _scope(session, eid)
-    if body.enabled and (not e.authorized or sc is None or not sc.confirmed):
+    if body.enabled and (not (await authorization.read(session, e))["valid"] or sc is None or not sc.confirmed):
         raise HTTPException(status_code=400, detail="Сначала подтвердите scope и авторизуйте engagement")
     e.offensive_enabled = body.enabled
     await audit.record(session, actor=user.id, action="engagement.offensive", target=eid,
@@ -247,7 +330,7 @@ async def set_venue(
 
     if body.mode in (VenueMode.attack_box, VenueMode.this_machine):
         sc = await _scope(session, eid)
-        if not e.authorized or sc is None or not sc.confirmed:
+        if not (await authorization.read(session, e))["valid"] or sc is None or not sc.confirmed:
             raise HTTPException(
                 status_code=400,
                 detail="Активная площадка требует авторизованного engagement и подтверждённого scope",

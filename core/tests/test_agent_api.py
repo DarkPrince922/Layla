@@ -26,6 +26,7 @@ async def _setup(client, monkeypatch, *, authorize=True, venue="this_machine"):
     await client.put(f"/api/engagements/{eid}/scope", json={"allow": ["example.com"], "deny": []})
     await client.post(f"/api/engagements/{eid}/scope/confirm")
     if authorize:
+        await client.put(f"/api/engagements/{eid}/authorization", json={"company": "Test Co", "responsible_name": "Test Operator", "employee_identifier": "test-employee"})
         await client.post(f"/api/engagements/{eid}/authorize")
         await client.put(f"/api/engagements/{eid}/offensive", json={"enabled": True})
         await client.put(f"/api/engagements/{eid}/venue", json={"mode": venue, "egress_route": "direct"})
