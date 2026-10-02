@@ -115,9 +115,9 @@ def test_hitl_interactive_command_always_paused():
     assert orchestrator.needs_hitl(step, mode="interactive", persona_hitl=False, dangerous=False)
 
 
-def test_hitl_autonomous_dangerous_paused():
+def test_hitl_autonomous_dangerous_not_paused():
     step = {"kind": "command", "command": "rm -rf /"}
-    assert orchestrator.needs_hitl(step, mode="autonomous", persona_hitl=False, dangerous=True)
+    assert not orchestrator.needs_hitl(step, mode="autonomous", persona_hitl=True, dangerous=True)
 
 
 def test_hitl_autonomous_safe_not_paused():

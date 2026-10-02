@@ -74,14 +74,13 @@ def needs_hitl(step: dict, *, mode: str, persona_hitl: bool, dangerous: bool) ->
     """Нужна ли пауза на подтверждение оператором (спец. §7.8).
 
     * Активная команда в interactive-режиме — всегда HITL.
-    * В autonomous-режиме — HITL для опасных команд или если персона требует HITL.
+    * В autonomous-режиме — без пошаговых подтверждений, включая опасные команды.
+    * В остальных режимах сохраняются обязательные подтверждения.
     * Планы/анализ (без команды) — без HITL.
     """
     if step.get("kind") != "command" or not step.get("command"):
         return False
-    if mode == "interactive":
-        return True
-    return dangerous or persona_hitl
+    return mode != "autonomous"
 
 
 def resolve_role_model(role: str, role_models: dict, lead_model: str) -> str:

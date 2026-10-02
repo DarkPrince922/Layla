@@ -16,7 +16,7 @@ from app.models.enums import EgressRoute, VenueMode
 from app.services import egress as egress_svc
 from app.services import venue_gate
 
-# Эвристика «опасных» действий → всегда требуют HITL (спец. §7.8).
+# Классификация опасных действий; пауза зависит от выбранного режима оркестратора.
 _DANGEROUS = [
     r"\brm\s+-rf\b", r"\bmkfs\b", r"\bdd\s+if=", r"\b:\(\)\{", r"\bshutdown\b",
     r"\breboot\b", r"--os-shell", r"--os-pwn", r"\bmsfconsole\b", r"\bexploit\b",
