@@ -28,12 +28,18 @@ class ScopeDecision:
 def extract_host(target: str) -> str:
     """Достать host из URL/host:port/голого домена или IP."""
     t = (target or "").strip()
-    if "://" in t:
-        parsed = urlparse(t)
-        host = parsed.hostname or ""
-    else:
-        # host[:port][/path]
-        host = t.split("/", 1)[0].split(":", 1)[0]
+    try:
+        if "://" in t or t.startswith("["):
+            parsed = urlparse(t if "://" in t else "//" + t)
+            host = parsed.hostname or ""
+        else:
+            candidate = t.split("/", 1)[0]
+            try:
+                host = str(ipaddress.ip_address(candidate))
+            except ValueError:
+                host = candidate.split(":", 1)[0]
+    except ValueError:
+        return ""
     return host.strip().lower().rstrip(".")
 
 
@@ -97,3 +103,27 @@ def check_target(target: str, allow: list[str], deny: list[str]) -> ScopeDecisio
             return ScopeDecision(True, "В области действия", matched=rule)
 
     return ScopeDecision(False, "Цель вне allow-list")
+
+
+def initial_allow(target: str) -> list[str]:
+    """Domain and its descendants; IP/CIDR targets never get a wildcard."""
+    value = target.strip()
+    try:
+        return [str(ipaddress.ip_network(value, strict=False))] if '/' in value and '://' not in value else [str(ipaddress.ip_address(value.strip('[]')))]
+    except ValueError:
+        pass
+    value = value.removeprefix('*.')
+    host = extract_host(value)
+    try:
+        return [str(ipaddress.ip_address(host))]
+    except ValueError:
+        pass
+    try:
+        host = host.encode('idna').decode('ascii')
+    except UnicodeError:
+        return []
+    labels = host.split('.')
+    if len(host) > 253 or len(labels) < 2 or any(not label or len(label) > 63 or label.startswith('-') or label.endswith('-') or
+                              not all(c.isalnum() or c == '-' for c in label) for label in labels):
+        return []
+    return [host, '*.' + host]
