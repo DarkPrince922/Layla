@@ -6,6 +6,8 @@ import { useAuth } from "@/store/auth";
 import { HttpKeyBanner } from "@/components/HttpKeyBanner";
 import { useLocale } from "@/store/locale";
 import { api, type Bootstrap } from "@/lib/api";
+import { AuroraBackdrop } from "@/components/AuroraBackdrop";
+import { DOMAINS } from "@/lib/domains";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -51,14 +53,12 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="grid min-h-screen place-items-center bg-ink-950 px-4">
-      <div className="w-full max-w-sm">
-        <div className="mb-6 flex items-center justify-center gap-2">
-          <div className="grid h-8 w-8 place-items-center rounded-md bg-gradient-to-br from-fuchsia-500 to-accent-500 font-bold text-white">
-            L
-          </div>
-          <span className="text-2xl font-semibold">Layla</span>
-        </div>
+    <div className="login-shell">
+      <AuroraBackdrop />
+      <div className="login-layout">
+      <div className="login-intro"><div className="mb-10 flex items-center gap-3"><span className="brand-mark">L</span><span className="text-2xl font-semibold tracking-tight">Layla</span></div><h2>Ваши идеи.<br /><span className="text-accent-200">Новые возможности.</span></h2><p className="mt-6 max-w-md text-base leading-relaxed text-neutral-400">Одно пространство для кода, исследований и дизайна. Дайте задачу — Layla поможет воплотить её.</p><div className="mt-8 flex flex-wrap gap-2">{DOMAINS.map(d => <span key={d.slug} className="inline-flex items-center gap-2 rounded-full border border-ink-600/60 bg-ink-800/40 px-3 py-2 text-xs text-neutral-300"><d.icon className="h-3.5 w-3.5 text-accent-300" />{t(`domain.${d.slug}`)}</span>)}</div></div>
+      <div className="login-card">
+        <div className="mb-7 flex items-center justify-center gap-3 min-[900px]:hidden"><span className="brand-mark">L</span><span className="text-2xl font-semibold tracking-tight">Layla</span></div>
 
         <div className="mb-4">
           <HttpKeyBanner />
@@ -85,11 +85,14 @@ export default function LoginPage() {
           </div>
         )}
 
-        <form onSubmit={submit} className="space-y-3 rounded-2xl border border-ink-700 bg-ink-900 p-5">
+        <form onSubmit={submit} className="login-form space-y-3 rounded-2xl border border-ink-700 bg-ink-900/90 p-6 md:p-8">
           <h1 className="text-sm font-semibold text-neutral-200">{t("login.signin")}</h1>
+          <p className="text-sm text-neutral-400">Рады видеть вас в Layla.</p>
           <input
             className="w-full rounded-md border border-ink-700 bg-ink-800 px-3 py-2 text-sm outline-none focus:border-accent-500"
             placeholder={t("login.email")}
+            aria-label={t("login.email")}
+            autoComplete="username"
             type="email"
             required
             value={email}
@@ -98,6 +101,8 @@ export default function LoginPage() {
           <input
             className="w-full rounded-md border border-ink-700 bg-ink-800 px-3 py-2 text-sm outline-none focus:border-accent-500"
             placeholder={t("login.password")}
+            aria-label={t("login.password")}
+            autoComplete="current-password"
             type="password"
             required
             value={password}
@@ -112,7 +117,7 @@ export default function LoginPage() {
 
           <button
             disabled={busy}
-            className="w-full rounded-md bg-accent-600 px-3 py-2 text-sm font-medium text-white hover:bg-accent-500 disabled:opacity-50"
+            className="primary-button w-full"
           >
             {busy ? "…" : t("login.signin")}
           </button>
@@ -120,6 +125,7 @@ export default function LoginPage() {
         <p className="mt-4 text-center text-xs text-neutral-600">
           Новые учётные записи создаёт администратор в разделе «Пользователи».
         </p>
+      </div>
       </div>
     </div>
   );
