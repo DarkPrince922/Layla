@@ -6,14 +6,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.models.pentest import Engagement, Scope, Venue
 from app.models.enums import VenueMode
+from app.models.pentest import Engagement, Scope, Server, Venue
 from app.models.user import User
-from app.models.pentest import Server
 from app.schemas.pentest import (
     EngagementCreate,
     EngagementOut,
     EngagementUpdate,
+    OffensiveUpdate,
     ScopeCheckRequest,
     ScopeCheckResult,
     ScopeOut,
@@ -135,6 +135,7 @@ async def set_scope(
     sc.deny = body.deny
     # Изменение scope сбрасывает подтверждение и авторизацию (безопасность).
     sc.confirmed = False
+    e.offensive_enabled = False
     if e.authorized:
         e.authorized = False
         await audit.record(session, actor=user.id, action="engagement.deauthorized",
@@ -181,11 +182,30 @@ async def set_authorized(
                 detail="Нельзя авторизовать: сначала подтвердите Scope",
             )
     e.authorized = authorized
+    if not authorized:
+        e.offensive_enabled = False
     await audit.record(
         session, actor=user.id,
         action="engagement.authorize" if authorized else "engagement.deauthorize",
         target=eid,
     )
+    await session.commit()
+    return await _to_out(session, e)
+
+
+@router.put("/{eid}/offensive", response_model=EngagementOut)
+async def set_offensive(
+    eid: str, body: OffensiveUpdate,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> EngagementOut:
+    e = await _owned(session, user, eid)
+    sc = await _scope(session, eid)
+    if body.enabled and (not e.authorized or sc is None or not sc.confirmed):
+        raise HTTPException(status_code=400, detail="Сначала подтвердите scope и авторизуйте engagement")
+    e.offensive_enabled = body.enabled
+    await audit.record(session, actor=user.id, action="engagement.offensive", target=eid,
+                       meta={"enabled": body.enabled})
     await session.commit()
     return await _to_out(session, e)
 

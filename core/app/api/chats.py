@@ -722,7 +722,8 @@ async def run_chat(
 
             caps = dict((prov.model_caps or {}).get(model) or {})
             # Указания домена и правила проекта (LAYLA.md) — дополнение к системному промпту.
-            extra = design_gen.DESIGN_CHAT_NOTE if domain == "design" else ""
+            from app.services.pentest_policy import PENTEST_CHAT_NOTE
+            extra = design_gen.DESIGN_CHAT_NOTE if domain == "design" else PENTEST_CHAT_NOTE if domain == "pentest" else ""
             rules = await run_in_threadpool(project_agent.project_rules, root)
             extra = "\n\n".join(part for part in (extra, rules) if part)
             messages = payload

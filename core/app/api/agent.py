@@ -112,7 +112,7 @@ async def create_run(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> AgentRunOut:
-    await _engagement(session, user, eid)
+    e = await _engagement(session, user, eid)
     model = await _pick_model(session, user, body.model)
     sc = await session.scalar(select(Scope).where(Scope.engagement_id == eid))
     allow = (sc.allow if sc else []) or []
@@ -135,7 +135,8 @@ async def create_run(
     if provider is None:
         raise HTTPException(status_code=400, detail="Нет активного провайдера для модели")
     key = await provider_client.pick_key(session, provider)
-    messages = orchestrator.build_planner_messages(body.task, allow)
+    messages = orchestrator.build_planner_messages(body.task, allow, scope_deny=(sc.deny if sc else []) or [],
+        offensive_enabled=e.offensive_enabled, authorized=e.authorized, scope_confirmed=bool(sc and sc.confirmed))
     try:
         raw = await provider_client.complete(provider, key, model, messages)
     except Exception as exc:
@@ -272,6 +273,8 @@ async def approve_step(
 
     await _claim_step(session, step)
     try:
+        if not e.offensive_enabled:
+            raise ActionBlocked("Наступательные действия выключены: команды на attackbox запрещены")
         result = await venue_executor.execute(
             target=step.target or e.target,
             command=step.command,

@@ -90,6 +90,7 @@ async def _authorized_engagement_with_box(client, db_sessionmaker, port: int):
     await client.put(f"/api/engagements/{eid}/scope", json={"allow": ["127.0.0.1"], "deny": []})
     await client.post(f"/api/engagements/{eid}/scope/confirm")
     await client.post(f"/api/engagements/{eid}/authorize")
+    await client.put(f"/api/engagements/{eid}/offensive", json={"enabled": True})
     srv = (await client.post("/api/servers", json={
         "host": "127.0.0.1", "port": port, "user": "op", "auth": "password", "password": "pw",
     })).json()

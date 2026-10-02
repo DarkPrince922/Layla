@@ -45,3 +45,6 @@ extend-immutable-calls = ["fastapi.Depends", "fastapi.Query"]
 
 [tool.setuptools.packages.find]
 include = ["app*"]
+
+[tool.setuptools.package-data]
+"app.services" = ["prompts/*.md"]

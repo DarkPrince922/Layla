@@ -548,6 +548,7 @@ export interface Engagement {
   id: string;
   target: string;
   authorized: boolean;
+  offensive_enabled: boolean;
   status: string;
   scope?: PentestScope | null;
   venue?: PentestVenue | null;
