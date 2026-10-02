@@ -67,6 +67,7 @@ class AgentWorker(UUIDPk, Timestamps, Base):
     rounds: Mapped[int] = mapped_column(Integer, default=0)
     result: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text)
+    checkpoint: Mapped[dict] = mapped_column(JSONList, default=dict)
 
 
 class AgentConfig(UUIDPk, Timestamps, Base):

@@ -21,6 +21,7 @@ from app.models.pentest import (
     Venue,
 )
 from app.models.pentest_authorization import PentestAuthorization
+from app.models.pentest_workbench import EngagementRecord, EngagementTask
 from app.models.persona import Persona
 from app.models.provider import Provider, ProviderKey
 from app.models.telegram import TelegramConfig
@@ -38,6 +39,8 @@ __all__ = [
     "Combo",
     "Design",
     "Engagement",
+    "EngagementRecord",
+    "EngagementTask",
     "Evidence",
     "Finding",
     "GitCredential",

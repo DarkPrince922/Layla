@@ -8,9 +8,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.models.enums import FindingSource, FindingStatus, Severity
+from app.models.enums import FindingStatus, Severity
 from app.models.pentest import Engagement, Finding, Report
 from app.models.user import User
+from app.models.pentest_workbench import EngagementRecord
 from app.schemas.pentest import FindingCreate, FindingOut, FindingUpdate, ReportOut
 from app.services import acunetix, audit, pentest_import
 from app.services.auth import get_current_user
@@ -83,8 +84,22 @@ async def update_finding(
     f = await session.get(Finding, fid)
     if f is None or f.engagement_id != eid:
         raise HTTPException(status_code=404, detail="Находка не найдена")
+    records = list(await session.scalars(select(EngagementRecord).where(
+        EngagementRecord.engagement_id == eid, EngagementRecord.kind == 'finding')))
+    record = next((r for r in records if r.data.get('finding_id') == fid), None)
+    if record and body.status == FindingStatus.confirmed and record.status != 'confirmed':
+        raise HTTPException(422, 'Подтвердите находку через память engagement с контрольной и проверочной пробами')
     for field_, v in body.model_dump(exclude_unset=True).items():
         setattr(f, field_, v)
+    if record:
+        record.title = f.title
+        record.data = {**record.data, 'description': f.description, 'severity': f.severity.value,
+                       'finding_status': f.status.value}
+        if body.status == FindingStatus.false_positive:
+            record.status = 'rejected'
+        elif body.status in (FindingStatus.open, FindingStatus.triaging):
+            record.status = 'evidence' if record.data.get('evidence_step_ids') else 'hypothesis'
+
     await session.commit()
     return FindingOut.model_validate(f)
 

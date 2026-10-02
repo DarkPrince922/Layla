@@ -25,7 +25,23 @@ async def provider(request: Request):
         ),
         "QA isolation",
     )
-    action = json.dumps({"action": "finish", "text": "QA isolated response: " + text})
+    task = messages[1]['content']
+    if task == 'QA workbench':
+        index = sum(m['role'] == 'assistant' for m in messages)
+        actions = [
+            {'action': 'remember', 'record': {'kind': 'fact', 'key': 'component:fixture', 'title': 'Fixture component', 'status': 'observed', 'data': {'value': 'Synthetic version 1.2'}}},
+            {'action': 'remember', 'record': {'kind': 'coverage', 'key': 'authenticated', 'title': 'Authenticated checks', 'status': 'blocked', 'data': {'reason': 'No test credentials'}}},
+            {'action': 'list_files', 'path': '.'},
+            *[{'action': 'queue_task', 'task_key': f'fixture-{i}', 'text': f'QA workbench worker {i}', 'role': 'explorer'} for i in range(4)],
+            {'action': 'collect_workers'},
+            {'action': 'finish', 'text': 'QA workbench finished'},
+        ]
+        action = json.dumps(actions[index])
+    elif task.startswith('QA workbench worker'):
+        await asyncio.sleep(.15)
+        action = json.dumps({'action': 'finish', 'text': task + ' result'})
+    else:
+        action = json.dumps({"action": "finish", "text": "QA isolated response: " + text})
 
     async def stream():
         yield (

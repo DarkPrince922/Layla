@@ -385,6 +385,9 @@ async def stop_run(
     await session.execute(update(AgentStep).where(AgentStep.run_id == rid,
         AgentStep.status.in_(("awaiting_approval", "ready", "blocked", "failed"))).values(status="denied"))
     run.status = AgentRunStatus.completed
+    from app.models.pentest_workbench import EngagementTask
+    await session.execute(update(EngagementTask).where(EngagementTask.run_id == rid,
+        EngagementTask.status.in_(('pending', 'running'))).values(status='cancelled', result='Чат остановлен оператором'))
     await session.commit()
     worker_jobs = list(await session.scalars(select(AgentWorker.job_id).where(
         AgentWorker.run_id == rid, AgentWorker.status.in_(("queued", "running", "awaiting_approval")))))
@@ -577,6 +580,8 @@ async def resume_worker(wid: str, user: User = Depends(get_current_user),
         raise HTTPException(status_code=404, detail='Воркер не найден')
     if worker.status not in ('error', 'cancelled'):
         raise HTTPException(status_code=409, detail='Воркер уже возобновлён')
+    from app.services import pentest_checkpoints
+    await pentest_checkpoints.assert_resumable(session, worker)
     run = await session.get(AgentRun, worker.run_id, populate_existing=True)
     from sqlalchemy import func
     count = await session.scalar(select(func.count()).select_from(AgentWorker).where(
@@ -595,6 +600,9 @@ async def resume_worker(wid: str, user: User = Depends(get_current_user),
         raise HTTPException(status_code=409, detail='Воркер уже возобновлён')
     await session.refresh(worker)
     worker.error = None
+    worker.checkpoint = {**(worker.checkpoint or {}), 'phase': 'ready', 'action': None}
+    from app.models.pentest_workbench import EngagementTask
+    await session.execute(update(EngagementTask).where(EngagementTask.worker_id == wid).values(status='running', result=None))
     worker.messages = [*(worker.messages or []), {'role': 'user', 'content': 'Продолжение после прерывания. Сохранённые файлы доступны. Не повторяй команды с неизвестным результатом без проверки; ожидавшие подтверждения команды отменены.'}][-48:]
     job = Job(owner_id=owner_id, domain='pentest', kind='pentest.worker', title=f'{worker.role}: {worker.task}'[:200],
         status='queued', result={'engagement_id': worker.engagement_id, 'run_id': run.id, 'worker_id': wid})
@@ -664,6 +672,8 @@ async def agent_chat(eid: str, body: AgentChatCreate, user: User = Depends(get_c
         if await session.scalar(select(AgentWorker.id).where(AgentWorker.run_id == run.id,
             AgentWorker.role != 'lead', AgentWorker.status.in_(pentest_workers.ACTIVE))):
             raise HTTPException(status_code=409, detail='В этом чате ещё работают воркеры')
+        from app.services import pentest_checkpoints
+        await pentest_checkpoints.assert_resumable(session, leader)
         leader.messages = [*(leader.messages or []), {'role': 'user', 'content': body.content, 'kind': 'chat'}][-48:]
         leader.status, leader.error = 'queued', None
         if body.model:
