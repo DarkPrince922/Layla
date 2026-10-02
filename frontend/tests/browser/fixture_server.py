@@ -26,7 +26,9 @@ async def provider(request: Request):
         "QA isolation",
     )
     task = messages[1]['content']
-    if task == 'QA workbench':
+    if task == 'QA rich response':
+        action = json.dumps({'action': 'finish', 'text': (Path(__file__).parent / 'rich-response.md').read_text()})
+    elif task == 'QA workbench':
         index = sum(m['role'] == 'assistant' for m in messages)
         actions = [
             {'action': 'remember', 'record': {'kind': 'fact', 'key': 'component:fixture', 'title': 'Fixture component', 'status': 'observed', 'data': {'value': 'Synthetic version 1.2'}}},
