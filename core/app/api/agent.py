@@ -13,13 +13,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session, get_sessionmaker
 from app.models.agent import AgentConfig, AgentRun, AgentStep
-from app.models.enums import AgentRunStatus, Domain, EgressRoute
+from app.models.enums import AgentRunStatus, Domain, EgressRoute, VenueMode
 from app.models.job import Job
-from app.models.pentest import Engagement, Finding, Scope, Venue
+from app.models.pentest import Engagement, Finding, Scope, Server, Venue
 from app.models.persona import Persona
 from app.models.provider import Provider
 from app.models.user import User
-from app.schemas.job import JobOut
 from app.schemas.agent import (
     AgentConfigIn,
     AgentConfigOut,
@@ -29,15 +28,42 @@ from app.schemas.agent import (
     TriageRequest,
     TriageResult,
 )
-from app.services import audit, jobs, orchestrator, provider_client, venue_executor
+from app.schemas.job import JobOut
+from app.security import crypto
+from app.services import audit, jobs, orchestrator, provider_client, ssh_exec, venue_executor
 from app.services.auth import get_current_user
-from app.services.venue_gate import ActionBlocked
 from app.services.egress import EgressBlocked
+from app.services.venue_gate import ActionBlocked
 
 router = APIRouter(tags=["agent"])
 
 
 # ---------- helpers ----------
+def _ssh_config(server: Server) -> ssh_exec.SSHConfig:
+    return ssh_exec.SSHConfig(
+        host=server.host, port=server.port, user=server.user, auth=server.auth,
+        secret=crypto.decrypt(server.secret_ref) if server.secret_ref else None,
+        host_key=server.host_key,
+    )
+
+
+def _attack_box_runner(server: Server | None):
+    """runner для venue_executor + ячейка, куда попадёт ключ хоста для закрепления.
+
+    None → исполнителя нет (venue_executor поднимет NoExecutorConfigured за гейтами)."""
+    pin: dict = {"host_key": None}
+    if server is None:
+        return None, pin
+    cfg = _ssh_config(server)
+
+    async def runner(command: str) -> str:
+        result = await ssh_exec.run(cfg, command)
+        pin["host_key"] = result.host_key
+        return result.output
+
+    return runner, pin
+
+
 async def _engagement(session: AsyncSession, user: User, eid: str) -> Engagement:
     e = await session.get(Engagement, eid)
     if e is None or e.owner_id != user.id:
@@ -48,8 +74,8 @@ async def _engagement(session: AsyncSession, user: User, eid: str) -> Engagement
 async def _pick_model(session: AsyncSession, user: User, requested: str | None) -> str:
     if requested:
         return requested
-    from app.models.provider import Provider
     from app.api.models import enabled_models
+    from app.models.provider import Provider
 
     providers = list(
         await session.scalars(
@@ -212,9 +238,16 @@ async def approve_step(
     if e is None or vn is None:
         raise HTTPException(status_code=400, detail="Engagement/venue не найдены")
 
+    # Исполнитель на attack box: заходит на выбранный сервер по SSH. Строится ДО гейтов,
+    # но вызывается venue_executor'ом только после scope/venue/egress-проверок.
+    server: Server | None = None
+    if vn.mode == VenueMode.attack_box and vn.attack_box_id:
+        server = await session.get(Server, vn.attack_box_id)
+    runner, pin = _attack_box_runner(server)
+
     step.status = "running"
     try:
-        await venue_executor.execute(
+        result = await venue_executor.execute(
             target=step.target or e.target,
             command=step.command,
             venue_mode=vn.mode,
@@ -223,15 +256,21 @@ async def approve_step(
             allow=(sc.allow if sc else []) or [],
             deny=(sc.deny if sc else []) or [],
             egress_route=vn.egress_route or EgressRoute.inherit,
-            runner=None,  # реальный исполнитель attack box не подключён
+            runner=runner,
         )
         step.status = "done"
+        step.output = result.output
+        if server is not None and pin["host_key"] and server.host_key != pin["host_key"]:
+            server.host_key = pin["host_key"]  # закрепляем ключ хоста при первом подключении
     except ActionBlocked as exc:
         step.status = "blocked"
         step.output = f"Заблокировано гейтом: {exc}"
     except EgressBlocked as exc:
         step.status = "blocked"
         step.output = f"Egress заблокирован: {exc}"
+    except ssh_exec.SSHError as exc:
+        step.status = "failed"
+        step.output = f"Attack box: {exc}"
     except venue_executor.NoExecutorConfigured as exc:
         step.status = "blocked"
         step.output = f"{exc}"

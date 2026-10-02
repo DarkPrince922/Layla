@@ -18,3 +18,8 @@ class Design(UUIDPk, Timestamps, Base):
     stack: Mapped[DesignStack] = mapped_column(default=DesignStack.html)
     files: Mapped[list] = mapped_column(JSONList, default=list)
     design_system_ref: Mapped[str | None] = mapped_column(String(200))
+    # Макет, отданный в разработку, живёт в обычном проекте домена «Код»:
+    # ссылка делает передачу идемпотентной — повторный клик открывает тот же проект.
+    project_id: Mapped[str | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="SET NULL"), index=True
+    )

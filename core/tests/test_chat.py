@@ -88,3 +88,144 @@ async def test_chat_isolation_between_users(client):
     )
     r = await client.get(f"/api/chats/{chat['id']}")
     assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_chat_in_every_domain(client):
+    """Удаление чата доступно во всех доменах и убирает его из истории."""
+    await _register(client)
+    for domain in ("code", "design", "osint", "pentest"):
+        chat = (await client.post("/api/chats", json={"domain": domain, "model": "m"})).json()
+        assert (await client.delete(f"/api/chats/{chat['id']}")).status_code == 204
+        assert (await client.get(f"/api/chats/{chat['id']}")).status_code == 404
+        listed = (await client.get(f"/api/chats?domain={domain}")).json()
+        assert all(c["id"] != chat["id"] for c in listed)
+
+
+@pytest.mark.asyncio
+async def test_cannot_delete_foreign_chat(client):
+    """Чужой чат удалить нельзя — изоляция по владельцу."""
+    await _register(client)
+    chat = (await client.post("/api/chats", json={"domain": "osint", "model": "m"})).json()
+    await client.post("/api/auth/logout")
+    await client.post(
+        "/api/auth/register",
+        json={"email": "other@example.com", "password": "hunter2hunter2"},
+    )
+    assert (await client.delete(f"/api/chats/{chat['id']}")).status_code == 404
+
+
+async def _add_second_provider(client, name="N", model="model-b", base="http://n.local/v1"):
+    await client.post(
+        "/api/providers",
+        json={"name": name, "kind": "openai_compatible", "base_url": base,
+              "default_model": model, "active": True},
+    )
+    providers = (await client.get("/api/providers")).json()
+    return next(p["id"] for p in providers if p["name"] == name)
+
+
+@pytest.mark.asyncio
+async def test_selected_model_sticks_to_chat(client, monkeypatch):
+    """Выбранная модель закрепляется за чатом, а не откатывается к исходной."""
+    await _register(client)
+    await _add_active_provider(client, model="model-a")
+    await _add_second_provider(client)
+
+    from app.services import project_agent
+
+    async def fake_run(provider, key, model, payload, root, permissions, **kw):
+        yield {"delta": "ok"}
+
+    monkeypatch.setattr(project_agent, "run", fake_run)
+    chat = (await client.post("/api/chats", json={"domain": "osint", "model": "model-a"})).json()
+    r = await client.post(f"/api/chats/{chat['id']}/run", json={"content": "hi", "model": "model-b"})
+    assert r.status_code == 202, r.text
+    assert (await client.get(f"/api/chats/{chat['id']}")).json()["model"] == "model-b"
+
+
+@pytest.mark.asyncio
+async def test_explicit_provider_wins_over_name_guess(client, monkeypatch):
+    """При одинаковом имени модели используется явно выбранный провайдер."""
+    import asyncio
+
+    from app.services import project_agent
+
+    await _register(client)
+    await _add_active_provider(client, model="shared")
+    second = await _add_second_provider(client, model="shared")
+    used: dict[str, str] = {}
+
+    async def fake_run(provider, key, model, payload, root, permissions, **kw):
+        used["base"] = provider.base_url
+        yield {"delta": "ok"}
+
+    monkeypatch.setattr(project_agent, "run", fake_run)
+    chat = (await client.post("/api/chats", json={"domain": "osint", "model": "shared"})).json()
+    r = await client.post(
+        f"/api/chats/{chat['id']}/run",
+        json={"content": "hi", "model": "shared", "provider_id": second},
+    )
+    assert r.status_code == 202, r.text
+    for _ in range(300):
+        await asyncio.sleep(0.02)
+        if used:
+            break
+    assert used.get("base") == "http://n.local/v1"
+
+
+@pytest.mark.asyncio
+async def test_provider_is_remembered_per_chat(client, monkeypatch):
+    """Выбранный провайдер закрепляется за чатом и используется дальше без явного выбора."""
+    import asyncio
+
+    from app.services import project_agent
+
+    await _register(client)
+    await _add_active_provider(client, model="shared")
+    second = await _add_second_provider(client, model="shared")
+    used: list[str] = []
+
+    async def fake_run(provider, key, model, payload, root, permissions, **kw):
+        used.append(provider.base_url)
+        yield {"delta": "ok"}
+
+    monkeypatch.setattr(project_agent, "run", fake_run)
+    chat = (await client.post("/api/chats", json={"domain": "osint", "model": "shared", "provider_id": second})).json()
+    assert chat["provider_id"] == second
+    for text in ("раз", "два"):  # второй ход — без provider_id в запросе
+        body = {"content": text, **({"provider_id": second} if text == "раз" else {})}
+        job = (await client.post(f"/api/chats/{chat['id']}/run", json=body)).json()
+        for _ in range(300):
+            await asyncio.sleep(0.02)
+            if (await client.get(f"/api/jobs/{job['id']}")).json()["status"] not in ("queued", "running"):
+                break
+    assert used == ["http://n.local/v1", "http://n.local/v1"]
+    assert (await client.get(f"/api/chats/{chat['id']}")).json()["provider_id"] == second
+
+
+@pytest.mark.asyncio
+async def test_rename_chat(client):
+    await _register(client)
+    chat = (await client.post("/api/chats", json={"domain": "osint", "model": "m"})).json()
+    renamed = (await client.patch(f"/api/chats/{chat['id']}", json={"title": "  Проверка домена  "})).json()
+    assert renamed["title"] == "Проверка домена"
+    assert (await client.patch(f"/api/chats/{chat['id']}", json={"title": ""})).status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_search_chats_by_title_and_messages(client, db_sessionmaker):
+    from app.models.chat import Message
+
+    await _register(client)
+    first = (await client.post("/api/chats", json={"domain": "osint", "title": "Кофейня Зерно"})).json()
+    second = (await client.post("/api/chats", json={"domain": "osint", "title": "Другое"})).json()
+    await client.post("/api/chats", json={"domain": "design", "title": "Кофейня в дизайне"})
+    async with db_sessionmaker() as s:
+        s.add(Message(chat_id=second["id"], role="user", content="найди сайт кофейни"))
+        await s.commit()
+    found = (await client.get("/api/chats", params={"domain": "osint", "q": "кофейн"})).json()
+    assert {c["id"] for c in found} == {second["id"]}  # в SQLite регистр кириллицы учитывается
+    found = (await client.get("/api/chats", params={"domain": "osint", "q": "Кофейн"})).json()
+    assert {c["id"] for c in found} == {first["id"]}
+    assert len((await client.get("/api/chats", params={"domain": "osint", "q": "  "})).json()) == 2

@@ -1,6 +1,7 @@
 """Layla Core — FastAPI application entrypoint."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -19,6 +20,7 @@ from app.api import (
     designs,
     engagements,
     findings,
+    git,
     health,
     intelligence,
     jobs,
@@ -30,10 +32,14 @@ from app.api import (
     personas,
     projects,
     providers,
+    sandbox,
     servers,
     telegram,
+    trash,
 )
 from app.config import get_settings
+from app.security.origin import OriginGuard
+from app.services.preview import PreviewGateway
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 
@@ -59,7 +65,16 @@ async def lifespan(_app: FastAPI):
         await reap_stale(SessionLocal)
     except Exception:  # noqa: BLE001 — старт не должен падать из-за бутстрапа
         logging.getLogger("layla").exception("Бутстрап/очистка задач не выполнены")
-    yield
+    # Корзина: всё, что лежит дольше 7 дней, стирается — при старте и раз в час.
+    from app.services.trash import purge_forever
+
+    purger = asyncio.create_task(purge_forever(SessionLocal), name="layla-trash-purge")
+    try:
+        yield
+    finally:
+        purger.cancel()
+        from app.services.jobs import shutdown
+        await shutdown()
 
 
 app = FastAPI(
@@ -94,6 +109,11 @@ if not settings.is_prod:
         allow_headers=["*"],
     )
 
+# Изменяющие запросы к API — только со страниц самой Лейлы (не с превью приложений).
+app.add_middleware(OriginGuard, extra=() if settings.is_prod else ("http://localhost:3000",))
+# Адрес превью (отдельный порт Caddy) целиком принадлежит приложению пользователя.
+app.add_middleware(PreviewGateway)
+
 # All routes are served under /api (Caddy routes /api/* to core).
 api_prefix = "/api"
 app.include_router(health.router, prefix=api_prefix)
@@ -104,6 +124,8 @@ app.include_router(personas.router, prefix=api_prefix)
 app.include_router(models.router, prefix=api_prefix)
 app.include_router(chats.router, prefix=api_prefix)
 app.include_router(projects.router, prefix=api_prefix)
+app.include_router(sandbox.router, prefix=api_prefix)
+app.include_router(git.router, prefix=api_prefix)
 app.include_router(designs.router, prefix=api_prefix)
 app.include_router(jobs.router, prefix=api_prefix)
 app.include_router(knowledge.router, prefix=api_prefix)
@@ -114,6 +136,7 @@ app.include_router(osint.router, prefix=api_prefix)
 app.include_router(engagements.router, prefix=api_prefix)
 app.include_router(servers.router, prefix=api_prefix)
 app.include_router(findings.router, prefix=api_prefix)
+app.include_router(trash.router, prefix=api_prefix)
 app.include_router(pentest_imports.router, prefix=api_prefix)
 app.include_router(agent.router, prefix=api_prefix)
 app.include_router(combos.router, prefix=api_prefix)

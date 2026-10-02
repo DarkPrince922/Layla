@@ -29,6 +29,7 @@ class ProjectOut(BaseModel):
     name: str
     repo_url: str | None = None
     path: str | None = None
+    kind: str = "project"  # project | chat_workspace
 
     model_config = {"from_attributes": True}
 

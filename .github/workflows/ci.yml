@@ -40,6 +40,21 @@ jobs:
           DATABASE_URL: postgresql+asyncpg://layla:ci-only-password@localhost:5432/layla_test
           LAYLA_SECRET_KEY: ci-only-encryption-key
 
+  sandbox:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sandbox
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pytest pytest-asyncio httpx
+      # Без root запуск от uid песочницы невозможен — эти тесты пропускаются сами;
+      # проверяются пути, идентификаторы и правила прокси.
+      - run: pytest -q
+
   frontend:
     runs-on: ubuntu-latest
     defaults:

@@ -67,7 +67,7 @@ BUILTIN_PERSONAS: list[dict] = [
         "строго в пределах подтверждённого scope engagement'а и на выбранной площадке "
         "выполнения. Каждое действие проверяется по scope и логируется; опасные шаги "
         "приостанавливаются для подтверждения оператором.",
-        "allowed_tools": ["engagement.read", "findings.write", "venue.exec"],
+        "allowed_tools": ["engagement.read", "findings.write", "venue.exec", "files.read", "files.write"],
         "hitl_required": True,
     },
     {
@@ -78,7 +78,7 @@ BUILTIN_PERSONAS: list[dict] = [
         "instructions": "Координирует пассивную разведку по открытым источникам по "
         "людям, компаниям и доменам через intelligence-API. По умолчанию — пассивные "
         "lookups.",
-        "allowed_tools": ["intel.lookup", "osint.case"],
+        "allowed_tools": ["intel.lookup", "osint.case", "files.read", "files.write"],
         "hitl_required": True,
     },
 ]

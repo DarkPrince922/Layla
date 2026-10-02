@@ -29,9 +29,9 @@ function ProviderKey({ provider, blocked }: { provider: IntelProvider; blocked: 
   }
   const pending = save.isPending || remove.isPending;
   return (
-    <form onSubmit={submit} className="space-y-3 rounded-lg border border-ink-700 bg-ink-900 p-4">
+    <form onSubmit={submit} className="space-y-3 rounded-xl border border-ink-700/70 bg-ink-800/30 p-5">
       <div className="flex items-center gap-2">
-        <KeyRound className="h-4 w-4 text-cyan-400" />
+        <KeyRound className="h-4 w-4 text-accent-300" />
         <h3 className="text-sm font-medium">{provider.name}</h3>
         <a href={provider.docs_url} target="_blank" rel="noopener noreferrer"
           className="ml-auto flex items-center gap-1 text-xs text-neutral-400 hover:text-white">
@@ -54,7 +54,7 @@ function ProviderKey({ provider, blocked }: { provider: IntelProvider; blocked: 
       </label>
       <div className="flex items-center gap-3">
         <button type="submit" disabled={blocked || !key.trim() || pending}
-          className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs text-white disabled:opacity-40">
+          className="rounded-md bg-accent-600 px-3 py-1.5 text-xs text-white disabled:opacity-40">
           {save.isPending ? "Сохранение…" : provider.configured ? "Заменить ключ" : "Сохранить ключ"}
         </button>
         {provider.configured && (

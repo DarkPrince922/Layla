@@ -15,7 +15,9 @@ from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
 from app.config import get_settings
-from app.db import get_session
+from app.db import get_session, get_sessionmaker
+from app.models.chat import Chat
+from app.models.job import Job
 from app.models.user import Project, User, Workspace
 from app.schemas.project import (
     FileChange,
@@ -26,7 +28,7 @@ from app.schemas.project import (
     ProjectOut,
     RepoImport,
 )
-from app.services import audit, files, repo
+from app.services import audit, files, jobs, repo, sandbox, trash
 from app.services.auth import get_current_user
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -38,7 +40,8 @@ async def _default_workspace(session: AsyncSession, user: User) -> Workspace | N
 
 async def _owned_project(session: AsyncSession, user: User, project_id: str) -> Project:
     project = await session.get(Project, project_id)
-    if project is None:
+    # Проект в корзине недоступен нигде, кроме корзины.
+    if project is None or project.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Проект не найден")
     ws = await session.get(Workspace, project.workspace_id)
     if ws is None or ws.owner_id != user.id:
@@ -62,7 +65,14 @@ async def list_projects(
     ]
     if not ws_ids:
         return []
-    rows = await session.scalars(select(Project).where(Project.workspace_id.in_(ws_ids)))
+    # Только проекты «Кода»: рабочие папки чатов и корзина сюда не попадают.
+    rows = await session.scalars(
+        select(Project).where(
+            Project.workspace_id.in_(ws_ids),
+            Project.kind == "project",
+            Project.deleted_at.is_(None),
+        ).order_by(Project.created_at)
+    )
     return list(rows)
 
 
@@ -206,6 +216,7 @@ async def write_project_file(
         meta={"path": change["path"]},
     )
     await session.commit()
+    sandbox.preview_touch(user.id, project.id)  # запущенное превью подхватит правку
     return change
 
 
@@ -234,6 +245,7 @@ async def delete_project_file(
         meta={"path": change["path"]},
     )
     await session.commit()
+    sandbox.preview_touch(user.id, project.id)
     return change
 
 
@@ -270,7 +282,40 @@ async def delete_project(
     project_id: str,
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
+    maker=Depends(get_sessionmaker),
 ) -> None:
     project = await _owned_project(session, user, project_id)
-    await session.delete(project)
+    active = list(await session.scalars(
+        select(Job).join(Chat, Job.chat_id == Chat.id).where(
+            Chat.project_id == project_id, Job.status.in_(("queued", "running"))
+        )
+    ))
+    # Зависшую задачу удаление освобождает само; 409 только при реально живой.
+    if await jobs.live_jobs(maker, active):
+        raise HTTPException(status_code=409, detail="В проекте выполняется задача. Сначала остановите её.")
+    # В корзину вместе с чатами; файлы на диске живут, пока корзину не очистят.
+    await trash.trash_project(session, project, trash.now())
+    await audit.record(session, actor=user.id, action="project.trash", target=project_id)
     await session.commit()
+
+
+@router.post("/{project_id}/promote", response_model=ProjectOut)
+async def promote_project(
+    project_id: str,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> Project:
+    """Сделать рабочую папку чата проектом «Кода» («Открыть в Коде»).
+
+    После этого папка видна в списке проектов и больше не удаляется вместе с чатом.
+    """
+    project = await _owned_project(session, user, project_id)
+    if project.kind != "project":
+        project.kind = "project"
+        # Имя — по текущему названию чата (его могли переименовать после создания папки).
+        chat = await session.scalar(select(Chat).where(Chat.project_id == project.id).limit(1))
+        if chat is not None and chat.title and chat.title != "Новый чат":
+            project.name = chat.title[:200]
+        await audit.record(session, actor=user.id, action="project.promote", target=project_id)
+        await session.commit()
+    return project

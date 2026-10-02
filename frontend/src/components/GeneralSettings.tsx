@@ -50,14 +50,14 @@ function ChangePassword() {
           value={current}
           onChange={(e) => setCurrent(e.target.value)}
           placeholder="Текущий пароль"
-          className="rounded-md border border-ink-700 bg-ink-800 px-2.5 py-1.5 text-sm outline-none focus:border-indigo-500"
+          className="rounded-md border border-ink-700 bg-ink-800 px-2.5 py-1.5 text-sm outline-none focus:border-accent-500"
         />
         <input
           type="password"
           value={next}
           onChange={(e) => setNext(e.target.value)}
           placeholder="Новый пароль (мин. 8 символов)"
-          className="rounded-md border border-ink-700 bg-ink-800 px-2.5 py-1.5 text-sm outline-none focus:border-indigo-500"
+          className="rounded-md border border-ink-700 bg-ink-800 px-2.5 py-1.5 text-sm outline-none focus:border-accent-500"
         />
       </div>
       {err && <p className="mt-2 text-xs text-red-400">{err}</p>}
@@ -65,7 +65,7 @@ function ChangePassword() {
       <button
         onClick={submit}
         disabled={busy || current.length < 1 || next.length < 8}
-        className="mt-3 rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
+        className="mt-3 rounded-md bg-accent-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-accent-500 disabled:opacity-40"
       >
         {busy ? "Сохранение…" : "Изменить пароль"}
       </button>
@@ -92,7 +92,7 @@ export function GeneralSettings() {
               key={l}
               onClick={() => setLocale(l)}
               className={`rounded px-3 py-1.5 text-xs uppercase ${
-                locale === l ? "bg-indigo-600 text-white" : "bg-ink-800 text-neutral-400"
+                locale === l ? "bg-accent-600 text-white" : "bg-ink-800 text-neutral-400"
               }`}
             >
               {l}
@@ -109,7 +109,7 @@ export function GeneralSettings() {
               key={m}
               onClick={() => setMode(m)}
               className={`rounded px-3 py-1.5 text-xs ${
-                mode === m ? "bg-indigo-600 text-white" : "bg-ink-800 text-neutral-400"
+                mode === m ? "bg-accent-600 text-white" : "bg-ink-800 text-neutral-400"
               }`}
             >
               {t(`layout.${m}`)}
@@ -122,7 +122,7 @@ export function GeneralSettings() {
         <div className="mb-1 text-sm font-semibold">{t("general.projectsDir")}</div>
         <input
           readOnly
-          value="./data/projects"
+          value="Каталог настроен на сервере"
           className="w-full rounded-md border border-ink-700 bg-ink-800 px-2 py-1.5 text-xs text-neutral-400"
         />
         <p className="mt-1 text-[11px] text-neutral-600">
