@@ -28,6 +28,11 @@ ORPHAN_GRACE = timedelta(seconds=20)
 def public_error(exc: BaseException) -> str:
     if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
         return "Превышено время ожидания. Уже выполненные изменения сохранены."
+    if isinstance(exc, httpx.HTTPStatusError):
+        return (f"Внешний сервис отклонил запрос: HTTP {exc.response.status_code}. "
+                "Выполненные изменения сохранены. Подробности доступны в серверном журнале.")
+    if isinstance(exc, httpx.TransportError):
+        return "Ошибка соединения с внешним сервисом. Выполненные изменения сохранены; попробуйте продолжить чат."
     if isinstance(exc, RuntimeError):
         return str(exc)[:1500]
     return "Не удалось завершить задачу. Выполненные изменения сохранены; попробуйте продолжить чат."
