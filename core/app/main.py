@@ -29,6 +29,7 @@ from app.api import (
     models,
     osint,
     pentest_imports,
+    pentest_workbench,
     personas,
     projects,
     providers,
@@ -63,6 +64,8 @@ async def lifespan(_app: FastAPI):
             await ensure_admin_bootstrapped(session)
         # Задачи, зависшие в running после прошлого запуска, помечаем прерванными.
         await reap_stale(SessionLocal)
+        from app.services.pentest_checkpoints import recover
+        await recover(SessionLocal)
     except Exception:  # noqa: BLE001 — старт не должен падать из-за бутстрапа
         logging.getLogger("layla").exception("Бутстрап/очистка задач не выполнены")
     # Корзина: всё, что лежит дольше 7 дней, стирается — при старте и раз в час.
@@ -139,6 +142,7 @@ app.include_router(findings.router, prefix=api_prefix)
 app.include_router(trash.router, prefix=api_prefix)
 app.include_router(pentest_imports.router, prefix=api_prefix)
 app.include_router(agent.router, prefix=api_prefix)
+app.include_router(pentest_workbench.router, prefix=api_prefix)
 app.include_router(combos.router, prefix=api_prefix)
 app.include_router(audit.router, prefix=api_prefix)
 

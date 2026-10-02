@@ -116,6 +116,20 @@ export interface Job {
   error?: string | null;
 }
 
+export interface EngagementRecord {
+  id: string; kind: string; key: string; title: string; status: string;
+  data: Record<string, unknown>; worker_id?: string | null; updated_at: string;
+}
+export interface EngagementTask {
+  id: string; run_id: string; key: string; task: string; role: string;
+  priority: number; dependencies: string[]; status: string; worker_id?: string | null; result?: string | null;
+}
+export interface EngagementWorkbench {
+  records: EngagementRecord[]; tasks: EngagementTask[];
+  coverage: { total: number; completed: number; blocked: number; skipped: number };
+  recovery: { id: string; role: string; task: string; error?: string; checkpoint: Record<string, unknown> }[];
+}
+
 export interface Me {
   id: string;
   email: string;

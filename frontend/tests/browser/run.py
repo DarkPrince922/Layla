@@ -1,6 +1,7 @@
 import os
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -26,7 +27,7 @@ try:
     with (qa / "api.log").open("w") as api_log, (qa / "next.log").open("w") as next_log:
         processes.append(
             subprocess.Popen(
-                [str(repo / "core/.venv/bin/python"), str(scripts / "fixture_server.py")],
+                [sys.executable, str(scripts / "fixture_server.py")],
                 cwd=repo / "core",
                 env=env,
                 stdout=api_log,
@@ -60,7 +61,7 @@ try:
                     raise RuntimeError(f"Port {port} unavailable")
                 time.sleep(0.2)
         result = subprocess.run(
-            ["node", str(scripts / "engagement-chat.cjs")],
+            ["node", str(scripts / os.environ.get("LAYLA_BROWSER_TEST", "engagement-chat.cjs"))],
             cwd=qa,
             env=env,
             check=False,

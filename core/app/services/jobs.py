@@ -243,7 +243,8 @@ async def _run(sessionmaker, job_id: str, worker) -> None:
             async with asyncio.timeout(3600):
                 await worker(JobHandle(session, job))
     except asyncio.CancelledError:
-        status, error = "cancelled", "Задача остановлена. Выполненные изменения сохранены."
+        status, error = ("error", "Прервано перезапуском сервера. История и файлы сохранены.") if _shutting_down else (
+            "cancelled", "Задача остановлена. Выполненные изменения сохранены.")
     except Exception as exc:
         logger.exception("Фоновая задача %s завершилась с ошибкой", job_id)
         status, error = "error", public_error(exc)
