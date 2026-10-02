@@ -18,3 +18,7 @@ engagement memory, real stored tool evidence, coverage reasons, four queued loca
 workers, folded panels, compose actions and 320/390px layouts. This fixture uses
 only local file listing; it never runs attackbox commands. `LAYLA_QA_SCREENSHOTS`
 optionally preserves screenshots outside the temporary test directory.
+
+Set `LAYLA_BROWSER_TEST=rich-responses.cjs` to verify Markdown tables, lists,
+code blocks, exact clipboard contents (Markdown/code/TSV), denied-clipboard
+fallback, disabled raw HTML/unsafe links/remote images, and 320/390px layout.

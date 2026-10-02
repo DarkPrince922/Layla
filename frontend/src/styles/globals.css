@@ -206,3 +206,30 @@ dialog::backdrop { background: rgb(4 8 16 / .72); backdrop-filter: blur(6px); }
   .workspace-title p { display: none; }
   .workspace-toolbar { row-gap: 8px; padding-top: 12px; padding-bottom: 12px; }
 }
+
+/* Agent responses: contain wide code/tables within the message on mobile. */
+.agent-markdown { min-width: 0; white-space: normal; overflow-wrap: anywhere; font-size: .875rem; line-height: 1.8; }
+.agent-markdown > :first-child { margin-top: 0; }
+.agent-markdown p { margin: .65em 0; white-space: pre-wrap; }
+.agent-markdown h1, .agent-markdown h2, .agent-markdown h3, .agent-markdown h4, .agent-markdown h5, .agent-markdown h6 { margin: 1em 0 .5em; font-weight: 650; line-height: 1.4; }
+.agent-markdown h1 { font-size: 1.4rem; }
+.agent-markdown h2 { font-size: 1.2rem; }
+.agent-markdown h3 { font-size: 1.05rem; }
+.agent-markdown ul, .agent-markdown ol { padding-left: 1.5em; margin: .65em 0; }
+.agent-markdown ul { list-style: disc; }
+.agent-markdown ol { list-style: decimal; }
+.agent-markdown li { margin: .25em 0; }
+.agent-markdown .task-list-item { list-style: none; }
+.agent-markdown .task-list-item input { margin-right: .5em; }
+.agent-markdown a { color: theme("colors.accent.300"); text-decoration: underline; text-underline-offset: 3px; }
+.agent-markdown blockquote { margin: .75em 0; border-left: 3px solid theme("colors.accent.500"); padding-left: 1em; color: theme("colors.neutral.400"); }
+.agent-markdown hr { margin: 1.25em 0; border-color: theme("colors.ink.700"); }
+.agent-markdown :not(pre) > code { border-radius: .3rem; background: theme("colors.ink.900"); padding: .1em .35em; font-size: .85em; }
+.agent-markdown pre { white-space: pre; overflow-wrap: normal; }
+.agent-markdown pre code { padding: 0; background: transparent; font-size: inherit; }
+.agent-markdown table { width: 100%; border-collapse: collapse; font-size: .8rem; }
+.agent-markdown th, .agent-markdown td { min-width: 7rem; padding: .6rem .8rem; border: 1px solid theme("colors.ink.700"); vertical-align: top; }
+.agent-markdown th { background: theme("colors.ink.900"); font-weight: 650; }
+.agent-markdown tr:nth-child(even) { background: rgb(255 255 255 / .025); }
+/* Only validated critical finding cards get large type in pentest responses. */
+.pentest-prose h1, .pentest-prose h2, .pentest-prose h3, .pentest-prose h4, .pentest-prose h5, .pentest-prose h6 { font-size: inherit; }
