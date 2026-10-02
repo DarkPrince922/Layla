@@ -1,4 +1,3 @@
-import { DomainChatWorkspace } from "@/components/DomainChatWorkspace";
 import { notFound } from "next/navigation";
 import { domainBySlug, DOMAINS } from "@/lib/domains";
 import { CodeDomain } from "@/components/CodeDomain";
@@ -16,5 +15,5 @@ export default function DomainPage({ params }: { params: { domain: string } }) {
   if (domain.slug === "code") return <CodeDomain />;
   if (domain.slug === "osint") return <OsintDomain />;
   if (domain.slug === "design") return <DesignDomain />;
-  return <DomainChatWorkspace domain="pentest"><PentestDomain /></DomainChatWorkspace>;
+  return <PentestDomain />;
 }

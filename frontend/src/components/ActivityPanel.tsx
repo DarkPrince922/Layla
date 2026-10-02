@@ -42,11 +42,13 @@ export function ActivityPanel() {
       } catch { /* Storage can be unavailable. */ }
     } else {
       query.set("view", "workspace");
+      if (typeof job.result.engagement_id === "string") query.set("engagement", job.result.engagement_id);
+      if (typeof job.result.run_id === "string") query.set("run", job.result.run_id);
       if (typeof job.result.design_id === "string") query.set("design", job.result.design_id);
     }
     if (typeof project === "string") query.set("project", project);
     router.push(`/${job.domain}?${query}`);
-    if (!chat) window.dispatchEvent(new CustomEvent("layla:open-workspace", { detail: { domain: job.domain, design_id: job.result.design_id, job_id: job.id } }));
+    if (!chat) window.dispatchEvent(new CustomEvent("layla:open-workspace", { detail: { domain: job.domain, design_id: job.result.design_id, job_id: job.id, engagement_id: job.result.engagement_id, run_id: job.result.run_id } }));
     if (chat) window.dispatchEvent(new CustomEvent("layla:open-chat", { detail: { id: chat, project_id: project, domain: job.domain } }));
   }
   return <details ref={menu} className="relative">

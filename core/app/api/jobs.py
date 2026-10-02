@@ -81,6 +81,15 @@ async def cancel_job(job_id: str, user: User = Depends(get_current_user),
                      maker=Depends(get_sessionmaker)) -> Job:
     job = await get_job(job_id, user, session)
     if job.status in _ACTIVE:
+        if job.kind == "pentest.worker":
+            from app.models.agent import AgentWorker
+            worker = await session.get(AgentWorker, (job.result or {}).get("worker_id"))
+            if worker and worker.role == "lead":
+                from app.api.agent import stop_run
+                await stop_run(worker.run_id, user, session, maker)
+                return await session.get(Job, job_id, populate_existing=True)
+            from app.services.pentest_workers import assert_cancellable
+            await assert_cancellable(session, (job.result or {}).get("worker_id"))
         await session.rollback()
         if not await job_service.cancel(job_id, maker):
             # A worker missing from this process is not silently reported as stopped.

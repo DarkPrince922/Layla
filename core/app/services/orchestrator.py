@@ -55,7 +55,7 @@ def parse_plan(text: str) -> list[dict]:
         if role not in ROLES and role != "lead":
             role = "lead"
         kind = item.get("kind", "plan")
-        if kind not in ("plan", "analysis", "command", "triage"):
+        if kind not in ("plan", "analysis", "command", "triage", "delegate"):
             kind = "plan"
         steps.append(
             {
