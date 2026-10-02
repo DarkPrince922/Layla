@@ -4,9 +4,21 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+import httpx
 
 import app.services.provider_client as pc
 from app.services import jobs
+
+
+def test_public_network_errors_show_category_without_secrets():
+    request = httpx.Request('POST', 'https://service.invalid/private?token=private-secret')
+    response = httpx.Response(400, request=request, text='private-secret')
+    error = httpx.HTTPStatusError('private-secret', request=request, response=response)
+    assert 'HTTP 400' in jobs.public_error(error)
+    assert 'private-secret' not in jobs.public_error(error)
+    transport = httpx.ConnectError('private-secret', request=request)
+    assert 'Ошибка соединения' in jobs.public_error(transport)
+    assert 'private-secret' not in jobs.public_error(transport)
 
 
 async def _wait_job(client, job_id, tries=600):
