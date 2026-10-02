@@ -40,7 +40,10 @@ def extract_host(target: str) -> str:
                 host = candidate.split(":", 1)[0]
     except ValueError:
         return ""
-    return host.strip().lower().rstrip(".")
+    try:
+        return host.strip().lower().rstrip(".").encode("idna").decode("ascii")
+    except UnicodeError:
+        return ""
 
 
 def _as_ip(value: str):
@@ -73,6 +76,12 @@ def _matches_rule(host: str, rule: str) -> bool:
     if rip is not None:
         hip = _as_ip(host)
         return hip is not None and hip == rip
+
+    prefix = "*." if rule_host.startswith("*.") else "." if rule_host.startswith(".") else ""
+    try:
+        rule_host = prefix + rule_host[len(prefix):].encode("idna").decode("ascii")
+    except UnicodeError:
+        return False
 
     # Wildcard / суффикс-домен.
     if rule_host.startswith("*."):
