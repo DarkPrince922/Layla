@@ -61,8 +61,8 @@ def _verify_host_key(cfg: SSHConfig, presented: asyncssh.SSHKey) -> None:
         return
     try:
         pinned = asyncssh.import_public_key(cfg.host_key)
-    except (asyncssh.KeyImportError, ValueError):
-        return  # некорректно сохранённый отпечаток — перезакрепим ниже
+    except (asyncssh.KeyImportError, ValueError) as exc:
+        raise HostKeyChanged("Сохранённый ключ хоста повреждён. Проверьте сервер и добавьте его заново.") from exc
     if pinned.export_public_key() != presented.export_public_key():
         raise HostKeyChanged(
             "Ключ хоста изменился с прошлого подключения — соединение отклонено "
@@ -71,20 +71,39 @@ def _verify_host_key(cfg: SSHConfig, presented: asyncssh.SSHKey) -> None:
         )
 
 
+class _PinnedClient(asyncssh.SSHClient):
+    """Check the server during key exchange, before credentials are offered."""
+    def __init__(self, cfg: SSHConfig) -> None:
+        self.cfg = cfg
+        self.error: HostKeyChanged | None = None
+
+    def validate_host_public_key(self, host: str, addr: str, port: int, key) -> bool:
+        try:
+            _verify_host_key(self.cfg, key)
+            return True
+        except HostKeyChanged as exc:
+            self.error = exc
+            return False
+
+
 async def _connect(cfg: SSHConfig):
     """Открыть соединение, не доверяя known_hosts ОС; проверку делаем сами (TOFU/pin)."""
+    validator = _PinnedClient(cfg)
     try:
         conn = await asyncio.wait_for(
             asyncssh.connect(
                 cfg.host, port=cfg.port, username=cfg.user,
                 client_keys=_client_keys(cfg),
                 password=cfg.secret if cfg.auth == "password" else None,
-                known_hosts=None,          # проверку хоста делаем вручную ниже
+                known_hosts=asyncssh.import_known_hosts(""),
+                client_factory=lambda: validator,
                 agent_path=None,           # не трогаем ssh-agent оператора
                 config=None,               # игнорируем ~/.ssh/config
             ),
             timeout=CONNECT_TIMEOUT,
         )
+    except asyncssh.HostKeyNotVerifiable as exc:
+        raise validator.error or HostKeyChanged("Не удалось проверить ключ хоста") from exc
     except asyncssh.PermissionDenied as exc:
         raise SSHError("Отказано в доступе: проверьте пользователя, ключ или пароль") from exc
     except (TimeoutError, OSError, asyncssh.Error) as exc:
@@ -94,6 +113,7 @@ async def _connect(cfg: SSHConfig):
         _verify_host_key(cfg, presented)
     except HostKeyChanged:
         conn.close()
+        await conn.wait_closed()
         raise
     return conn, presented.export_public_key().decode().strip()
 
@@ -107,6 +127,7 @@ async def probe(cfg: SSHConfig) -> SSHResult:
         return SSHResult(exit_code=result.exit_status, output=out, truncated=False, host_key=host_key)
     finally:
         conn.close()
+        await conn.wait_closed()
 
 
 async def run(cfg: SSHConfig, command: str, timeout: int = 300) -> SSHResult:
@@ -129,3 +150,4 @@ async def run(cfg: SSHConfig, command: str, timeout: int = 300) -> SSHResult:
         )
     finally:
         conn.close()
+        await conn.wait_closed()

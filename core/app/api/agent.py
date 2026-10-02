@@ -8,7 +8,7 @@ scope/venue/egress-гейт и HITL-подтверждение оператор�
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session, get_sessionmaker
@@ -59,6 +59,8 @@ def _attack_box_runner(server: Server | None):
     async def runner(command: str) -> str:
         result = await ssh_exec.run(cfg, command)
         pin["host_key"] = result.host_key
+        if result.exit_code != 0:
+            raise ssh_exec.SSHError(f"Команда завершилась с кодом {result.exit_code}: {result.output[:1500]}")
         return result.output
 
     return runner, pin
@@ -81,8 +83,8 @@ async def _pick_model(session: AsyncSession, user: User, requested: str | None) 
         await session.scalars(
             select(Provider).where(
                 Provider.owner_id == user.id,
-                Provider.enabled == True,  # noqa: E712
-                Provider.active == True,  # noqa: E712
+                Provider.enabled == True,
+                Provider.active == True,
             )
         )
     )
@@ -110,7 +112,7 @@ async def create_run(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> AgentRunOut:
-    e = await _engagement(session, user, eid)
+    await _engagement(session, user, eid)
     model = await _pick_model(session, user, body.model)
     sc = await session.scalar(select(Scope).where(Scope.engagement_id == eid))
     allow = (sc.allow if sc else []) or []
@@ -198,10 +200,21 @@ async def _owned_step(session: AsyncSession, user: User, sid: str) -> tuple[Agen
     step = await session.get(AgentStep, sid)
     if step is None:
         raise HTTPException(status_code=404, detail="Шаг не найден")
-    run = await session.get(AgentRun, step.run_id)
+    run = await session.scalar(select(AgentRun).where(AgentRun.id == step.run_id).with_for_update())
     if run is None or run.owner_id != user.id:
         raise HTTPException(status_code=404, detail="Шаг не найден")
     return run, step
+
+
+async def _claim_step(session: AsyncSession, step: AgentStep) -> None:
+    claimed = await session.execute(update(AgentStep).where(
+        AgentStep.id == step.id, AgentStep.status.in_(("awaiting_approval", "ready", "blocked", "failed"))
+    ).values(status="running").execution_options(synchronize_session=False))
+    if claimed.rowcount != 1:
+        raise HTTPException(status_code=409, detail="Шаг уже выполняется или завершён")
+    # Commit before network I/O so retries observe the claimed step.
+    await session.commit()
+    await session.refresh(step)
 
 
 @router.post("/agent/steps/{sid}/deny", response_model=AgentStepOut)
@@ -210,8 +223,13 @@ async def deny_step(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> AgentStepOut:
-    run, step = await _owned_step(session, user, sid)
-    step.status = "denied"
+    _run, step = await _owned_step(session, user, sid)
+    changed = await session.execute(update(AgentStep).where(
+        AgentStep.id == sid, AgentStep.status.in_(("awaiting_approval", "ready", "blocked", "failed"))
+    ).values(status="denied").execution_options(synchronize_session=False))
+    if changed.rowcount != 1:
+        raise HTTPException(status_code=409, detail="Шаг уже выполняется или завершён")
+    await session.refresh(step)
     await audit.record(session, actor=user.id, action="agent.step.deny", target=step.id)
     await session.commit()
     return AgentStepOut.model_validate(step)
@@ -225,8 +243,15 @@ async def approve_step(
 ) -> AgentStepOut:
     """Подтвердить и выполнить шаг. Команда проходит scope/venue/egress-гейт."""
     run, step = await _owned_step(session, user, sid)
+    if step.status == "done":
+        return AgentStepOut.model_validate(step)
+    if step.status in ("running", "denied"):
+        raise HTTPException(status_code=409, detail="Шаг уже выполняется или отклонён")
+    if step.kind == "command" and run.status == AgentRunStatus.completed:
+        raise HTTPException(status_code=409, detail="Запуск остановлен или завершён")
     if step.kind != "command" or not step.command:
         # analysis-шаг: безопасный LLM-анализ, без активных действий.
+        await _claim_step(session, step)
         step.status = "done"
         step.output = step.summary or "Проанализировано"
         await session.commit()
@@ -245,7 +270,7 @@ async def approve_step(
         server = await session.get(Server, vn.attack_box_id)
     runner, pin = _attack_box_runner(server)
 
-    step.status = "running"
+    await _claim_step(session, step)
     try:
         result = await venue_executor.execute(
             target=step.target or e.target,
@@ -260,8 +285,6 @@ async def approve_step(
         )
         step.status = "done"
         step.output = result.output
-        if server is not None and pin["host_key"] and server.host_key != pin["host_key"]:
-            server.host_key = pin["host_key"]  # закрепляем ключ хоста при первом подключении
     except ActionBlocked as exc:
         step.status = "blocked"
         step.output = f"Заблокировано гейтом: {exc}"
@@ -274,6 +297,8 @@ async def approve_step(
     except venue_executor.NoExecutorConfigured as exc:
         step.status = "blocked"
         step.output = f"{exc}"
+    if server is not None and pin["host_key"] and server.host_key != pin["host_key"]:
+        server.host_key = pin["host_key"]
     await audit.record(
         session, actor=user.id, action="agent.step.approve", target=step.id,
         meta={"status": step.status, "target": step.target},
@@ -288,9 +313,13 @@ async def stop_run(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> AgentRunOut:
-    run = await session.get(AgentRun, rid)
+    run = await session.scalar(select(AgentRun).where(AgentRun.id == rid).with_for_update())
     if run is None or run.owner_id != user.id:
         raise HTTPException(status_code=404, detail="Run не найден")
+    if await session.scalar(select(AgentStep.id).where(AgentStep.run_id == rid, AgentStep.status == "running")):
+        raise HTTPException(status_code=409, detail="Команда ещё выполняется на сервере. Остановка запуска сейчас недоступна.")
+    await session.execute(update(AgentStep).where(AgentStep.run_id == rid,
+        AgentStep.status.in_(("awaiting_approval", "ready", "blocked", "failed"))).values(status="denied"))
     run.status = AgentRunStatus.completed
     await session.commit()
     return await _run_out(session, run)

@@ -129,3 +129,126 @@ async def test_agent_step_runs_on_attack_box(client, db_sessionmaker):
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["status"] == "done" and body["output"] == "ran: whoami"
+
+
+async def test_changed_host_is_rejected_before_password_is_sent():
+    passwords = []
+    class RecordingServer(_Server):
+        def validate_password(self, username, password):
+            passwords.append(password)
+            return super().validate_password(username, password)
+    trusted = asyncssh.generate_private_key('ssh-ed25519').export_public_key().decode()
+    presented = asyncssh.generate_private_key('ssh-ed25519')
+    server = await asyncssh.create_server(RecordingServer, '127.0.0.1', 0,
+                                          server_host_keys=[presented], process_factory=_handle)
+    async with server:
+        with pytest.raises(ssh_exec.HostKeyChanged):
+            await ssh_exec.probe(_cfg(server.get_port(), host_key=trusted))
+    assert passwords == [], 'Password must not be offered to a server with a changed host key'
+
+
+async def test_invalid_stored_host_key_fails_closed():
+    server, port, _ = await _start_server()
+    async with server:
+        with pytest.raises(ssh_exec.HostKeyChanged):
+            await ssh_exec.probe(_cfg(port, host_key='corrupted-pin'))
+
+
+async def test_step_is_not_executed_twice(client, db_sessionmaker, monkeypatch):
+    from app.models.agent import AgentRun, AgentStep
+    server, port, _ = await _start_server()
+    async with server:
+        eid, _ = await _authorized_engagement_with_box(client, db_sessionmaker, port)
+        async with db_sessionmaker() as session:
+            user = await session.scalar(select(User).where(User.email == 'ssh@example.com'))
+            run = AgentRun(engagement_id=eid, owner_id=user.id, task='once', status='paused')
+            session.add(run)
+            await session.flush()
+            step = AgentStep(run_id=run.id, ordinal=0, role='implementer', kind='command',
+                             target='127.0.0.1', command='echo once', status='awaiting_approval')
+            session.add(step)
+            await session.commit()
+            step_id = step.id
+        calls = []
+        original = ssh_exec.run
+        async def counting(*args, **kwargs):
+            calls.append(args[1])
+            return await original(*args, **kwargs)
+        monkeypatch.setattr(ssh_exec, 'run', counting)
+        first = await client.post(f'/api/agent/steps/{step_id}/approve')
+        assert first.status_code == 200 and first.json()['status'] == 'done'
+        again = await client.post(f'/api/agent/steps/{step_id}/approve')
+        assert again.status_code in (200, 409)
+        assert calls == ['echo once']
+
+
+async def test_nonzero_exit_is_reported_as_failure(monkeypatch):
+    from app.api.agent import _attack_box_runner
+    from app.security import crypto
+    server = Server(host='localhost', port=22, user='op', auth='password',
+                    secret_ref=crypto.encrypt('pw'))
+    async def unsuccessful(*args, **kwargs):
+        return ssh_exec.SSHResult(exit_code=7, output='command failed', truncated=False, host_key='pin')
+    monkeypatch.setattr(ssh_exec, 'run', unsuccessful)
+    runner, _ = _attack_box_runner(server)
+    with pytest.raises(ssh_exec.SSHError, match='7'):
+        await runner('false')
+
+
+async def _pending_command(client, maker, command='echo test'):
+    from app.models.agent import AgentRun, AgentStep
+    eid, _ = await _authorized_engagement_with_box(client, maker, 1)
+    async with maker() as session:
+        user = await session.scalar(select(User).where(User.email == 'ssh@example.com'))
+        run = AgentRun(engagement_id=eid, owner_id=user.id, task='test', status='paused')
+        session.add(run)
+        await session.flush()
+        step = AgentStep(run_id=run.id, ordinal=0, role='implementer', kind='command',
+                         target='127.0.0.1', command=command, status='awaiting_approval')
+        session.add(step)
+        await session.commit()
+        return run.id, step.id
+
+
+async def test_parallel_approval_and_denial_cannot_duplicate_or_hide_running_command(client, db_sessionmaker, monkeypatch):
+    import asyncio
+    run_id, step_id = await _pending_command(client, db_sessionmaker)
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = []
+    async def slow_run(*args, **kwargs):
+        calls.append(args[1])
+        entered.set()
+        await release.wait()
+        return ssh_exec.SSHResult(exit_code=0, output='done', truncated=False, host_key='pin')
+    monkeypatch.setattr(ssh_exec, 'run', slow_run)
+    first = asyncio.create_task(client.post(f'/api/agent/steps/{step_id}/approve'))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        assert (await client.post(f'/api/agent/steps/{step_id}/approve')).status_code == 409
+        assert (await client.post(f'/api/agent/steps/{step_id}/deny')).status_code == 409
+        assert (await client.post(f'/api/agent/runs/{run_id}/stop')).status_code == 409
+    finally:
+        release.set()
+        result = await first
+    assert result.json()['status'] == 'done'
+    assert calls == ['echo test']
+
+
+async def test_failed_command_stays_failed_in_api(client, db_sessionmaker, monkeypatch):
+    _, step_id = await _pending_command(client, db_sessionmaker, 'false')
+    async def failure(*args, **kwargs):
+        return ssh_exec.SSHResult(exit_code=23, output='failure details', truncated=False, host_key='pin')
+    monkeypatch.setattr(ssh_exec, 'run', failure)
+    result = await client.post(f'/api/agent/steps/{step_id}/approve')
+    assert result.status_code == 200
+    assert result.json()['status'] == 'failed'
+    assert '23' in result.json()['output']
+
+
+async def test_stopped_run_cannot_execute_an_old_pending_step(client, db_sessionmaker, monkeypatch):
+    run_id, step_id = await _pending_command(client, db_sessionmaker)
+    async def forbidden(*args, **kwargs):
+        pytest.fail('Stopped run must not execute commands')
+    monkeypatch.setattr(ssh_exec, 'run', forbidden)
+    assert (await client.post(f'/api/agent/runs/{run_id}/stop')).status_code == 200
+    assert (await client.post(f'/api/agent/steps/{step_id}/approve')).status_code == 409
