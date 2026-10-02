@@ -9,7 +9,7 @@ import { DOMAINS } from "@/lib/domains";
 import { useAuth } from "@/store/auth";
 import { useLocale } from "@/store/locale";
 import { useLayout } from "@/store/layout";
-import { useAppearance } from "@/store/appearance";
+import { AuroraBackdrop } from "@/components/AuroraBackdrop";
 import { AuthGate } from "@/components/AuthGate";
 
 export function AppShell({ children }: { children: ReactNode }) {
@@ -19,10 +19,9 @@ export function AppShell({ children }: { children: ReactNode }) {
   const logout = useAuth((s) => s.logout);
   const t = useLocale((s) => s.t);
   const applyLayout = useLayout((s) => s.apply);
-  const applyAppearance = useAppearance((s) => s.apply);
   const accountMenu = useRef<HTMLDetailsElement>(null);
   const domain = DOMAINS.find((d) => pathname.startsWith(`/${d.slug}`));
-  useEffect(() => { applyLayout(); applyAppearance(); }, [applyLayout, applyAppearance]);
+  useEffect(() => { applyLayout(); }, [applyLayout]);
   useEffect(() => { if (accountMenu.current) accountMenu.current.open = false; }, [pathname]);
   useEffect(() => {
     const close = (event: PointerEvent) => {
@@ -41,13 +40,14 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   return (
     <AuthGate>
-      <div className="app-shell">
+      <div className="app-shell" data-domain={domain?.slug || "settings"}>
+        <AuroraBackdrop />
         <header className="app-topbar">
           <Link href="/code" className="flex shrink-0 items-center gap-2.5 rounded-xl" aria-label="Layla — главная">
             <span className="brand-mark">L</span><span className="text-xl font-semibold tracking-tight">Layla</span>
           </Link>
-          <nav aria-label="Разделы Layla" className="hidden items-center gap-1 md:flex">
-            {DOMAINS.map((d) => <Link key={d.slug} href={`/${d.slug}`} className="nav-pill" aria-current={domain?.slug === d.slug ? "page" : undefined}>
+          <nav aria-label="Разделы Layla" className="app-navigation hidden items-center gap-1 md:flex">
+            {DOMAINS.map((d) => <Link key={d.slug} href={`/${d.slug}`} className="nav-pill" data-domain={d.slug} aria-current={domain?.slug === d.slug ? "page" : undefined}>
               <d.icon className="h-4 w-4" />{t(`domain.${d.slug}`)}
             </Link>)}
           </nav>

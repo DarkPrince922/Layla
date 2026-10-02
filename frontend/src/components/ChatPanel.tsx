@@ -381,11 +381,11 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
       <button aria-label="Новый чат" onClick={() => select(null)} disabled={sending || !ready} className="icon-button"><Plus className="h-5 w-5" /></button>
     </div>
     <div ref={scroll} className="chat-scroll min-h-0 flex-1 space-y-5 overflow-y-auto p-5">
-      {history.isError || detail.isError ? <p role="alert" className="text-red-300">Не удалось загрузить историю. <button onClick={() => { history.refetch(); detail.refetch(); }} className="underline">Повторить</button></p> : !ready || (chatId && detail.isPending) ? <p className="text-sm text-neutral-500">Загрузка истории…</p> : !messages.length && <div className="mx-auto my-12 max-w-sm text-center"><div className="empty-orb mx-auto mb-5"><Bot className="h-7 w-7" /></div><h2 className="text-xl font-semibold">Что сделаем сегодня?</h2><p className="mt-3 text-sm leading-relaxed text-neutral-400">Опишите задачу. Можно переключаться между разделами и создавать новые чаты — работа продолжится, история и файлы сохранятся.</p></div>}
+      {history.isError || detail.isError ? <p role="alert" className="text-red-300">Не удалось загрузить историю. <button onClick={() => { history.refetch(); detail.refetch(); }} className="underline">Повторить</button></p> : !ready || (chatId && detail.isPending) ? <p className="text-sm text-neutral-500">Загрузка истории…</p> : !messages.length && <div className="chat-welcome mx-auto my-12 max-w-sm text-center"><div className="empty-orb mx-auto mb-5"><Bot className="h-7 w-7" /></div><h2 className="text-xl font-semibold">Что сделаем сегодня?</h2><p className="mt-3 text-sm leading-relaxed text-neutral-400">Опишите задачу. Можно переключаться между разделами и создавать новые чаты — работа продолжится, история и файлы сохранятся.</p></div>}
       {messages.map(m => m.meta?.kind === "summary" ? <details key={m.id} className="rounded-xl border border-dashed border-ink-600 px-4 py-2 text-xs text-neutral-400">
         <summary className="flex cursor-pointer list-none items-center gap-2 [&::-webkit-details-marker]:hidden"><FoldVertical className="h-3.5 w-3.5 shrink-0 text-accent-300" /><span className="flex-1">Контекст сжат · {m.meta.count || "старые"} сообщений выше модель видит как сводку</span><ChevronDown className="h-3.5 w-3.5" /></summary>
         <p className="mt-2 whitespace-pre-wrap break-words leading-relaxed">{m.content}</p>
-      </details> : <article key={m.id} className={`min-w-0 ${m.role === "user" ? "ml-auto max-w-[90%] rounded-2xl bg-accent-500/15 p-4" : "rounded-2xl bg-ink-800/40 p-4"}`}>
+      </details> : <article key={m.id} className={`chat-message min-w-0 ${m.role === "user" ? "chat-user ml-auto max-w-[90%] rounded-2xl bg-accent-500/15 p-4" : "chat-model rounded-2xl bg-ink-800/40 p-4"}`}>
         <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-neutral-500">
           <span className="flex-1">{m.role === "user" ? "Вы" : "Layla"}</span>
           {m.meta?.rolled_back && <span className="rounded-full bg-amber-500/10 px-2 py-0.5 font-normal text-amber-200">Изменения откатены</span>}
@@ -415,7 +415,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
       <button className="primary-button !px-3 !py-1.5 text-xs" onClick={() => { pickMode("auto"); send({ text: "Выполни этот план.", mode: "auto" }); }}>Выполнить</button>
       <button className="secondary-button !px-3 !py-1.5 text-xs" onClick={() => { pickMode("confirm"); send({ text: "Выполни этот план.", mode: "confirm" }); }}>С подтверждением</button>
     </div>}
-    <div className="mx-4 mb-4 rounded-2xl border border-ink-600/60 bg-ink-800/70 p-3">
+    <div className="chat-composer mx-4 mb-4">
       <div role="radiogroup" aria-label="Режим агента" className="mb-2 flex flex-wrap gap-1 text-xs">
         {MODES.map(({ id, label, hint, icon: Icon }) => <button key={id} role="radio" aria-checked={mode === id} title={hint} onClick={() => pickMode(id)} className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 ${mode === id ? "bg-accent-500/20 text-accent-100" : "text-neutral-400 hover:bg-ink-900"}`}><Icon className="h-3.5 w-3.5" />{label}</button>)}
       </div>
