@@ -529,9 +529,18 @@ async def resume_worker(wid: str, user: User = Depends(get_current_user),
     worker = await pentest_workers.owned(session, user, wid)
     if worker.status not in ('error', 'cancelled'):
         raise HTTPException(status_code=409, detail='Можно продолжить только прерванного воркера')
-    run = await session.get(AgentRun, worker.run_id)
-    # Reserve one slot by the same engagement-wide DB lock, without replacing the context.
-    await session.execute(update(Engagement).where(Engagement.id == worker.engagement_id).values(status=Engagement.status))
+    owner_id, engagement_id = user.id, worker.engagement_id
+    # Drop the read snapshot before taking the write lock. On SQLite WAL a
+    # concurrent job commit otherwise makes promotion fail with BUSY_SNAPSHOT.
+    await session.rollback()
+    await session.execute(update(Engagement).where(Engagement.id == engagement_id,
+        Engagement.owner_id == owner_id).values(status=Engagement.status))
+    worker = await session.get(AgentWorker, wid, populate_existing=True)
+    if not worker or worker.owner_id != owner_id:
+        raise HTTPException(status_code=404, detail='Воркер не найден')
+    if worker.status not in ('error', 'cancelled'):
+        raise HTTPException(status_code=409, detail='Воркер уже возобновлён')
+    run = await session.get(AgentRun, worker.run_id, populate_existing=True)
     from sqlalchemy import func
     count = await session.scalar(select(func.count()).select_from(AgentWorker).where(
         AgentWorker.engagement_id == worker.engagement_id, AgentWorker.role != 'lead', AgentWorker.status.in_(pentest_workers.ACTIVE)))
@@ -550,13 +559,13 @@ async def resume_worker(wid: str, user: User = Depends(get_current_user),
     await session.refresh(worker)
     worker.error = None
     worker.messages = [*(worker.messages or []), {'role': 'user', 'content': 'Продолжение после прерывания. Сохранённые файлы доступны. Не повторяй команды с неизвестным результатом без проверки; ожидавшие подтверждения команды отменены.'}][-48:]
-    job = Job(owner_id=user.id, domain='pentest', kind='pentest.worker', title=f'{worker.role}: {worker.task}'[:200],
+    job = Job(owner_id=owner_id, domain='pentest', kind='pentest.worker', title=f'{worker.role}: {worker.task}'[:200],
         status='queued', result={'engagement_id': worker.engagement_id, 'run_id': run.id, 'worker_id': wid})
     session.add(job)
     await session.flush()
     worker.job_id = job.id
     run.status, run.trace_ref = AgentRunStatus.running, None
-    await audit.record(session, actor=user.id, action='agent.worker.resume', target=wid)
+    await audit.record(session, actor=owner_id, action='agent.worker.resume', target=wid)
     await session.commit()
     pentest_workers.launch(maker, worker)
     return worker
