@@ -101,15 +101,29 @@ async def _pick_model(session: AsyncSession, user: User, requested: str | None) 
     raise HTTPException(status_code=400, detail="Нет активной модели. Включите модель в настройках провайдера.")
 
 
+async def _worker_out(session, worker, *, details=False):
+    item = WorkerOut.model_validate(worker)
+    job = await session.get(Job, worker.job_id, populate_existing=True) if worker.job_id else None
+    if job and job.owner_id == worker.owner_id:
+        item.activity = (job.steps[-1].get('text') if job.steps else None)
+        item.progress = job.progress
+        item.has_reasoning = bool(job.reasoning)
+        item.reasoning = job.reasoning if details else ''
+    return item
+
+
 async def _run_out(session: AsyncSession, run: AgentRun) -> AgentRunOut:
     steps = await session.scalars(
-        select(AgentStep).where(AgentStep.run_id == run.id).order_by(AgentStep.ordinal)
+        select(AgentStep).where(AgentStep.run_id == run.id).order_by(AgentStep.ordinal, AgentStep.created_at, AgentStep.id)
     )
     out = AgentRunOut.model_validate(run)
     out.steps = [AgentStepOut.model_validate(s) for s in steps]
+    for step in out.steps:
+        if step.kind == "reasoning":
+            step.output = None  # Fetch lengthy provider traces only when expanded.
     out.workers = []
     for w in await session.scalars(select(AgentWorker).where(AgentWorker.run_id == run.id).order_by(AgentWorker.created_at)):
-        item = WorkerOut.model_validate(w)
+        item = await _worker_out(session, w)
         # Polling the run should not repeatedly ship independent tool transcripts.
         item.messages = [m for m in (w.messages or []) if m.get('kind') == 'chat' or m.get('role') == 'assistant'] if w.role == 'lead' else []
         out.workers.append(item)
@@ -219,6 +233,15 @@ async def get_run(
     if run is None or run.owner_id != user.id:
         raise HTTPException(status_code=404, detail="Run не найден")
     return await _run_out(session, run)
+
+
+@router.get('/agent/steps/{sid}', response_model=AgentStepOut)
+async def get_step(sid: str, user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session)):
+    step = await session.scalar(select(AgentStep).join(AgentRun, AgentRun.id == AgentStep.run_id).where(
+        AgentStep.id == sid, AgentRun.owner_id == user.id))
+    if step is None:
+        raise HTTPException(404, "Шаг не найден")
+    return step
 
 
 async def _owned_step(session: AsyncSession, user: User, sid: str) -> tuple[AgentRun, AgentStep]:
@@ -357,7 +380,7 @@ async def stop_run(
     run = await session.scalar(select(AgentRun).where(AgentRun.id == rid).with_for_update())
     if run is None or run.owner_id != user.id:
         raise HTTPException(status_code=404, detail="Run не найден")
-    if await session.scalar(select(AgentStep.id).where(AgentStep.run_id == rid, AgentStep.status == "running")):
+    if await session.scalar(select(AgentStep.id).where(AgentStep.run_id == rid, AgentStep.status == "running", AgentStep.kind != "tool")):
         raise HTTPException(status_code=409, detail="Команда ещё выполняется на сервере. Остановка запуска сейчас недоступна.")
     await session.execute(update(AgentStep).where(AgentStep.run_id == rid,
         AgentStep.status.in_(("awaiting_approval", "ready", "blocked", "failed"))).values(status="denied"))
@@ -518,7 +541,7 @@ async def create_worker(rid: str, body: WorkerCreate, user: User = Depends(get_c
 @router.get('/agent/workers/{wid}', response_model=WorkerOut)
 async def get_worker(wid: str, user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session)):
     from app.services.pentest_workers import owned
-    return await owned(session, user, wid)
+    return await _worker_out(session, await owned(session, user, wid), details=True)
 
 
 @router.post('/agent/workers/{wid}/stop', response_model=WorkerOut)

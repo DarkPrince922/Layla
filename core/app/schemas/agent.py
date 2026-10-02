@@ -52,6 +52,10 @@ class WorkerOut(BaseModel):
     rounds: int
     result: str | None = None
     error: str | None = None
+    activity: str | None = None
+    progress: float = 0
+    has_reasoning: bool = False
+    reasoning: str = ""
     messages: list[dict] = []
     model_config = {"from_attributes": True}
 

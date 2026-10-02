@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 import httpx
 from sqlalchemy import select
@@ -18,6 +20,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.enums import KeyStatus, ProviderKind
 from app.models.provider import Provider, ProviderKey
 from app.security import crypto
+
+_reasoning_observer: ContextVar[Callable[[str], Awaitable[None]] | None] = ContextVar('provider_reasoning_observer', default=None)
+
+
+@contextmanager
+def capture_reasoning(callback):
+    """Observe only reasoning explicitly returned by a provider, per async task."""
+    token = _reasoning_observer.set(callback)
+    try:
+        yield
+    finally:
+        _reasoning_observer.reset(token)
+
 
 _DEFAULT_BASE = {
     ProviderKind.openai_compatible: "https://api.openai.com/v1",
@@ -269,9 +284,11 @@ async def _stream_anthropic(
 async def complete(
     provider: Provider, key: str | None, model: str, messages: list[dict]
 ) -> str:
-    """Не-стрим комплишн (для генерации Design). Reasoning отбрасывается."""
+    """Collect the visible response; optionally observe provider-returned reasoning."""
     parts = []
     async for kind, text in stream_chat(provider, key, model, messages):
         if kind == "content":
             parts.append(text)
+        elif kind == "reasoning" and (observer := _reasoning_observer.get()) is not None:
+            await observer(text)
     return "".join(parts)
