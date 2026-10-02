@@ -548,6 +548,7 @@ export interface Engagement {
   id: string;
   target: string;
   authorized: boolean;
+  offensive_enabled: boolean;
   status: string;
   scope?: PentestScope | null;
   venue?: PentestVenue | null;
@@ -599,6 +600,13 @@ export interface AgentStep {
   command?: string | null;
   summary?: string | null;
   output?: string | null;
+  worker_id?: string | null;
+}
+
+export interface AgentWorker {
+  id: string; run_id: string; job_id: string | null; task: string; role: string; model: string;
+  status: string; rounds: number; result?: string | null; error?: string | null;
+  messages: { role: string; content: string; kind?: string }[];
 }
 
 export interface AgentRun {
@@ -610,6 +618,16 @@ export interface AgentRun {
   status: string;
   budget_used: Record<string, unknown>;
   steps: AgentStep[];
+  workers: AgentWorker[];
+}
+
+export async function downloadWorker(id: string): Promise<void> {
+  const response = await fetch(`${BASE}/agent/workers/${id}/archive`, { credentials: "include" });
+  if (!response.ok) throw new ApiError(response.status, "Не удалось скачать файлы воркера");
+  const url = URL.createObjectURL(await response.blob());
+  const link = document.createElement("a"); link.href = url; link.download = `worker-${id}.zip`;
+  document.body.appendChild(link); link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 export interface AgentConfig {

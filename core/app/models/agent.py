@@ -38,6 +38,7 @@ class AgentStep(UUIDPk, Timestamps, Base):
     run_id: Mapped[str] = mapped_column(
         ForeignKey("agent_runs.id", ondelete="CASCADE"), index=True
     )
+    worker_id: Mapped[str | None] = mapped_column(ForeignKey("agent_workers.id", ondelete="SET NULL"), index=True)
     ordinal: Mapped[int] = mapped_column(Integer, default=0)
     role: Mapped[str] = mapped_column(String(40), default="lead")  # explorer|reviewer|implementer|lead
     kind: Mapped[str] = mapped_column(String(30), default="plan")  # plan|analysis|command|triage
@@ -48,6 +49,24 @@ class AgentStep(UUIDPk, Timestamps, Base):
     command: Mapped[str | None] = mapped_column(Text)
     summary: Mapped[str | None] = mapped_column(Text)
     output: Mapped[str | None] = mapped_column(Text)
+
+
+class AgentWorker(UUIDPk, Timestamps, Base):
+    """Independent, non-recursive pentest agents with durable contexts."""
+    __tablename__ = "agent_workers"
+
+    run_id: Mapped[str] = mapped_column(ForeignKey("agent_runs.id", ondelete="CASCADE"), index=True)
+    engagement_id: Mapped[str] = mapped_column(ForeignKey("engagements.id", ondelete="CASCADE"), index=True)
+    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    job_id: Mapped[str | None] = mapped_column(ForeignKey("jobs.id", ondelete="SET NULL"))
+    task: Mapped[str] = mapped_column(Text)
+    role: Mapped[str] = mapped_column(String(40), default="explorer")
+    model: Mapped[str] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(30), default="queued")
+    messages: Mapped[list] = mapped_column(JSONList, default=list)
+    rounds: Mapped[int] = mapped_column(Integer, default=0)
+    result: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
 
 
 class AgentConfig(UUIDPk, Timestamps, Base):

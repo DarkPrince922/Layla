@@ -16,6 +16,7 @@ from app.models.job import Job
 logger = logging.getLogger("layla.jobs")
 ACTIVE = ("queued", "running")
 _tasks: dict[str, asyncio.Task] = {}
+_shutting_down = False
 # Ожидающие решения пользователя (режим «С подтверждением»): job_id -> (approval_id, future).
 _decisions: dict[str, tuple[str, asyncio.Future]] = {}
 DECISIONS = ("approve", "reject", "approve_all")
@@ -161,10 +162,15 @@ def decide(job_id: str, approval_id: str, decision: str) -> bool:
 
 
 async def shutdown() -> None:
-    tasks = list(_tasks.values())
-    for task in tasks:
-        task.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
+    global _shutting_down
+    _shutting_down = True
+    try:
+        tasks = list(_tasks.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    finally:
+        _shutting_down = False
 
 
 async def _heartbeat(maker, job_id: str) -> None:
@@ -180,6 +186,7 @@ async def _heartbeat(maker, job_id: str) -> None:
 
 
 async def _finish(maker, job_id: str, status: str, error: str | None = None) -> None:
+    summary_run = None
     # Separate session: a failed worker transaction must not swallow its failure state.
     async with maker() as session:
         job = await session.get(Job, job_id)
@@ -187,6 +194,18 @@ async def _finish(maker, job_id: str, status: str, error: str | None = None) -> 
             return
         job.status = status
         job.error = error
+        if job.kind == "pentest.worker":
+            from app.models.agent import AgentStep, AgentWorker
+            worker = await session.scalar(select(AgentWorker).where(AgentWorker.job_id == job_id))
+            if worker and status in ("cancelled", "error") and worker.status in ("queued", "running", "awaiting_approval"):
+                worker.status = "cancelled" if status == "cancelled" else "error"
+                worker.error = error
+            if worker:
+                summary_run = worker.run_id
+                await session.execute(update(AgentStep).where(AgentStep.worker_id == worker.id,
+                    AgentStep.status == "awaiting_approval").values(status="denied"))
+                await session.execute(update(AgentStep).where(AgentStep.worker_id == worker.id,
+                    AgentStep.status == "running").values(status="failed", output="Исполнение прервано. Состояние удалённого процесса нужно проверить на attackbox."))
         if status == "done":
             job.progress = 1.0
         message_id = (job.result or {}).get("message_id")
@@ -202,6 +221,12 @@ async def _finish(maker, job_id: str, status: str, error: str | None = None) -> 
                 ]
                 msg.meta = meta
         await session.commit()
+    if summary_run and not _shutting_down and not (error or "").startswith("Прервано перезапуском"):
+        from app.services.pentest_workers import schedule_summary
+        try:
+            await schedule_summary(maker, summary_run)
+        except Exception:
+            logger.exception("Не удалось собрать итоги воркеров %s", summary_run)
 
 
 async def _run(sessionmaker, job_id: str, worker) -> None:

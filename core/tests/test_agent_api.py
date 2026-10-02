@@ -27,6 +27,7 @@ async def _setup(client, monkeypatch, *, authorize=True, venue="this_machine"):
     await client.post(f"/api/engagements/{eid}/scope/confirm")
     if authorize:
         await client.post(f"/api/engagements/{eid}/authorize")
+        await client.put(f"/api/engagements/{eid}/offensive", json={"enabled": True})
         await client.put(f"/api/engagements/{eid}/venue", json={"mode": venue, "egress_route": "direct"})
 
     async def fake_complete(provider, key, model, messages, **kw):

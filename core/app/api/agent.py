@@ -8,11 +8,11 @@ scope/venue/egress-гейт и HITL-подтверждение оператор�
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session, get_sessionmaker
-from app.models.agent import AgentConfig, AgentRun, AgentStep
+from app.models.agent import AgentConfig, AgentRun, AgentStep, AgentWorker
 from app.models.enums import AgentRunStatus, Domain, EgressRoute, VenueMode
 from app.models.job import Job
 from app.models.pentest import Engagement, Finding, Scope, Server, Venue
@@ -20,6 +20,7 @@ from app.models.persona import Persona
 from app.models.provider import Provider
 from app.models.user import User
 from app.schemas.agent import (
+    AgentChatCreate,
     AgentConfigIn,
     AgentConfigOut,
     AgentRunCreate,
@@ -27,6 +28,8 @@ from app.schemas.agent import (
     AgentStepOut,
     TriageRequest,
     TriageResult,
+    WorkerCreate,
+    WorkerOut,
 )
 from app.schemas.job import JobOut
 from app.security import crypto
@@ -47,7 +50,7 @@ def _ssh_config(server: Server) -> ssh_exec.SSHConfig:
     )
 
 
-def _attack_box_runner(server: Server | None):
+def _attack_box_runner(server: Server | None, worker_directory: str | None = None):
     """runner для venue_executor + ячейка, куда попадёт ключ хоста для закрепления.
 
     None → исполнителя нет (venue_executor поднимет NoExecutorConfigured за гейтами)."""
@@ -57,8 +60,13 @@ def _attack_box_runner(server: Server | None):
     cfg = _ssh_config(server)
 
     async def runner(command: str) -> str:
+        if worker_directory:
+            # The directory is built only from UUIDs by pentest_workers.remote_directory.
+            command = f'umask 077; layla_worker_dir="${{HOME:?}}/{worker_directory}"; mkdir -p -- "$layla_worker_dir" && cd -- "$layla_worker_dir" && (\n{command}\n)'
         result = await ssh_exec.run(cfg, command)
         pin["host_key"] = result.host_key
+        if result.exit_code != 0:
+            raise ssh_exec.SSHError(f"Команда завершилась с кодом {result.exit_code}: {result.output[:1500]}")
         return result.output
 
     return runner, pin
@@ -81,8 +89,8 @@ async def _pick_model(session: AsyncSession, user: User, requested: str | None) 
         await session.scalars(
             select(Provider).where(
                 Provider.owner_id == user.id,
-                Provider.enabled == True,  # noqa: E712
-                Provider.active == True,  # noqa: E712
+                Provider.enabled == True,
+                Provider.active == True,
             )
         )
     )
@@ -99,6 +107,12 @@ async def _run_out(session: AsyncSession, run: AgentRun) -> AgentRunOut:
     )
     out = AgentRunOut.model_validate(run)
     out.steps = [AgentStepOut.model_validate(s) for s in steps]
+    out.workers = []
+    for w in await session.scalars(select(AgentWorker).where(AgentWorker.run_id == run.id).order_by(AgentWorker.created_at)):
+        item = WorkerOut.model_validate(w)
+        # Polling the run should not repeatedly ship independent tool transcripts.
+        item.messages = [m for m in (w.messages or []) if m.get('kind') == 'chat' or m.get('role') == 'assistant'] if w.role == 'lead' else []
+        out.workers.append(item)
     return out
 
 
@@ -109,6 +123,7 @@ async def create_run(
     body: AgentRunCreate,
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
+    maker=Depends(get_sessionmaker),
 ) -> AgentRunOut:
     e = await _engagement(session, user, eid)
     model = await _pick_model(session, user, body.model)
@@ -124,6 +139,7 @@ async def create_run(
         owner_id=user.id, domain=Domain.pentest, engagement_id=eid,
         task=body.task, mode=body.mode, model=model, persona_id=body.persona_id,
         status=AgentRunStatus.running,
+        budget_used={"max_workers": body.max_workers},
     )
     session.add(run)
     await session.flush()
@@ -133,7 +149,9 @@ async def create_run(
     if provider is None:
         raise HTTPException(status_code=400, detail="Нет активного провайдера для модели")
     key = await provider_client.pick_key(session, provider)
-    messages = orchestrator.build_planner_messages(body.task, allow)
+    messages = orchestrator.build_planner_messages(body.task, allow, scope_deny=(sc.deny if sc else []) or [],
+        offensive_enabled=e.offensive_enabled, authorized=e.authorized, scope_confirmed=bool(sc and sc.confirmed))
+    messages[0]["content"] += f'\nМожно делегировать не более {body.max_workers} небольших независимых задач: объект с kind="delegate", role="explorer|reviewer|implementer", summary="полная самостоятельная задача воркера". Воркеры имеют свой контекст, файловые инструменты и разрешённый SSH-путь. При выключенных разрешениях допускается делегирование анализа без сетевых команд. Не делегируй всё подряд; для простой задачи работай сам. Воркеры не создают других воркеров.'
     try:
         raw = await provider_client.complete(provider, key, model, messages)
     except Exception as exc:
@@ -142,12 +160,15 @@ async def create_run(
         raise HTTPException(status_code=502, detail=f"Ошибка планирования: {exc}") from exc
 
     plan = orchestrator.parse_plan(raw)
+    delegated = [{"role": s["role"], "task": s["summary"]} for s in plan if s["kind"] == "delegate"]
+    from app.services import pentest_workers
+    workers = await pentest_workers.reserve(session, run, delegated)
     for step in plan:
         dangerous = venue_executor.is_dangerous(step.get("command"))
         hitl = orchestrator.needs_hitl(
             step, mode=body.mode, persona_hitl=persona_hitl, dangerous=dangerous
         )
-        if step["kind"] == "plan":
+        if step["kind"] in ("plan", "delegate"):
             status = "done"
         elif step["kind"] == "command":
             status = "awaiting_approval"
@@ -160,12 +181,14 @@ async def create_run(
                 command=step.get("command"), summary=step.get("summary"),
             )
         )
-    run.status = AgentRunStatus.paused if any(
+    run.status = AgentRunStatus.running if workers else AgentRunStatus.paused if any(
         s["kind"] == "command" for s in plan
     ) else AgentRunStatus.completed
     await audit.record(session, actor=user.id, action="agent.run.create", target=eid,
                        meta={"steps": len(plan), "mode": body.mode})
     await session.commit()
+    for worker in workers:
+        pentest_workers.launch(maker, worker)
     return await _run_out(session, run)
 
 
@@ -198,10 +221,21 @@ async def _owned_step(session: AsyncSession, user: User, sid: str) -> tuple[Agen
     step = await session.get(AgentStep, sid)
     if step is None:
         raise HTTPException(status_code=404, detail="Шаг не найден")
-    run = await session.get(AgentRun, step.run_id)
+    run = await session.scalar(select(AgentRun).where(AgentRun.id == step.run_id).with_for_update())
     if run is None or run.owner_id != user.id:
         raise HTTPException(status_code=404, detail="Шаг не найден")
     return run, step
+
+
+async def _claim_step(session: AsyncSession, step: AgentStep) -> None:
+    claimed = await session.execute(update(AgentStep).where(
+        AgentStep.id == step.id, AgentStep.status.in_(("awaiting_approval", "ready", "blocked", "failed"))
+    ).values(status="running").execution_options(synchronize_session=False))
+    if claimed.rowcount != 1:
+        raise HTTPException(status_code=409, detail="Шаг уже выполняется или завершён")
+    # Commit before network I/O so retries observe the claimed step.
+    await session.commit()
+    await session.refresh(step)
 
 
 @router.post("/agent/steps/{sid}/deny", response_model=AgentStepOut)
@@ -210,8 +244,13 @@ async def deny_step(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> AgentStepOut:
-    run, step = await _owned_step(session, user, sid)
-    step.status = "denied"
+    _run, step = await _owned_step(session, user, sid)
+    changed = await session.execute(update(AgentStep).where(
+        AgentStep.id == sid, AgentStep.status.in_(("awaiting_approval", "ready", "blocked", "failed"))
+    ).values(status="denied").execution_options(synchronize_session=False))
+    if changed.rowcount != 1:
+        raise HTTPException(status_code=409, detail="Шаг уже выполняется или завершён")
+    await session.refresh(step)
     await audit.record(session, actor=user.id, action="agent.step.deny", target=step.id)
     await session.commit()
     return AgentStepOut.model_validate(step)
@@ -225,16 +264,26 @@ async def approve_step(
 ) -> AgentStepOut:
     """Подтвердить и выполнить шаг. Команда проходит scope/venue/egress-гейт."""
     run, step = await _owned_step(session, user, sid)
+    if step.status == "done":
+        return AgentStepOut.model_validate(step)
+    if step.status in ("running", "denied"):
+        raise HTTPException(status_code=409, detail="Шаг уже выполняется или отклонён")
+    worker = await session.get(AgentWorker, step.worker_id, populate_existing=True) if step.worker_id else None
+    if step.worker_id and (worker is None or worker.status not in ("running", "awaiting_approval")):
+        raise HTTPException(status_code=409, detail="Воркер остановлен или завершён")
+    if step.kind == "command" and run.status == AgentRunStatus.completed:
+        raise HTTPException(status_code=409, detail="Запуск остановлен или завершён")
     if step.kind != "command" or not step.command:
         # analysis-шаг: безопасный LLM-анализ, без активных действий.
+        await _claim_step(session, step)
         step.status = "done"
         step.output = step.summary or "Проанализировано"
         await session.commit()
         return AgentStepOut.model_validate(step)
 
-    e = await session.get(Engagement, run.engagement_id)
-    sc = await session.scalar(select(Scope).where(Scope.engagement_id == run.engagement_id))
-    vn = await session.scalar(select(Venue).where(Venue.engagement_id == run.engagement_id))
+    e = await session.get(Engagement, run.engagement_id, populate_existing=True)
+    sc = await session.scalar(select(Scope).where(Scope.engagement_id == run.engagement_id).execution_options(populate_existing=True))
+    vn = await session.scalar(select(Venue).where(Venue.engagement_id == run.engagement_id).execution_options(populate_existing=True))
     if e is None or vn is None:
         raise HTTPException(status_code=400, detail="Engagement/venue не найдены")
 
@@ -243,10 +292,13 @@ async def approve_step(
     server: Server | None = None
     if vn.mode == VenueMode.attack_box and vn.attack_box_id:
         server = await session.get(Server, vn.attack_box_id)
-    runner, pin = _attack_box_runner(server)
+    from app.services.pentest_workers import remote_directory
+    runner, pin = _attack_box_runner(server, remote_directory(worker) if worker else None)
 
-    step.status = "running"
+    await _claim_step(session, step)
     try:
+        if not e.offensive_enabled:
+            raise ActionBlocked("Наступательные действия выключены: команды на attackbox запрещены")
         result = await venue_executor.execute(
             target=step.target or e.target,
             command=step.command,
@@ -260,8 +312,6 @@ async def approve_step(
         )
         step.status = "done"
         step.output = result.output
-        if server is not None and pin["host_key"] and server.host_key != pin["host_key"]:
-            server.host_key = pin["host_key"]  # закрепляем ключ хоста при первом подключении
     except ActionBlocked as exc:
         step.status = "blocked"
         step.output = f"Заблокировано гейтом: {exc}"
@@ -274,6 +324,8 @@ async def approve_step(
     except venue_executor.NoExecutorConfigured as exc:
         step.status = "blocked"
         step.output = f"{exc}"
+    if server is not None and pin["host_key"] and server.host_key != pin["host_key"]:
+        server.host_key = pin["host_key"]
     await audit.record(
         session, actor=user.id, action="agent.step.approve", target=step.id,
         meta={"status": step.status, "target": step.target},
@@ -287,12 +339,27 @@ async def stop_run(
     rid: str,
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
+    maker=Depends(get_sessionmaker),
 ) -> AgentRunOut:
-    run = await session.get(AgentRun, rid)
+    run = await session.scalar(select(AgentRun).where(AgentRun.id == rid).with_for_update())
     if run is None or run.owner_id != user.id:
         raise HTTPException(status_code=404, detail="Run не найден")
+    if await session.scalar(select(AgentStep.id).where(AgentStep.run_id == rid, AgentStep.status == "running")):
+        raise HTTPException(status_code=409, detail="Команда ещё выполняется на сервере. Остановка запуска сейчас недоступна.")
+    await session.execute(update(AgentStep).where(AgentStep.run_id == rid,
+        AgentStep.status.in_(("awaiting_approval", "ready", "blocked", "failed"))).values(status="denied"))
     run.status = AgentRunStatus.completed
     await session.commit()
+    worker_jobs = list(await session.scalars(select(AgentWorker.job_id).where(
+        AgentWorker.run_id == rid, AgentWorker.status.in_(("queued", "running", "awaiting_approval")))))
+    summary_id = run.trace_ref
+    await session.rollback()
+    for jid in worker_jobs:
+        if jid:
+            await jobs.cancel(jid, maker)
+    if summary_id:
+        await jobs.cancel(summary_id, maker)
+    await session.refresh(run)
     return await _run_out(session, run)
 
 
@@ -417,3 +484,161 @@ async def set_config(
     cfg.context = body.context
     await session.commit()
     return AgentConfigOut(**body.model_dump())
+
+
+# ---------- independent workers ----------
+@router.post('/agent/runs/{rid}/workers', response_model=WorkerOut, status_code=202)
+async def create_worker(rid: str, body: WorkerCreate, user: User = Depends(get_current_user),
+                        session: AsyncSession = Depends(get_session), maker=Depends(get_sessionmaker)):
+    from app.services import pentest_workers
+    run = await session.get(AgentRun, rid)
+    if not run or run.owner_id != user.id:
+        raise HTTPException(status_code=404, detail='Запуск не найден')
+    worker = (await pentest_workers.reserve(session, run, [body.model_dump()]))[0]
+    run.status = AgentRunStatus.running
+    await session.commit()
+    pentest_workers.launch(maker, worker)
+    return worker
+
+
+@router.get('/agent/workers/{wid}', response_model=WorkerOut)
+async def get_worker(wid: str, user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session)):
+    from app.services.pentest_workers import owned
+    return await owned(session, user, wid)
+
+
+@router.post('/agent/workers/{wid}/stop', response_model=WorkerOut)
+async def stop_worker(wid: str, user: User = Depends(get_current_user),
+                      session: AsyncSession = Depends(get_session), maker=Depends(get_sessionmaker)):
+    from app.services import pentest_workers
+    worker = await pentest_workers.owned(session, user, wid)
+    if worker.status in pentest_workers.ACTIVE:
+        await pentest_workers.assert_cancellable(session, wid)
+        jid = worker.job_id
+        await session.rollback()
+        if jid:
+            await jobs.cancel(jid, maker)
+        await session.refresh(worker)
+    return worker
+
+
+@router.post('/agent/workers/{wid}/resume', response_model=WorkerOut)
+async def resume_worker(wid: str, user: User = Depends(get_current_user),
+                        session: AsyncSession = Depends(get_session), maker=Depends(get_sessionmaker)):
+    from app.services import pentest_workers
+    worker = await pentest_workers.owned(session, user, wid)
+    if worker.status not in ('error', 'cancelled'):
+        raise HTTPException(status_code=409, detail='Можно продолжить только прерванного воркера')
+    run = await session.get(AgentRun, worker.run_id)
+    # Reserve one slot by the same engagement-wide DB lock, without replacing the context.
+    await session.execute(update(Engagement).where(Engagement.id == worker.engagement_id).values(status=Engagement.status))
+    from sqlalchemy import func
+    count = await session.scalar(select(func.count()).select_from(AgentWorker).where(
+        AgentWorker.engagement_id == worker.engagement_id, AgentWorker.role != 'lead', AgentWorker.status.in_(pentest_workers.ACTIVE)))
+    own_count = await session.scalar(select(func.count()).select_from(AgentWorker).where(
+        AgentWorker.run_id == run.id, AgentWorker.role != 'lead', AgentWorker.status.in_(pentest_workers.ACTIVE)))
+    if worker.role != 'lead' and (count >= 3 or own_count >= (run.budget_used or {}).get('max_workers', 3)):
+        raise HTTPException(status_code=409, detail='Лимит активных воркеров достигнут')
+    if run.trace_ref:
+        summary_job = await session.get(Job, run.trace_ref)
+        if summary_job and summary_job.status in jobs.ACTIVE:
+            raise HTTPException(status_code=409, detail='Дождитесь сборки итогов')
+    changed = await session.execute(update(AgentWorker).where(AgentWorker.id == wid,
+        AgentWorker.status.in_(('error', 'cancelled'))).values(status='queued').execution_options(synchronize_session=False))
+    if changed.rowcount != 1:
+        raise HTTPException(status_code=409, detail='Воркер уже возобновлён')
+    await session.refresh(worker)
+    worker.error = None
+    worker.messages = [*(worker.messages or []), {'role': 'user', 'content': 'Продолжение после прерывания. Сохранённые файлы доступны. Не повторяй команды с неизвестным результатом без проверки; ожидавшие подтверждения команды отменены.'}][-48:]
+    job = Job(owner_id=user.id, domain='pentest', kind='pentest.worker', title=f'{worker.role}: {worker.task}'[:200],
+        status='queued', result={'engagement_id': worker.engagement_id, 'run_id': run.id, 'worker_id': wid})
+    session.add(job)
+    await session.flush()
+    worker.job_id = job.id
+    run.status, run.trace_ref = AgentRunStatus.running, None
+    await audit.record(session, actor=user.id, action='agent.worker.resume', target=wid)
+    await session.commit()
+    pentest_workers.launch(maker, worker)
+    return worker
+
+
+@router.get('/agent/workers/{wid}/files')
+async def worker_files(wid: str, user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session)):
+    import asyncio
+
+    from app.services import files, pentest_workers
+    worker = await pentest_workers.owned(session, user, wid)
+    path = pentest_workers.root(worker)
+    return await asyncio.to_thread(files.list_dir, path) if path.exists() else []
+
+
+@router.get('/agent/workers/{wid}/archive')
+async def worker_archive(wid: str, user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session)):
+    import asyncio
+
+    from fastapi.responses import StreamingResponse
+
+    from app.services import files, pentest_workers
+    worker = await pentest_workers.owned(session, user, wid)
+    path = pentest_workers.root(worker)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail='Файлов воркера пока нет')
+    try:
+        archive = await asyncio.to_thread(files.export_zip, path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    from starlette.background import BackgroundTask
+    def chunks():
+        try:
+            while block := archive.read(64 * 1024):
+                yield block
+        finally:
+            archive.close()
+    return StreamingResponse(chunks(), media_type='application/zip', background=BackgroundTask(archive.close),
+        headers={'Content-Disposition': f'attachment; filename="worker-{wid}.zip"'})
+
+
+@router.post('/engagements/{eid}/agent/chat', response_model=AgentRunOut, status_code=202)
+async def agent_chat(eid: str, body: AgentChatCreate, user: User = Depends(get_current_user),
+                     session: AsyncSession = Depends(get_session), maker=Depends(get_sessionmaker)):
+    from app.services import pentest_workers
+    await _engagement(session, user, eid)
+    # Serialize follow-up submissions, including SQLite deployments.
+    await session.execute(update(Engagement).where(Engagement.id == eid).values(status=Engagement.status))
+    if body.run_id:
+        run = await session.get(AgentRun, body.run_id, populate_existing=True)
+        if not run or run.owner_id != user.id or run.engagement_id != eid:
+            raise HTTPException(status_code=404, detail='Чат engagement не найден')
+        leader = await session.scalar(select(AgentWorker).where(AgentWorker.run_id == run.id,
+            AgentWorker.role == 'lead').execution_options(populate_existing=True))
+        if not leader:
+            raise HTTPException(status_code=400, detail='Этот запуск не является чатом агента')
+        if leader.status in pentest_workers.ACTIVE:
+            raise HTTPException(status_code=409, detail='Агент ещё выполняет предыдущую задачу. Создайте новый чат или дождитесь результата.')
+        if await session.scalar(select(AgentWorker.id).where(AgentWorker.run_id == run.id,
+            AgentWorker.role != 'lead', AgentWorker.status.in_(pentest_workers.ACTIVE))):
+            raise HTTPException(status_code=409, detail='В этом чате ещё работают воркеры')
+        leader.messages = [*(leader.messages or []), {'role': 'user', 'content': body.content, 'kind': 'chat'}][-48:]
+        leader.status, leader.error = 'queued', None
+        if body.model:
+            leader.model = await _pick_model(session, user, body.model)
+        run.model = leader.model
+        job = Job(owner_id=user.id, domain='pentest', kind='pentest.worker', title=body.content[:200],
+            status='queued', result={'engagement_id': eid, 'run_id': run.id, 'worker_id': leader.id})
+        session.add(job)
+        await session.flush()
+        leader.job_id = job.id
+    else:
+        model = await _pick_model(session, user, body.model)
+        run = AgentRun(owner_id=user.id, domain=Domain.pentest, engagement_id=eid,
+            task=body.content, model=model, status=AgentRunStatus.running, budget_used={'max_workers': 3})
+        session.add(run)
+        await session.flush()
+        leader = (await pentest_workers.reserve(session, run, [{'task': body.content, 'role': 'lead'}], lead=True))[0]
+    run.mode = {'auto': 'autonomous', 'confirm': 'interactive', 'plan': 'plan'}[body.mode]
+    run.status = AgentRunStatus.running
+    await audit.record(session, actor=user.id, action='agent.chat.message', target=run.id,
+                       meta={'mode': body.mode})
+    await session.commit()
+    pentest_workers.launch(maker, leader)
+    return await _run_out(session, run)

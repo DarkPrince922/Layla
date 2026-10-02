@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import re
 
+from app.services.pentest_policy import PENTEST_SYSTEM
+
 ROLES = ("explorer", "reviewer", "implementer")
 
 _PLANNER_SYSTEM = (
@@ -22,10 +24,15 @@ _PLANNER_SYSTEM = (
 )
 
 
-def build_planner_messages(task: str, scope_allow: list[str]) -> list[dict]:
+def build_planner_messages(task: str, scope_allow: list[str], *, scope_deny: list[str] | None = None,
+                           offensive_enabled: bool = False, authorized: bool = False,
+                           scope_confirmed: bool = False) -> list[dict]:
     scope_txt = ", ".join(scope_allow) if scope_allow else "(scope пуст — только анализ)"
     return [
-        {"role": "system", "content": _PLANNER_SYSTEM},
+        {"role": "system", "content": PENTEST_SYSTEM + "\n" + _PLANNER_SYSTEM + "\nТекущее состояние бэкенда: " + json.dumps({
+            "allow": scope_allow, "deny": scope_deny or [], "authorized": authorized,
+            "scope_confirmed": scope_confirmed, "offensive_enabled": offensive_enabled,
+        }, ensure_ascii=False) + "\nЕсли любое разрешение отсутствует, предлагай только plan/analysis; не создавай command. Формат JSON обязателен; отчёт оформляется отдельной задачей после выполнения и проверки результатов."},
         {"role": "user", "content": f"Разрешённый scope: {scope_txt}\nЗадача: {task}"},
     ]
 
@@ -48,7 +55,7 @@ def parse_plan(text: str) -> list[dict]:
         if role not in ROLES and role != "lead":
             role = "lead"
         kind = item.get("kind", "plan")
-        if kind not in ("plan", "analysis", "command", "triage"):
+        if kind not in ("plan", "analysis", "command", "triage", "delegate"):
             kind = "plan"
         steps.append(
             {
