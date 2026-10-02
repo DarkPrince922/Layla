@@ -606,6 +606,7 @@ export interface AgentStep {
 export interface AgentWorker {
   id: string; run_id: string; job_id: string | null; task: string; role: string; model: string;
   status: string; rounds: number; result?: string | null; error?: string | null;
+  activity?: string | null; progress?: number; has_reasoning?: boolean; reasoning?: string;
   messages: { role: string; content: string; kind?: string }[];
 }
 
