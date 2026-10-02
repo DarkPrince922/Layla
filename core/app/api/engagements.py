@@ -88,9 +88,8 @@ async def create_engagement(
     e = Engagement(owner_id=user.id, target=body.target, workspace_id=body.workspace_id)
     session.add(e)
     await session.flush()
-    # Безопасные значения по умолчанию: пустой scope, venue = analysis_only.
-    session.add(Scope(engagement_id=e.id, allow=[], deny=[], confirmed=False))
-    session.add(Venue(engagement_id=e.id, mode=VenueMode.analysis_only))
+    from app.services.pentest_setup import initialize
+    await initialize(session, e)
     await audit.record(session, actor=user.id, action="engagement.create", target=body.target)
     await session.commit()
     return await _to_out(session, e)
@@ -231,6 +230,25 @@ async def set_scope(
     return await _to_out(session, e)
 
 
+@router.post("/{eid}/confirm", response_model=EngagementOut)
+async def confirm_engagement(eid: str, body: AuthorizationAccept, user: User = Depends(get_current_user),
+                             session: AsyncSession = Depends(get_session)):
+    """One atomic operator action confirms scope and the exact declaration version."""
+    e = await _write_owned(session, user, eid)
+    sc = await _scope(session, eid)
+    if sc is None or not sc.allow:
+        raise HTTPException(400, "Добавьте разрешённые ресурсы в scope")
+    document = await authorization.latest(session, eid)
+    if document is None or document.content_sha256 != body.content_sha256:
+        raise HTTPException(409, "Декларация изменилась: перечитайте текущую версию")
+    await authorization.accept(session, e, document)
+    sc.confirmed = True
+    await audit.record(session, actor=e.owner_id, action="engagement.confirm", target=eid,
+                       meta={"sha256": document.content_sha256, "allow": sc.allow, "deny": sc.deny})
+    await session.commit()
+    return await _to_out(session, e)
+
+
 @router.post("/{eid}/scope/confirm", response_model=EngagementOut)
 async def confirm_scope(
     eid: str,
@@ -318,9 +336,8 @@ async def set_venue(
 ) -> EngagementOut:
     """Выбор площадки выполнения (спец. §5.4, §7.1, §7.3).
 
-    Активные режимы (attack_box / this_machine) требуют authorized=True И
-    подтверждённого scope. this_machine раскрывает IP оператора — включается
-    осознанно.
+    Здесь сохраняется выбор площадки. Авторизация, scope и переключатель
+    проверяются при выполнении каждой команды; выбор сам по себе не запускает SSH.
     """
     e = await _owned(session, user, eid)
     vn = await _venue(session, eid)
@@ -328,13 +345,6 @@ async def set_venue(
         vn = Venue(engagement_id=eid)
         session.add(vn)
 
-    if body.mode in (VenueMode.attack_box, VenueMode.this_machine):
-        sc = await _scope(session, eid)
-        if not (await authorization.read(session, e))["valid"] or sc is None or not sc.confirmed:
-            raise HTTPException(
-                status_code=400,
-                detail="Активная площадка требует авторизованного engagement и подтверждённого scope",
-            )
     if body.mode == VenueMode.attack_box:
         if not body.attack_box_id:
             raise HTTPException(status_code=400, detail="Не выбран attack box")

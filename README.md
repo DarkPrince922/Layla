@@ -233,9 +233,9 @@ Layla's pentest features are for **authorized testing only**. The guardrails fro
 the spec (§7) are part of the product, not an option, and the data model encodes
 them from M0 so later milestones enforce them rather than bolt them on:
 
-- **Authorized-workspace gate** — an engagement stays `analysis_only` (no shell,
-  no target traffic) unless `authorized=true` and a `Scope` is confirmed. Setting
-  the flag is an explicit operator action recorded in the audit log.
+- **Execution gate** — selecting `attack_box` does not execute commands. Commands
+  require a valid separate declaration, confirmed scope and enabled offensive
+  actions; operator confirmation is recorded in the audit log.
 - **Hard scope enforcement** — `Scope.allow`/`deny` are the allow-list every
   active action and attack-box command will be checked against before running
   (enforced with tests in M4).
@@ -266,7 +266,7 @@ See [`docs/SECURITY.md`](docs/SECURITY.md).
 
 При сохранении scope декларация автоматически формируется с целями и исключениями,
 если реквизиты сохранены по умолчанию или уже есть предыдущая декларация.
-Документ хранится отдельно и содержит снимок scope. Перечитайте текст и подтвердите документ. Изменения создают
+Документ хранится отдельно и содержит снимок scope. Перечитайте текст и нажмите «Подтвердить scope и декларацию». Изменения создают
 новую версию и снимают разрешения. Подтверждение относится к точной версии документа;
 проверяются объект, владелец, целостность и срок. Отзыв, истечение срока и изменение
 объекта блокируют новые команды. Уже выполняющиеся команды автоматически не отменяются.
@@ -283,3 +283,20 @@ Scope, его подтверждение, переключатель насту�
 для существующих engagement нужно один раз оформить и подтвердить отдельную
 декларацию, затем снова включить наступательные действия при необходимости.
 Старый endpoint `/authorize` подтверждает только уже оформленный документ.
+
+
+### Быстрое создание engagement
+
+В пентесте используется один чат агента engagement. При создании домен автоматически
+добавляется в scope вместе с `*.домен`; для поддомена добавляются только он и его
+потомки, родительский домен не расширяется. URL приводится к имени хоста, IP и CIDR
+сохраняются без wildcard. Декларация формируется из начального scope при наличии
+реквизитов по умолчанию. По умолчанию выбраны `attack_box` и `direct`, а сервером
+становится последний добавленный attackbox текущего аккаунта. Если серверов нет,
+добавьте и выберите сервер в разделе площадки.
+
+Кнопка **Подтвердить scope и декларацию** подтверждает обе части атомарно. Перед
+ней сохраните изменения; смена версии документа требует перечитать его. Отдельного
+подтверждения scope или документа в интерфейсе нет. Наступательные действия остаются
+отдельным переключателем: выбор площадки и общее подтверждение не включают его.
+Начальные настройки также применяются к engagement, создаваемым импортом Acunetix.
