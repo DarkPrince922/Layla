@@ -20,6 +20,7 @@ from app.models.pentest import (
     Server,
     Venue,
 )
+from app.models.pentest_authorization import PentestAuthorization
 from app.models.persona import Persona
 from app.models.provider import Provider, ProviderKey
 from app.models.telegram import TelegramConfig
@@ -49,6 +50,7 @@ __all__ = [
     "OsintArtifact",
     "OsintCase",
     "OsintLookup",
+    "PentestAuthorization",
     "Persona",
     "Project",
     "Provider",

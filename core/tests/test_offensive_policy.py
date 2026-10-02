@@ -30,6 +30,7 @@ async def test_switch_blocks_already_planned_step(client, monkeypatch):
 async def test_scope_and_authorization_changes_revoke_permission(client, monkeypatch):
     eid = await _setup(client, monkeypatch)
     assert (await client.post(f'/api/engagements/{eid}/authorize?authorized=false')).json()['offensive_enabled'] is False
+    await client.put(f"/api/engagements/{eid}/authorization", json={"company": "Test Co", "responsible_name": "Test Operator", "employee_identifier": "test-employee"})
     await client.post(f'/api/engagements/{eid}/authorize')
     await client.put(f'/api/engagements/{eid}/offensive', json={'enabled': True})
     e = (await client.put(f'/api/engagements/{eid}/scope', json={'allow': ['example.com'], 'deny': []})).json()

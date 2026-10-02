@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     postgres_port: int = Field(default=5432, alias="POSTGRES_PORT")
 
     @model_validator(mode="after")
-    def _assemble_database_url(self) -> "Settings":
+    def _assemble_database_url(self) -> Settings:
         """Собрать DATABASE_URL из частей, если он не задан явно.
 
         Логин/пароль URL-кодируются — иначе символы @ / : в пароле ломают строку
@@ -62,6 +62,9 @@ class Settings(BaseSettings):
 
     # Куда клонируются репозитории / создаются проекты (Settings -> General).
     projects_dir: str = Field(default="./data/projects", alias="LAYLA_PROJECTS_DIR")
+    pentest_company: str = Field(default='', alias='LAYLA_PENTEST_COMPANY')
+    pentest_responsible_name: str = Field(default='', alias='LAYLA_PENTEST_RESPONSIBLE_NAME')
+    pentest_employee_identifier: str = Field(default='', alias='LAYLA_PENTEST_EMPLOYEE_IDENTIFIER')
 
     # Адреса анонимизирующих маршрутов для egress-проб (спец. §7.4).
     tor_addr: str = Field(default="127.0.0.1:9050", alias="LAYLA_TOR_ADDR")
