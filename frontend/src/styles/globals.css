@@ -143,6 +143,14 @@
   button[aria-label] { min-width: 44px; }
   .app-topbar a, .settings-sidebar a { min-height: 44px; }
 }
+.engagement-beacon { position: relative; display: inline-grid; place-items: center; width: 18px; height: 18px; flex-shrink: 0; color: #8492ae; }
+.engagement-beacon-large { width: 28px; height: 28px; }
+.engagement-beacon-orbit { position: absolute; inset: 0; border: 1.5px solid currentColor; border-radius: 50%; opacity: .3; }
+.engagement-beacon-core { width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
+.engagement-beacon[data-active="true"] { color: #7cdbc6; }
+.engagement-beacon[data-active="true"] .engagement-beacon-orbit { border-color: #7cdbc6 transparent #a98cf5 transparent; opacity: 1; box-shadow: 0 0 10px rgb(124 219 198 / .16); animation: engagement-orbit 1.8s linear infinite; }
+.engagement-beacon[data-active="true"] .engagement-beacon-core { box-shadow: 0 0 8px rgb(124 219 198 / .5); }
+@keyframes engagement-orbit { to { transform: rotate(360deg); } }
 /* Ambient light stays behind opaque content; only transforms animate. */
 .aurora-backdrop { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: -1; contain: strict; }
 .aurora-light { position: absolute; width: min(1100px, 100vw); height: min(820px, 100vh); opacity: .75; animation: aurora-drift 28s ease-in-out infinite alternate; }
