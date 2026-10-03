@@ -8,6 +8,7 @@ Layla обращается к эндпоинту провайдера напря
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import contextmanager
@@ -20,6 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.enums import KeyStatus, ProviderKind
 from app.models.provider import Provider, ProviderKey
 from app.security import crypto
+
+logger = logging.getLogger("layla.provider")
+
+
+class ProviderResponseError(RuntimeError):
+    """Провайдер прислал ошибку в потоке ответа; транзиентную стоит повторить."""
 
 _reasoning_observer: ContextVar[Callable[[str], Awaitable[None]] | None] = ContextVar('provider_reasoning_observer', default=None)
 
@@ -231,7 +238,10 @@ async def stream_chat(
                 except json.JSONDecodeError:
                     continue
                 if chunk.get("error"):
-                    raise RuntimeError("Провайдер вернул ошибку ответа")
+                    err = chunk["error"]
+                    msg = err.get("message") if isinstance(err, dict) else str(err)
+                    logger.warning("Ошибка в потоке ответа провайдера: %s", str(err)[:1000])
+                    raise ProviderResponseError(("Провайдер вернул ошибку ответа: " + str(msg)[:300]).strip())
                 choices = chunk.get("choices") or []
                 if not choices:
                     continue
@@ -272,7 +282,10 @@ async def _stream_anthropic(
                 except json.JSONDecodeError:
                     continue
                 if evt.get("type") == "error":
-                    raise RuntimeError("Провайдер вернул ошибку ответа")
+                    err = evt.get("error") or evt
+                    msg = err.get("message") if isinstance(err, dict) else str(err)
+                    logger.warning("Ошибка в потоке ответа провайдера: %s", str(err)[:1000])
+                    raise ProviderResponseError(("Провайдер вернул ошибку ответа: " + str(msg)[:300]).strip())
                 if evt.get("type") == "content_block_delta":
                     delta = evt.get("delta", {})
                     if delta.get("type") == "thinking_delta" and delta.get("thinking"):
