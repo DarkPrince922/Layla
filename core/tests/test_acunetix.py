@@ -71,3 +71,119 @@ def test_reference_host_helper():
 def test_sha256_stable():
     assert acunetix.sha256_of("abc") == acunetix.sha256_of("abc")
     assert len(acunetix.sha256_of("abc")) == 64
+
+
+# --------------------------------------------------------------------------- #
+# Нативный XML Acunetix (основной машинный формат)
+# --------------------------------------------------------------------------- #
+_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<ScanGroup ExportedOn="24/09/2018, 21:42:41">
+  <Scan>
+    <Name>Shop scan</Name>
+    <StartURL>https://shop.example.com/app</StartURL>
+    <StartTime>24/09/2018, 18:09:55</StartTime>
+    <ReportItems>
+      <ReportItem id="1">
+        <Name>SQL Injection</Name>
+        <Details><![CDATA[Confirmed via error-based payload]]></Details>
+        <Affects><![CDATA[/product.php]]></Affects>
+        <Parameter>id</Parameter>
+        <IsFalsePositive>False</IsFalsePositive>
+        <Severity>high</Severity>
+        <Type>sql</Type>
+        <Description>Classic SQL injection</Description>
+        <TechnicalDetails>
+          <Request>GET /product.php?id=1 HTTP/1.1
+Host: shop.example.com</Request>
+          <Response>HTTP/1.1 500</Response>
+        </TechnicalDetails>
+        <CWEList><CWE id="89"><![CDATA[CWE-89]]></CWE></CWEList>
+        <References>
+          <Reference><Database>OWASP</Database><URL>https://owasp.org/sqli</URL></Reference>
+          <Reference><Database>CWE</Database><URL>https://cwe.mitre.org/data/89.html</URL></Reference>
+        </References>
+      </ReportItem>
+      <ReportItem id="2">
+        <Name>Cross-site Scripting</Name>
+        <Details>Reflected XSS. Parameter: q . Method: POST</Details>
+        <Affects>https://api.example.com/search?q=x</Affects>
+        <Parameter></Parameter>
+        <IsFalsePositive>False</IsFalsePositive>
+        <Severity>2</Severity>
+        <Description>Reflected XSS</Description>
+      </ReportItem>
+      <ReportItem id="3">
+        <Name>Should Be Skipped</Name>
+        <Affects>/noise</Affects>
+        <IsFalsePositive>True</IsFalsePositive>
+        <Severity>low</Severity>
+      </ReportItem>
+    </ReportItems>
+  </Scan>
+</ScanGroup>
+"""
+
+
+def test_xml_parse_basic_and_starturl_join():
+    parsed = acunetix.parse_report(_XML)
+    # Ложное срабатывание (id=3) отброшено.
+    assert parsed.declared == 2
+    first = parsed.findings[0]
+    assert first["type"] == "SQL Injection"
+    assert first["severity"] == Severity.high
+    # Affects (путь) склеен со StartURL в полный URL цели.
+    assert first["url"] == "https://shop.example.com/product.php"
+    assert first["param"] == "id"
+    assert first["method"] == "GET"
+
+
+def test_xml_numeric_severity_and_param_from_details():
+    parsed = acunetix.parse_report(_XML)
+    xss = parsed.findings[1]
+    assert "Cross-site" in xss["type"]
+    # Числовая важность "2" → medium.
+    assert xss["severity"] == Severity.medium
+    # Affects уже полный URL — берётся как есть.
+    assert xss["url"] == "https://api.example.com/search?q=x"
+    # Параметр и метод извлечены из Details, раз <Parameter> пуст.
+    assert xss["param"] == "q"
+    assert xss["method"] == "POST"
+
+
+def test_xml_reference_urls_never_become_targets():
+    parsed = acunetix.parse_report(_XML)
+    urls = [f.get("url") or "" for f in parsed.findings]
+    assert all("owasp.org" not in u for u in urls)
+    assert all("cwe.mitre.org" not in u for u in urls)
+
+
+def test_xml_hosts_are_real_targets():
+    parsed = acunetix.parse_report(_XML)
+    hosts = {(acunetix.urlparse(f["url"]).hostname) for f in parsed.findings if f.get("url")}
+    assert hosts == {"shop.example.com", "api.example.com"}
+
+
+def test_xml_preferred_over_html_parser():
+    # XML-содержимое не должно уходить в HTML-ветку (иначе «криво»).
+    parsed = acunetix.parse_report(_XML)
+    types = {f["type"] for f in parsed.findings}
+    assert types == {"SQL Injection", "Cross-site Scripting"}
+
+
+def test_xml_doctype_rejected_as_xxe_guard():
+    payload = (
+        '<?xml version="1.0"?>'
+        '<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>'
+        "<ScanGroup><Scan><StartURL>https://x.example</StartURL>"
+        "<ReportItems><ReportItem><Name>&xxe;</Name><Severity>high</Severity>"
+        "<Affects>/a</Affects></ReportItem></ReportItems></Scan></ScanGroup>"
+    )
+    parsed = acunetix.parse_report(payload)
+    # DOCTYPE/ENTITY отклонён: находок нет, падения нет.
+    assert parsed.declared == 0
+    assert parsed.findings == []
+
+
+def test_parse_html_alias_still_works():
+    # Старое имя функции сохранено для совместимости.
+    assert acunetix.parse_html(_XML).declared == 2

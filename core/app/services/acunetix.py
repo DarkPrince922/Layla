@@ -1,11 +1,22 @@
-"""Парсер HTML-отчёта Acunetix → нормализованные находки (спец. §5.4).
+"""Парсер отчётов Acunetix → нормализованные находки (спец. §5.4).
 
-Экспорты сканеров сильно различаются по вёрстке, поэтому парсер многострадальный:
-1) таблица с колонками (severity/type/url/parameter/method/status);
-2) DOM-секции: заголовок уязвимости (тип) + метка важности + затронутые URL.
-Ссылки на документацию/референсы (github, owasp, mozilla и т.п.) отбрасываются,
-чтобы не попадать в находки и в scope. Дедуп по (type, url, param); для источника
-считается SHA-256. Маппинг при необходимости донастраивается под шаблон Acunetix.
+Acunetix умеет выгружать отчёт в нескольких форматах. Основной машинный формат —
+**XML** (`<ScanGroup>/<Scan>/<ReportItems>/<ReportItem>`), именно его стоит грузить.
+Раньше парсер понимал только HTML, поэтому XML-выгрузка «ломалась»: HTML-парсер
+растаскивал XML-теги как текст, подмешивал ссылки-референсы (owasp/cwe/…) в цели и
+путал важность/тип. Теперь формат определяется автоматически:
+
+1) **XML Acunetix** (`parse_report` → `_parse_acunetix_xml`): берём из каждого
+   `<ReportItem>` имя (тип), важность, затронутый путь (`Affects`) и склеиваем его
+   со `StartURL` сканера в полный URL цели; параметр/метод достаём из `Parameter`,
+   `TechnicalDetails/Request` и описаний; `IsFalsePositive` пропускаем. Ссылки из
+   `References` НЕ считаются целями.
+2) **HTML-отчёт** (fallback): а) таблица с колонками
+   (severity/type/url/parameter/method/status); б) DOM-секции: заголовок уязвимости
+   (тип) + метка важности + затронутые URL. Ссылки на документацию/референсы
+   (github, owasp, mozilla и т.п.) отбрасываются.
+
+Дедуп по (type, url, param); для источника считается SHA-256.
 """
 from __future__ import annotations
 
@@ -13,7 +24,8 @@ import hashlib
 import re
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
+from xml.etree import ElementTree
 
 from app.models.enums import Severity
 
@@ -24,6 +36,15 @@ _SEV_MAP = {
     "low": Severity.low,
     "informational": Severity.info,
     "info": Severity.info,
+}
+
+# Классический Acunetix WVS кодирует важность числом: 0=info … 3=high (4=critical).
+_SEV_NUM = {
+    "0": Severity.info,
+    "1": Severity.low,
+    "2": Severity.medium,
+    "3": Severity.high,
+    "4": Severity.critical,
 }
 
 # Домены-референсы (документация/шаблон отчёта) — не цели теста.
@@ -50,6 +71,8 @@ def sha256_of(content: str | bytes) -> str:
 
 def normalize_severity(text: str) -> Severity:
     t = (text or "").strip().lower()
+    if t in _SEV_NUM:
+        return _SEV_NUM[t]
     for word, sev in _SEV_MAP.items():
         if word in t:
             return sev
@@ -272,13 +295,169 @@ def _parse_sections(content: str) -> list[dict]:
     return [f for f in findings if (f["type"] and f["type"] != "Unknown") or f["url"]]
 
 
-def parse_html(content: str) -> ParsedReport:
+# --------------------------------------------------------------------------- #
+# Стратегия 0 (основная): нативный XML Acunetix
+# /ScanGroup/Scan/ReportItems/ReportItem
+# --------------------------------------------------------------------------- #
+_XML_DECL_RE = re.compile(r"^\s*<\?xml[^>]*\?>", re.IGNORECASE)
+_DOCTYPE_RE = re.compile(r"<!(?:DOCTYPE|ENTITY)\b", re.IGNORECASE)
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"\s+")
+_TRUE_WORDS = {"true", "1", "yes", "да"}
+
+
+def _looks_like_xml(content: str) -> bool:
+    head = content.lstrip().lstrip("﻿")[:4096].lower()
+    return head.startswith("<?xml") or "<scangroup" in head or "<reportitem" in head
+
+
+def _xml_root(content: str) -> ElementTree.Element | None:
+    """Безопасный разбор XML: без DTD/внешних сущностей (защита от XXE/биллион-смеха)."""
+    if _DOCTYPE_RE.search(content):
+        # Acunetix не использует DTD; наличие DOCTYPE/ENTITY — красный флаг.
+        raise ValueError("XML с DOCTYPE/ENTITY отклонён (защита от XXE)")
+    # str с объявлением encoding ElementTree не принимает — срезаем пролог.
+    text = _XML_DECL_RE.sub("", content.lstrip().lstrip("﻿"), count=1)
+    return ElementTree.fromstring(text)
+
+
+def _local(tag: object) -> str:
+    """Имя тега без namespace (Acunetix их не использует, но на всякий случай)."""
+    return str(tag).rsplit("}", 1)[-1]
+
+
+def _strip_tags(text: str | None) -> str:
+    if not text:
+        return ""
+    return _WS_RE.sub(" ", _TAG_RE.sub(" ", text)).strip()
+
+
+def _findtext(item: ElementTree.Element, *paths: str) -> str:
+    """Первый непустой текст по одному из относительных путей (учёт namespace)."""
+    for path in paths:
+        val = item.findtext(path)
+        if val and val.strip():
+            return val.strip()
+        # fallback по локальному имени — на случай namespace/иной вёрстки.
+        want = [p for p in path.split("/") if p]
+        node = item
+        for name in want:
+            node = next((c for c in list(node) if _local(c.tag) == name), None)
+            if node is None:
+                break
+        if node is not None and node.text and node.text.strip():
+            return node.text.strip()
+    return ""
+
+
+def _affected_url(start_url: str, affects: str) -> str | None:
+    """Полный URL цели: Affects (путь) склеивается со StartURL сканера."""
+    affects = (affects or "").strip()
+    start = (start_url or "").strip()
+    if affects.startswith(("http://", "https://")):
+        return affects
+    if start and "://" not in start:
+        start = "http://" + start
+    if not start:
+        return affects or None
+    if not affects:
+        return start
+    try:
+        return urljoin(start, affects)
+    except ValueError:
+        return start
+
+
+def _iter_report_items(root: ElementTree.Element):
+    """Пары (scan_start_url, report_item) по всему дереву, устойчиво к вёрстке."""
+    scans = [e for e in root.iter() if _local(e.tag) == "Scan"]
+    if not scans:
+        scans = [root]
+    for scan in scans:
+        start_url = _findtext(scan, "StartURL") or ""
+        for item in scan.iter():
+            if _local(item.tag) == "ReportItem":
+                yield start_url, item
+
+
+def _parse_acunetix_xml(content: str) -> ParsedReport | None:
+    """Разобрать нативный XML Acunetix; None — если это не он (→ HTML-ветка)."""
+    if not _looks_like_xml(content):
+        return None
+    try:
+        root = _xml_root(content)
+    except ElementTree.ParseError:
+        return None  # битый/не-XML — пусть попробует HTML-ветка
+    except ValueError:
+        # DOCTYPE/ENTITY (защита от XXE) — не парсим и НЕ отдаём в HTML-ветку.
+        return ParsedReport(findings=[], declared=0)
+    if root is None:
+        return None
+    if _local(root.tag) not in ("ScanGroup", "Scan") and not any(
+        _local(e.tag) == "ReportItem" for e in root.iter()
+    ):
+        return None  # XML, но не похож на Acunetix
+
+    findings: list[dict] = []
+    for start_url, item in _iter_report_items(root):
+        if _findtext(item, "IsFalsePositive").lower() in _TRUE_WORDS:
+            continue  # ложные срабатывания не импортируем
+
+        name = _findtext(item, "Name") or "Unknown"
+        severity = _findtext(item, "Severity")
+        affects = _findtext(item, "Affects")
+        url = _affected_url(start_url, affects)
+
+        param = _findtext(item, "Parameter") or None
+        request = _findtext(item, "TechnicalDetails/Request")
+        blob = " ".join(
+            _strip_tags(_findtext(item, p))
+            for p in ("Details", "Description", "DetailedInformation", "TechnicalDetails")
+        )
+        blob = f"{blob} {affects} {param or ''}".strip()
+
+        if not param:
+            pm = _PARAM_RE.search(blob)
+            if pm:
+                param = pm.group(1)
+        method = None
+        mm = _METHOD_RE.search(request) or _METHOD_RE.search(blob)
+        if mm:
+            method = mm.group(1)
+
+        findings.append(
+            {
+                "severity": normalize_severity(severity),
+                "type": name.strip() or "Unknown",
+                "url": url,
+                "param": param,
+                "method": method,
+                "status": _status_from(blob),
+            }
+        )
+    return ParsedReport(findings=findings, declared=len(findings))
+
+
+def _parse_html(content: str) -> ParsedReport:
     findings = _parse_tables(content)
     if not findings:
         findings = _parse_sections(content)
     # Финальный фильтр референс-хостов на всякий случай.
     findings = [f for f in findings if not is_reference_host(f.get("url"))]
     return ParsedReport(findings=findings, declared=len(findings))
+
+
+def parse_report(content: str) -> ParsedReport:
+    """Единая точка входа: сам определяет XML Acunetix или HTML-отчёт."""
+    xml = _parse_acunetix_xml(content)
+    if xml is not None:
+        return xml
+    return _parse_html(content)
+
+
+# Обратная совместимость: старое имя функции (вызовы в сервисах/тестах).
+def parse_html(content: str) -> ParsedReport:
+    return parse_report(content)
 
 
 def dedup_key(f: dict) -> str:
