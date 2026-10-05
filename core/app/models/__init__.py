@@ -7,6 +7,7 @@ from app.models.chat import Chat, Checkpoint, Message
 from app.models.combo import Combo
 from app.models.design import Design
 from app.models.git import GitCredential
+from app.models.grok_login import GrokLogin
 from app.models.job import Job
 from app.models.knowledge import KnowledgeChunk, KnowledgeDoc
 from app.models.mcp import IntelKey, McpServer
@@ -44,6 +45,7 @@ __all__ = [
     "Evidence",
     "Finding",
     "GitCredential",
+    "GrokLogin",
     "IntelKey",
     "Job",
     "KnowledgeChunk",

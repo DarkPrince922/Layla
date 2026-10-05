@@ -9,13 +9,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.models.provider import Provider
 from app.models.user import User
-from app.schemas.provider import GrokConnectRequest, ProviderCreate, ProviderOut
+from app.schemas.provider import ProviderCreate, ProviderOut
 from app.security import crypto
 from app.services import audit
 from app.services.auth import get_current_user
@@ -300,52 +300,104 @@ def _with_caps(provider: Provider, entries: list[dict]) -> list[ProviderModelInf
     return out
 
 
-@router.post("/connect/grok", response_model=ProviderOut)
-async def connect_grok(
-    body: GrokConnectRequest,
-    user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-) -> ProviderOut:
-    """Validate an xAI key and publish its available Grok models atomically."""
+@router.post("/connect/grok/start")
+async def start_grok_login(user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session)):
+    import json
+    import time
+    import httpx
+    from app.models.grok_login import GrokLogin
+    from app.services import grok_oauth
+
+    try:
+        device = await grok_oauth.request_device()
+    except (httpx.HTTPError, ValueError, KeyError, TypeError):
+        raise HTTPException(502, "xAI не удалось начать вход. Повторите позже.") from None
+    await session.execute(delete(GrokLogin).where(GrokLogin.owner_id == user.id))
+    now = time.time()
+    pending = GrokLogin(owner_id=user.id, secret_ref=crypto.encrypt(json.dumps({
+        "device_code": device["device_code"], "client_id": grok_oauth.CLIENT_ID,
+    })), expires_at=now + device["expires_in"], interval=device["interval"], next_poll=now + device["interval"])
+    session.add(pending)
+    await session.commit()
+    return {"login_id": pending.id, "user_code": device["user_code"],
+            "verification_uri": device.get("verification_uri_complete") or device["verification_uri"],
+            "expires_in": device["expires_in"], "interval": device["interval"]}
+
+
+@router.post("/connect/grok/{login_id}/poll")
+async def poll_grok_login(login_id: str, user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session)):
+    import json
+    import time
     import httpx
     from app.models.enums import ProviderKind
+    from app.models.grok_login import GrokLogin
+    from app.services import grok_oauth
 
-    key = body.api_key.strip()
-    if not key or any(c.isspace() for c in key):
-        raise HTTPException(422, "Вставьте ключ из xAI Console без пробелов")
-    candidate = Provider(name="Grok", kind=ProviderKind.openai_compatible,
-                         base_url="https://api.x.ai/v1")
+    pending = await session.scalar(select(GrokLogin).where(GrokLogin.id == login_id,
+        GrokLogin.owner_id == user.id).with_for_update())
+    if not pending:
+        raise HTTPException(404, "Подключение не найдено. Начните вход снова.")
+    if pending.provider_id:
+        return {"status": "connected", "provider_id": pending.provider_id}
+    now = time.time()
+    if pending.expires_at <= now:
+        await session.delete(pending)
+        await session.commit()
+        return {"status": "expired"}
+    if now < pending.next_poll:
+        return {"status": "pending", "interval": max(1, pending.next_poll - now)}
+    device = json.loads(crypto.decrypt(pending.secret_ref))
     try:
-        available = await provider_client.list_models(candidate, key)
-    except httpx.HTTPStatusError as exc:
-        code = exc.response.status_code
-        if code in (401, 403):
-            raise HTTPException(422, "xAI отклонил ключ. Проверьте ключ и доступ к моделям в консоли.") from exc
-        if code == 429:
-            raise HTTPException(429, "xAI ограничил запросы. Проверьте лимиты и повторите позже.") from exc
-        raise HTTPException(502, "xAI не удалось проверить подключение. Повторите позже.") from exc
-    except (httpx.HTTPError, ValueError, TypeError, AttributeError):
-        raise HTTPException(502, "xAI недоступен или вернул некорректный список моделей") from None
-    names = list(dict.fromkeys(n for n in available if isinstance(n, str)
-        and n.startswith("grok-") and not any(x in n.lower() for x in ("imagine", "image", "video"))))
-    if not names:
-        raise HTTPException(422, "Для этого ключа не найдено моделей чата Grok. Проверьте доступ в xAI Console.")
-    provider = await session.scalar(select(Provider).where(
-        Provider.owner_id == user.id, Provider.name == "Grok",
-        Provider.base_url == "https://api.x.ai/v1"))
+        tokens = await grok_oauth.exchange({"grant_type": "urn:ietf:params:oauth:grant-type:device_code", **device})
+    except (httpx.HTTPError, ValueError, KeyError, TypeError):
+        raise HTTPException(502, "Не удалось проверить вход в xAI. Повторите позже.") from None
+    error = tokens.get("error")
+    if error in ("authorization_pending", "slow_down"):
+        if error == "slow_down":
+            pending.interval += 5
+        pending.next_poll = time.time() + pending.interval
+        await session.commit()
+        return {"status": "pending", "interval": pending.interval}
+    if error:
+        await session.delete(pending)
+        await session.commit()
+        return {"status": "denied" if error == "access_denied" else "expired"}
+    # Persist the newly issued credentials immediately, even if model discovery fails.
+    creds = grok_oauth.credentials(tokens, {"client_id": device["client_id"]})
+    provider = await session.scalar(select(Provider).where(Provider.owner_id == user.id,
+        Provider.name == "Grok (аккаунт)", Provider.base_url == grok_oauth.BASE_URL).with_for_update())
     if not provider:
-        provider = candidate
-        provider.owner_id = user.id
+        provider = Provider(owner_id=user.id, name="Grok (аккаунт)", kind=ProviderKind.openai_compatible,
+                            base_url=grok_oauth.BASE_URL, active=False, enabled=False)
         session.add(provider)
-    previous = {m['name']: bool(m.get('enabled', True)) for m in (provider.models or [])}
+    provider.secret_ref = crypto.encrypt(json.dumps(creds))
+    provider.active = provider.enabled = True
+    await session.flush()
+    pending.provider_id = provider.id
+    pending.secret_ref = crypto.encrypt("{}")
+    await audit.record(session, actor=user.id, action="provider.connect.grok", target=provider.id)
+    await session.commit()
+    try:
+        names = await provider_client.list_models(provider, grok_oauth.wire_key(creds))
+        names = list(dict.fromkeys(n for n in names if isinstance(n, str) and n.startswith("grok-")
+            and not any(x in n.lower() for x in ("image", "imagine", "video"))))
+    except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+        return {"status": "connected", "provider_id": provider.id,
+                "warning": "Аккаунт подключён. Список моделей пока не загружен — нажмите «Загрузить модели» у провайдера."}
+    if not names:
+        return {"status": "connected", "provider_id": provider.id,
+                "warning": "Аккаунт подключён, но xAI не вернул моделей чата. Проверьте подписку и доступ аккаунта."}
+    previous = {m["name"]: m.get("enabled", True) for m in provider.models or []}
     provider.models = [{"name": n, "enabled": previous.get(n, True)} for n in names]
-    provider.secret_ref = crypto.encrypt(key)
-    provider.enabled = provider.active = True
     if provider.default_model not in names:
         provider.default_model = names[0]
-    await session.flush()
-    await audit.record(session, actor=user.id, action="provider.connect.grok", target=provider.id,
-                       meta={"model_count": len(names)})
+    provider.enabled = provider.active = True
     await session.commit()
-    await session.refresh(provider)
-    return _to_out(provider)
+    return {"status": "connected", "provider_id": provider.id}
+
+
+@router.delete("/connect/grok/{login_id}", status_code=204)
+async def cancel_grok_login(login_id: str, user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session)):
+    from app.models.grok_login import GrokLogin
+    await session.execute(delete(GrokLogin).where(GrokLogin.id == login_id, GrokLogin.owner_id == user.id))
+    await session.commit()

@@ -120,6 +120,10 @@ async def _keys_for(session: AsyncSession, provider: Provider) -> list[tuple[str
     вернула строки, и сломанный ключ попадался «через раз». Отключённые ключи не
     берём, упёршиеся в лимит — в последнюю очередь.
     """
+    from app.services import grok_oauth
+    oauth_key = await grok_oauth.access_key(session, provider)
+    if oauth_key:
+        return [(provider.id, oauth_key, "Grok account")]
     rows = list(
         await session.scalars(
             select(ProviderKey)
@@ -179,6 +183,17 @@ async def resolve_provider(
 
 def _headers(provider: Provider, key: str | None) -> dict[str, str]:
     h = {"Content-Type": "application/json"}
+    from app.services.grok_oauth import TOKEN_PREFIX, wire_credentials
+    if key and key.startswith(TOKEN_PREFIX):
+        data = wire_credentials(key)
+        h["Authorization"] = "Bearer " + data["access_token"]
+        h["X-XAI-Token-Auth"] = "xai-grok-cli"
+        h["x-authenticateresponse"] = "authenticate-response"
+        h["x-grok-client-identifier"] = "layla"
+        h["x-grok-client-version"] = "0.1.0"
+        if data.get("user_id"):
+            h["x-userid"] = data["user_id"]
+        return h
     if _is_anthropic_native(provider):
         if key:
             h["x-api-key"] = key
@@ -198,9 +213,11 @@ async def list_models(provider: Provider, key: str | None) -> list[str]:
         resp = await client.get(url, headers=_headers(provider, key))
         resp.raise_for_status()
         data = resp.json()
-    items = data.get("data", data if isinstance(data, list) else [])
+    items = data if isinstance(data, list) else data.get("data", [])
     names: list[str] = []
     for it in items:
+        if isinstance(it, dict) and it.get("hidden"):
+            continue
         mid = it.get("id") or it.get("name") if isinstance(it, dict) else None
         if mid:
             names.append(mid)
@@ -215,6 +232,13 @@ async def stream_chat(
     kind == "content" — видимый ответ; kind == "reasoning" — размышление модели
     (reasoning-модели вроде kimi/deepseek-r1/o-серии отдают его отдельно).
     """
+    from app.services.grok_oauth import TOKEN_PREFIX
+    if key and key.startswith(TOKEN_PREFIX):
+        from app.services.grok_responses import stream_turn
+        async for kind, value in stream_turn(provider, key, model, messages, []):
+            if kind in ("content", "reasoning"):
+                yield kind, value
+        return
     if _is_anthropic_native(provider):
         async for pair in _stream_anthropic(provider, key, model, messages):
             yield pair

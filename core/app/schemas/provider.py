@@ -89,7 +89,3 @@ class ProviderModelInfo(BaseModel):
 
 class ProviderModelsUpdate(BaseModel):
     models: list[ProviderModelInfo]
-
-
-class GrokConnectRequest(BaseModel):
-    api_key: str = Field(min_length=1, max_length=4096, repr=False)

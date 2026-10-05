@@ -113,6 +113,12 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
     caps = caps or {}
     if caps.get("tools") is False:
         tools = []
+    from app.services.grok_oauth import TOKEN_PREFIX
+    if key and key.startswith(TOKEN_PREFIX):
+        from app.services.grok_responses import stream_turn as grok_turn
+        async for item in grok_turn(provider, key, model, messages, tools, caps):
+            yield item
+        return
     native = _is_anthropic_native(provider)
     if native:
         system, conversation = anthropic_messages(messages)

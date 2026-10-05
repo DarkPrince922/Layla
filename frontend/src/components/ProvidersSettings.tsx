@@ -17,12 +17,94 @@ interface Provider {
   has_secret: boolean;
 }
 
+type GrokLogin = { login_id: string; user_code: string; verification_uri: string; expires_in: number; interval: number };
+type GrokPoll = { status: "pending" | "connected" | "expired" | "denied"; interval?: number; warning?: string };
+
+function GrokConnect() {
+  const qc = useQueryClient();
+  const [login, setLogin] = useState<GrokLogin | null>(null);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const start = useMutation({ mutationFn: () => api.post<GrokLogin>("/providers/connect/grok/start", {}) });
+  useEffect(() => {
+    if (!login) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const expiresAt = Date.now() + login.expires_in * 1000;
+    const poll = async () => {
+      if (Date.now() >= expiresAt) {
+        setLogin(null); setError("Код истёк. Нажмите Connect Grok снова."); return;
+      }
+      try {
+        const result = await api.post<GrokPoll>(`/providers/connect/grok/${login.login_id}/poll`, {});
+        if (cancelled) return;
+        if (result.status === "pending") {
+          timer = setTimeout(poll, Math.max(1, result.interval ?? login.interval) * 1000);
+          return;
+        }
+        setLogin(null);
+        if (result.status === "connected") {
+          setMessage(result.warning ?? "Аккаунт Grok подключён. Модели доступны в выборе модели.");
+          for (const key of ["providers", "provider-models", "models", "accounts-health"]) {
+            qc.invalidateQueries({ queryKey: [key] });
+          }
+        } else {
+          setError(result.status === "denied" ? "Подключение отклонено в xAI." : "Код истёк. Нажмите Connect Grok снова.");
+        }
+      } catch (e) {
+        if (cancelled) return;
+        setError(e instanceof Error ? e.message : "Не удалось проверить вход");
+        timer = setTimeout(poll, Math.max(5, login.interval) * 1000);
+      }
+    };
+    timer = setTimeout(poll, login.interval * 1000);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [login, qc]);
+  const connect = () => {
+    setError(""); setMessage("");
+    // Open synchronously on the click so browsers allow the login window.
+    const popup = window.open("about:blank", "_blank");
+    if (popup) popup.opener = null;
+    start.mutate(undefined, {
+      onSuccess: data => {
+        setLogin(data);
+        if (popup && !popup.closed) popup.location.replace(data.verification_uri);
+      },
+      onError: e => { popup?.close(); setError(e instanceof Error ? e.message : "Не удалось начать вход"); },
+    });
+  };
+  const cancel = async () => {
+    if (!login) return;
+    try {
+      await api.del(`/providers/connect/grok/${login.login_id}`);
+      setLogin(null); setError(""); setMessage("Подключение отменено.");
+    } catch (e) { setError(e instanceof Error ? e.message : "Не удалось отменить вход"); }
+  };
+  return <div className="mb-5 rounded-xl border border-ink-700 bg-ink-800/30 p-4">
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <div><h2 className="font-semibold">Grok · аккаунт</h2><p className="text-xs text-neutral-400">Войдите в xAI и подтвердите подключение. Доступ к моделям и лимиты определяет ваш аккаунт и подписка.</p></div>
+      <button type="button" className="primary-button text-sm" disabled={!!login || start.isPending} onClick={connect}>{start.isPending ? "Открываем вход…" : "Connect Grok"}</button>
+    </div>
+    {login && <div className="mt-4 space-y-3 border-t border-ink-700 pt-4">
+      <p className="text-sm text-neutral-300">Подтвердите этот код на странице xAI:</p>
+      <div className="flex items-center gap-3"><code className="select-all rounded bg-ink-900 px-3 py-2 text-xl font-bold tracking-widest">{login.user_code}</code>
+        <button type="button" className="secondary-button text-xs" onClick={async () => {
+          try { await navigator.clipboard.writeText(login.user_code); } catch { setError("Выделите код и скопируйте вручную."); }
+        }}>Копировать</button></div>
+      <a href={login.verification_uri} target="_blank" rel="noopener noreferrer" className="text-sm text-accent-300 underline">Открыть страницу входа xAI</a>
+      <p role="status" className="text-xs text-neutral-400">Ожидаем подтверждение… После входа модели загрузятся автоматически.</p>
+      <button type="button" className="secondary-button text-xs" onClick={cancel}>Отмена</button>
+    </div>}
+    {message && <p role="status" className="mt-3 text-sm text-neutral-300">{message}</p>}
+    {error && <p role="alert" className="mt-3 text-sm text-red-300">{error}</p>}
+  </div>;
+}
+
 const KINDS = ["openai_compatible", "anthropic", "custom"];
 
 export function ProvidersSettings() {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
-  const [grokOpen, setGrokOpen] = useState(false);
   const [insecure, setInsecure] = useState(false);
   const [ack, setAck] = useState(false);
   const [form, setForm] = useState({
@@ -98,16 +180,7 @@ export function ProvidersSettings() {
         <HttpKeyBanner />
       </div>
 
-      <div className="mb-5 rounded-xl border border-ink-700 bg-ink-800/30 p-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div><h2 className="font-semibold">Grok · xAI</h2><p className="text-xs text-neutral-400">Подключите ключ из xAI Console — доступные модели появятся автоматически.</p></div>
-          <button type="button" className="primary-button text-sm" onClick={() => {
-            window.open("https://console.x.ai/", "_blank", "noopener,noreferrer");
-            setGrokOpen(true);
-          }}>Connect Grok</button>
-        </div>
-        {grokOpen && <GrokConnect keyBlocked={keyBlocked} insecure={insecure} ack={ack} onAck={setAck} onClose={() => setGrokOpen(false)} />}
-      </div>
+      <GrokConnect />
 
       {open && (
         <div className="mb-5 space-y-3 rounded-xl border border-ink-700/70 bg-ink-800/30 p-5">
@@ -455,40 +528,4 @@ function ModelSettings({ model, onSave, onClose }: {
       </div>
     </div>
   );
-}
-
-
-function GrokConnect({ keyBlocked, insecure, ack, onAck, onClose }: {
-  keyBlocked: boolean; insecure: boolean; ack: boolean; onAck: (value: boolean) => void; onClose: () => void;
-}) {
-  const qc = useQueryClient();
-  const [key, setKey] = useState("");
-  const connect = useMutation({
-    mutationFn: () => api.post<Provider>("/providers/connect/grok", { api_key: key.trim() }),
-    onSuccess: () => {
-      setKey("");
-      qc.invalidateQueries({ queryKey: ["providers"] });
-      qc.invalidateQueries({ queryKey: ["provider-models"] });
-      qc.invalidateQueries({ queryKey: ["models"] });
-      qc.invalidateQueries({ queryKey: ["accounts-health"] });
-      onClose();
-    },
-  });
-  return <div className="mt-4 space-y-3 border-t border-ink-700 pt-4">
-    <p className="text-sm text-neutral-300">В xAI Console откройте API Keys, создайте ключ, скопируйте его и вставьте сюда.</p>
-    <a href="https://console.x.ai/" target="_blank" rel="noopener noreferrer" className="text-xs text-accent-300 underline">Открыть xAI Console ещё раз</a>
-    <label className="block text-xs text-neutral-400">Ключ xAI
-      <input aria-label="Ключ xAI" type="password" autoComplete="off" maxLength={4096} value={key}
-        onChange={e => { setKey(e.target.value); connect.reset(); }} disabled={keyBlocked || connect.isPending}
-        placeholder={keyBlocked ? "Сначала подтвердите ввод по HTTP" : "Вставьте ключ из xAI Console"}
-        className="mt-1 w-full rounded-lg border border-ink-700 bg-ink-900 p-2 text-sm disabled:opacity-40" />
-    </label>
-    <p className="text-xs text-neutral-500">Ключ хранится зашифрованным. Это подключение API xAI; оплата и доступ к моделям управляются в консоли.</p>
-    {insecure && <label className="flex items-center gap-2 text-xs text-amber-300"><input type="checkbox" checked={ack} onChange={e => onAck(e.target.checked)} />Я понимаю, что ключи по HTTP не шифруются при передаче.</label>}
-    {connect.isError && <p role="alert" className="text-sm text-red-300">{connect.error instanceof Error ? connect.error.message : "Не удалось подключить Grok"}</p>}
-    <div className="flex flex-wrap gap-2">
-      <button type="button" className="primary-button text-sm" disabled={keyBlocked || !key.trim() || connect.isPending} onClick={() => connect.mutate()}>{connect.isPending ? "Проверяем и загружаем модели…" : "Подключить и загрузить модели"}</button>
-      <button type="button" className="secondary-button text-sm" disabled={connect.isPending} onClick={() => { setKey(""); onClose(); }}>Отмена</button>
-    </div>
-  </div>;
 }
