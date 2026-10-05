@@ -125,6 +125,33 @@ async def test_cancel_and_requires_login(client, oauth):
 
 
 @pytest.mark.asyncio
+async def test_model_discovery_can_be_retried(client, oauth, monkeypatch, db_sessionmaker):
+    await register(client)
+    login = (await client.post("/api/providers/connect/grok/start")).json()
+    await ready(db_sessionmaker, login["login_id"])
+
+    async def broken(provider, key):
+        raise httpx.ConnectError("upstream-private-detail")
+
+    monkeypatch.setattr(provider_client, "list_models", broken)
+    response = await client.post(f"/api/providers/connect/grok/{login['login_id']}/poll")
+    assert response.json()["status"] == "connected"
+    assert response.json()["warning"]
+    pid = response.json()["provider_id"]
+    assert (await client.get("/api/models")).json() == []
+    failed = await client.post(f"/api/providers/{pid}/fetch-models")
+    assert failed.status_code == 502
+    assert "upstream-private-detail" not in failed.text
+
+    async def models(provider, key):
+        return ["grok-4", "grok-imagine-image"]
+
+    monkeypatch.setattr(provider_client, "list_models", models)
+    assert (await client.post(f"/api/providers/{pid}/fetch-models")).status_code == 200
+    assert [m["name"] for m in (await client.get("/api/models")).json()] == ["grok-4"]
+
+
+@pytest.mark.asyncio
 async def test_refresh_is_persisted(client, oauth, monkeypatch, db_sessionmaker):
     await register(client)
     login = (await client.post("/api/providers/connect/grok/start")).json()

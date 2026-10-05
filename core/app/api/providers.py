@@ -243,14 +243,24 @@ async def fetch_provider_models(
     """
     provider = await _owned_provider(session, user, provider_id)
     key = await provider_client.pick_key(session, provider)
+    from app.services import grok_oauth
+    grok_account = bool(key and key.startswith(grok_oauth.TOKEN_PREFIX))
     try:
         names = await provider_client.list_models(provider, key)
+        if grok_account:
+            names = grok_oauth.chat_models(names)
     except Exception as exc:  # сеть/провайдер
+        if grok_account:
+            raise HTTPException(502, "Не удалось загрузить модели Grok. Проверьте подписку и повторите позже.") from None
         raise HTTPException(status_code=502, detail=f"Не удалось загрузить модели: {exc}") from exc
 
     prev = {m["name"]: bool(m.get("enabled", True)) for m in (provider.models or [])}
     merged = [{"name": n, "enabled": prev.get(n, True)} for n in names]
     provider.models = merged
+    if grok_account:
+        provider.active = provider.enabled = bool(names)
+        if names and provider.default_model not in names:
+            provider.default_model = names[0]
     await session.commit()
     return _with_caps(provider, merged)
 
@@ -371,7 +381,6 @@ async def poll_grok_login(login_id: str, user: User = Depends(get_current_user),
                             base_url=grok_oauth.BASE_URL, active=False, enabled=False)
         session.add(provider)
     provider.secret_ref = crypto.encrypt(json.dumps(creds))
-    provider.active = provider.enabled = True
     await session.flush()
     pending.provider_id = provider.id
     pending.secret_ref = crypto.encrypt("{}")
@@ -379,8 +388,7 @@ async def poll_grok_login(login_id: str, user: User = Depends(get_current_user),
     await session.commit()
     try:
         names = await provider_client.list_models(provider, grok_oauth.wire_key(creds))
-        names = list(dict.fromkeys(n for n in names if isinstance(n, str) and n.startswith("grok-")
-            and not any(x in n.lower() for x in ("image", "imagine", "video"))))
+        names = grok_oauth.chat_models(names)
     except (httpx.HTTPError, ValueError, TypeError, AttributeError):
         return {"status": "connected", "provider_id": provider.id,
                 "warning": "Аккаунт подключён. Список моделей пока не загружен — нажмите «Загрузить модели» у провайдера."}

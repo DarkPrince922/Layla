@@ -24,6 +24,11 @@ SCOPES = "openid profile email offline_access grok-cli:access api:access"
 TOKEN_PREFIX = "grok-oauth:"
 
 
+def chat_models(names):
+    return list(dict.fromkeys(n for n in names if isinstance(n, str) and n.startswith("grok-")
+        and not any(x in n.lower() for x in ("image", "imagine", "video"))))
+
+
 async def request_device():
     async with httpx.AsyncClient(timeout=20) as client:
         response = await client.post(ISSUER + "/oauth2/device/code", data={
