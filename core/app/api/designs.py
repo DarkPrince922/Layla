@@ -104,7 +104,7 @@ async def create_design(
         raise HTTPException(status_code=400, detail="Нет активного провайдера для генерации.")
     key = await provider_client.pick_key(session, provider)
     try:
-        raw = await provider_client.complete(provider, key, model, messages)
+        raw = await provider_client.complete_with_retry(provider, key, model, messages)
     except Exception as exc:  # ошибка провайдера
         raise HTTPException(status_code=502, detail=f"Ошибка генерации: {exc}") from exc
 

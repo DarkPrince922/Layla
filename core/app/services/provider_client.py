@@ -7,6 +7,7 @@ Layla обращается к эндпоинту провайдера напря
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -333,3 +334,30 @@ async def complete(
         elif kind == "reasoning" and (observer := _reasoning_observer.get()) is not None:
             await observer(text)
     return "".join(parts)
+
+
+async def complete_with_retry(provider, key, model, messages, *, on_retry=None, timeout=None):
+    from app.services import provider_errors
+    return await provider_errors.retry_request(lambda: complete(provider, key, model, messages),
+                                               on_retry=on_retry, timeout=timeout)
+
+
+async def stream_chat_with_retry(provider, key, model, messages):
+    """Retract failed partial content before restarting the same model request."""
+    from app.services import provider_errors
+    for attempt in range(len(provider_errors.RETRY_DELAYS) + 1):
+        shown = 0
+        try:
+            async for kind, text in stream_chat(provider, key, model, messages):
+                if kind == "content":
+                    shown += len(text)
+                yield kind, text
+            return
+        except Exception as exc:
+            if not provider_errors.should_retry_agent(exc) or attempt == len(provider_errors.RETRY_DELAYS):
+                raise
+            if shown:
+                yield "retract", shown
+            delay = provider_errors.retry_delay(exc, attempt + 1)
+            yield "retry", {"attempt": attempt + 1, "max": len(provider_errors.RETRY_DELAYS), "delay": delay}
+            await asyncio.sleep(delay)

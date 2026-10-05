@@ -113,7 +113,7 @@ async def test_interrupted_turn_is_described_for_continuation(client, monkeypatc
     chat = (await client.post("/api/chats", json={"domain": "design", "model": "m"})).json()
     _script(monkeypatch, [
         [_call("write_file", {"path": "index.html", "content": "<h1>1</h1>", "expected_sha256": None}, "a")],
-        ProviderError("Провайдер не принял ключ (HTTP 401)"),
+        *[ProviderError("Провайдер не принял ключ (HTTP 401)") for _ in range(6)],
     ])
     state = await _say(client, chat["id"], "сделай лендинг")
     assert state["status"] == "error"
@@ -149,7 +149,7 @@ async def _wait(client, job_id):
 async def test_failed_design_generation_resumes_from_draft(client, monkeypatch):
     await _setup(client)
     calls: list = []
-    steps = [("```html\n<main><h1>Начало длинного лендинга студии", ProviderError("down")),
+    steps = [("```html\n<main><h1>Начало длинного лендинга студии", ProviderError("down"))] * 6 + [
              "</h1><p>конец</p></main>\n```"]
 
     async def stream_turn(provider, key, model, messages, tools, caps=None):
@@ -172,8 +172,9 @@ async def test_failed_design_generation_resumes_from_draft(client, monkeypatch):
     assert resumed.status_code == 202, resumed.text
     state = await _wait(client, resumed.json()["id"])
     assert state["status"] == "done", state
-    assert calls[1][-2] == {"role": "assistant", "content": failed["result"]["draft"]}
-    assert calls[1][-1]["content"] == design_gen.CONTINUE_PROMPT
+    assert len(calls) == 7  # initial request, five retries, then explicit resume
+    assert calls[6][-2] == {"role": "assistant", "content": failed["result"]["draft"]}
+    assert calls[6][-1]["content"] == design_gen.CONTINUE_PROMPT
     design = (await client.get(f"/api/designs/{state['result']['design_id']}")).json()
     assert design["files"][0]["content"] == "<main><h1>Начало длинного лендинга студии</h1><p>конец</p></main>"
     assert design["brief"]["brand"] == "Nord"

@@ -539,6 +539,15 @@ export interface McpTestResult {
 }
 
 export interface TelegramConfig {
+  control_enabled: boolean;
+  connected: boolean;
+  bot_username?: string | null;
+  notify_done: boolean;
+  notify_error: boolean;
+  notify_cancelled: boolean;
+  notify_approval: boolean;
+  public_url?: string | null;
+  last_error?: string | null;
   configured: boolean;
   enabled: boolean;
   default_chat_id?: string | null;

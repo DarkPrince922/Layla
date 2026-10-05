@@ -1,13 +1,14 @@
 """Классификация ошибок провайдера: что повторить, а что означает «модель это не умеет».
 
-Повторяем только временные сбои (обрыв связи, 429, 5xx) — до 5 раз с растущей
-паузой. Ошибки запроса (400/401/403) повтор не исправит. Отдельный случай —
+Агенты повторяют сбои до 5 раз с растущей паузой, кроме лимита токенов.
+Отмена не перезапускает работу. Отдельный случай —
 отказ из-за неподдерживаемой части запроса (инструменты, max_tokens,
 reasoning_content): такой запрос можно сразу повторить без неё.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 
@@ -225,3 +226,44 @@ def retry_delay(exc: BaseException, attempt: int) -> float:
     base = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS)) - 1]
     hinted = getattr(exc, "retry_after", None) or 0
     return float(min(max(base, hinted), MAX_RETRY_DELAY))
+
+
+_TOKEN_LIMIT = re.compile(
+    r"token[ _-]?limit|token[ _-]?budget|tokens? per minute|\btpm\b|"
+    r"(?:input|output|completion)[ _-]?tokens?[^.]{0,40}(?:exceed|limit)|"
+    r"(?:exceed|limit)[^.]{0,40}(?:input|output|completion)[ _-]?tokens?|"
+    r"лимит[^.]{0,40}токен|токен[^.]{0,40}лимит|контекст[^.]{0,40}(?:переполн|лимит|не помещ)",
+    re.IGNORECASE,
+)
+
+
+def is_token_limit(exc: BaseException) -> bool:
+    if isinstance(exc, OutputLimitError):
+        return True
+    if isinstance(exc, CapabilityError) and exc.capability in ("context", "max_output"):
+        return True
+    text = str(exc)
+    if isinstance(exc, httpx.HTTPStatusError):
+        text += " " + exc.response.text
+    return bool(_CONTEXT.search(text) or _TOKEN_LIMIT.search(text)
+                or (_MAX_TOKENS.search(text) and any(word in text.lower() for word in _TOO_LARGE_WORDS)))
+
+
+def should_retry_agent(exc: BaseException) -> bool:
+    # Cancellation/shutdown are BaseExceptions and must never restart work.
+    return isinstance(exc, Exception) and not is_token_limit(exc)
+
+
+async def retry_request(request, *, on_retry=None, timeout=None):
+    """Repeat only a failed model request, never completed tools or a whole job."""
+    for attempt in range(len(RETRY_DELAYS) + 1):
+        try:
+            async with asyncio.timeout(timeout):
+                return await request()
+        except Exception as exc:
+            if not should_retry_agent(exc) or attempt == len(RETRY_DELAYS):
+                raise
+            delay = retry_delay(exc, attempt + 1)
+            if on_retry:
+                await on_retry({"attempt": attempt + 1, "max": len(RETRY_DELAYS), "delay": delay})
+            await asyncio.sleep(delay)

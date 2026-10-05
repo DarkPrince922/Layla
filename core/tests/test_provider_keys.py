@@ -208,7 +208,7 @@ async def test_every_key_rejected_gives_clear_reason(client, monkeypatch):
     log = _http(monkeypatch, lambda i, auth, body: _deny(402, "Insufficient credits"))
     state = await _run(client)
     assert state["status"] == "error"
-    assert len(log) == 2  # каждый ключ попробован один раз
+    assert len(log) == 6  # first attempt plus five retries, including key rotation
     assert "закончились средства или квота (HTTP 402): Insufficient credits" in state["error"]
 
 

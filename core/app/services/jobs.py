@@ -225,6 +225,8 @@ async def _finish(maker, job_id: str, status: str, error: str | None = None) -> 
                     for t in meta.get("tools", [])
                 ]
                 msg.meta = meta
+        from app.services.telegram_runtime import enqueue_finished
+        await enqueue_finished(session, job)
         await session.commit()
     if summary_run and not _shutting_down and not (error or "").startswith("Прервано перезапуском"):
         from app.services.pentest_workers import schedule_summary

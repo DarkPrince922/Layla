@@ -26,6 +26,7 @@ from app.models.pentest_workbench import EngagementRecord, EngagementTask
 from app.models.persona import Persona
 from app.models.provider import Provider, ProviderKey
 from app.models.telegram import TelegramConfig
+from app.models.telegram_bot import TelegramBotState, TelegramNotification
 from app.models.user import AdminBootstrap, Project, User, Workspace
 
 __all__ = [
@@ -64,6 +65,8 @@ __all__ = [
     "Scope",
     "Server",
     "TelegramConfig",
+    "TelegramBotState",
+    "TelegramNotification",
     "User",
     "Venue",
     "Workspace",

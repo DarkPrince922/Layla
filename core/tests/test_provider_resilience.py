@@ -67,12 +67,12 @@ async def test_rate_limit_is_retried(client, monkeypatch):
     assert state["status"] == "done" and last["content"] == "ok" and len(calls) == 2
 
 
-async def test_bad_request_is_not_retried(client, monkeypatch):
+async def test_bad_request_retries_five_times(client, monkeypatch):
     await _setup(client)
     calls: list = []
     _script(monkeypatch, [ProviderError("Провайдер отклонил запрос (HTTP 400)", status=400)], calls)
     state, _ = await _run(client)
-    assert state["status"] == "error" and len(calls) == 1
+    assert state["status"] == "error" and len(calls) == 6
 
 
 async def test_gives_up_after_five_retries(client, monkeypatch):
@@ -443,7 +443,7 @@ async def test_history_is_trimmed_when_summary_fails(client, monkeypatch, db_ses
     chat = await _chat_with_history(client, db_sessionmaker, turns=20)
     sent: list = []
     refused = httpx.Response(400, json={"error": {"message": "bad request"}})
-    _http(monkeypatch, [refused, _wire(text="ok")], sent)
+    _http(monkeypatch, [refused] * 6 + [_wire(text="ok")], sent)
     state = await _run_in(client, chat)
     assert state["status"] == "done", state
     assert any("Не удалось сжать контекст" in s["text"] for s in state["steps"])
