@@ -72,12 +72,16 @@ async def lifespan(_app: FastAPI):
     from app.services.trash import purge_forever
 
     purger = asyncio.create_task(purge_forever(SessionLocal), name="layla-trash-purge")
+    from app.services.telegram_runtime import run_forever
+    telegram_task = asyncio.create_task(run_forever(SessionLocal), name="layla-telegram-supervisor")
     try:
         yield
     finally:
         purger.cancel()
         from app.services.jobs import shutdown
         await shutdown()
+        telegram_task.cancel()
+        await asyncio.gather(telegram_task, return_exceptions=True)
 
 
 app = FastAPI(

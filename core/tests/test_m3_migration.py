@@ -35,8 +35,8 @@ def test_fresh_migration(tmp_path):
     migrate(path)
     migrate(path)  # already at head
     with sqlite3.connect(path) as db:
-        assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0021_grok_login"
-        assert {"osint_artifacts", "osint_lookups", "grok_logins"} <= {
+        assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0022_telegram_bot"
+        assert {"osint_artifacts", "osint_lookups", "grok_logins", "telegram_bot_states", "telegram_notifications"} <= {
             r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
 

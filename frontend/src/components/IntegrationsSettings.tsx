@@ -1,16 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plug, Trash2, Plus, Send, CheckCircle2, XCircle } from "lucide-react";
+import { Plug, Trash2, Plus, CheckCircle2, XCircle } from "lucide-react";
 import {
   api,
   type McpServer,
   type McpTestResult,
-  type TelegramConfig,
 } from "@/lib/api";
 import { HttpKeyBanner } from "@/components/HttpKeyBanner";
 import { IntelligenceSettings } from "@/components/IntelligenceSettings";
+import { TelegramIntegration } from "@/components/TelegramIntegration";
 
 function McpRegistry() {
   const qc = useQueryClient();
@@ -167,104 +167,6 @@ function McpRegistry() {
           })}
         </ul>
       )}
-    </div>
-  );
-}
-
-function TelegramIntegration() {
-  const qc = useQueryClient();
-  const [token, setToken] = useState("");
-  const [chatId, setChatId] = useState("");
-  const [insecure, setInsecure] = useState(false);
-  const [ack, setAck] = useState(false);
-  const [testMsg, setTestMsg] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (typeof window !== "undefined" && !window.isSecureContext) setInsecure(true);
-  }, []);
-
-  const { data: cfg } = useQuery({
-    queryKey: ["telegram"],
-    queryFn: () => api.get<TelegramConfig>("/integrations/telegram"),
-  });
-
-  useEffect(() => {
-    if (cfg?.default_chat_id) setChatId(cfg.default_chat_id);
-  }, [cfg]);
-
-  const save = useMutation({
-    mutationFn: () =>
-      api.put("/integrations/telegram", {
-        bot_token: token,
-        default_chat_id: chatId,
-        enabled: true,
-      }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["telegram"] });
-      setToken("");
-    },
-  });
-  const test = useMutation({
-    mutationFn: () => api.post<{ ok: boolean }>("/integrations/telegram/test", {}),
-    onSuccess: () => setTestMsg("Отправлено ✅"),
-    onError: (e) => setTestMsg(e instanceof Error ? e.message : "Ошибка"),
-  });
-
-  const keyBlocked = insecure && !ack;
-
-  return (
-    <div>
-      <h2 className="mb-2 text-sm font-semibold text-neutral-300">Telegram-бот</h2>
-      <p className="mb-2 text-xs text-neutral-500">
-        Управляйте чатами с телефона и получайте статусы агента. Токен хранится
-        зашифрованным.
-      </p>
-      {cfg?.configured && (
-        <p className="mb-2 text-xs text-emerald-300">
-          Настроен: {cfg.token_masked} · chat_id {cfg.default_chat_id || "—"}
-        </p>
-      )}
-      <div className="space-y-2 rounded-xl border border-ink-700/70 bg-ink-800/30 p-5">
-        <input
-          value={token}
-          onChange={(e) => setToken(e.target.value)}
-          type="password"
-          disabled={keyBlocked}
-          placeholder={keyBlocked ? "Ввод заблокирован по HTTP" : "Токен бота (от @BotFather)"}
-          className="w-full rounded-md border border-ink-700 bg-ink-800 px-2 py-1.5 text-xs disabled:opacity-40"
-        />
-        <input
-          value={chatId}
-          onChange={(e) => setChatId(e.target.value)}
-          placeholder="chat_id по умолчанию"
-          className="w-full rounded-md border border-ink-700 bg-ink-800 px-2 py-1.5 text-xs"
-        />
-        {insecure && (
-          <label className="flex items-center gap-2 text-[11px] text-amber-300">
-            <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} />
-            Понимаю риск ввода токена по обычному HTTP.
-          </label>
-        )}
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => save.mutate()}
-            disabled={!token || save.isPending}
-            className="rounded-md bg-accent-600 px-3 py-1.5 text-xs text-white disabled:opacity-50"
-          >
-            {save.isPending ? "Сохранение…" : "Сохранить"}
-          </button>
-          {cfg?.configured && (
-            <button
-              onClick={() => test.mutate()}
-              disabled={test.isPending}
-              className="flex items-center gap-1 rounded-md bg-ink-700 px-3 py-1.5 text-xs text-white"
-            >
-              <Send className="h-3.5 w-3.5" /> Тест
-            </button>
-          )}
-          {testMsg && <span className="text-xs text-neutral-400">{testMsg}</span>}
-        </div>
-      </div>
     </div>
   );
 }
