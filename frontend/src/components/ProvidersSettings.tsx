@@ -22,6 +22,7 @@ const KINDS = ["openai_compatible", "anthropic", "custom"];
 export function ProvidersSettings() {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
+  const [grokOpen, setGrokOpen] = useState(false);
   const [insecure, setInsecure] = useState(false);
   const [ack, setAck] = useState(false);
   const [form, setForm] = useState({
@@ -95,6 +96,17 @@ export function ProvidersSettings() {
 
       <div className="mb-4">
         <HttpKeyBanner />
+      </div>
+
+      <div className="mb-5 rounded-xl border border-ink-700 bg-ink-800/30 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div><h2 className="font-semibold">Grok · xAI</h2><p className="text-xs text-neutral-400">Подключите ключ из xAI Console — доступные модели появятся автоматически.</p></div>
+          <button type="button" className="primary-button text-sm" onClick={() => {
+            window.open("https://console.x.ai/", "_blank", "noopener,noreferrer");
+            setGrokOpen(true);
+          }}>Connect Grok</button>
+        </div>
+        {grokOpen && <GrokConnect keyBlocked={keyBlocked} insecure={insecure} ack={ack} onAck={setAck} onClose={() => setGrokOpen(false)} />}
       </div>
 
       {open && (
@@ -443,4 +455,40 @@ function ModelSettings({ model, onSave, onClose }: {
       </div>
     </div>
   );
+}
+
+
+function GrokConnect({ keyBlocked, insecure, ack, onAck, onClose }: {
+  keyBlocked: boolean; insecure: boolean; ack: boolean; onAck: (value: boolean) => void; onClose: () => void;
+}) {
+  const qc = useQueryClient();
+  const [key, setKey] = useState("");
+  const connect = useMutation({
+    mutationFn: () => api.post<Provider>("/providers/connect/grok", { api_key: key.trim() }),
+    onSuccess: () => {
+      setKey("");
+      qc.invalidateQueries({ queryKey: ["providers"] });
+      qc.invalidateQueries({ queryKey: ["provider-models"] });
+      qc.invalidateQueries({ queryKey: ["models"] });
+      qc.invalidateQueries({ queryKey: ["accounts-health"] });
+      onClose();
+    },
+  });
+  return <div className="mt-4 space-y-3 border-t border-ink-700 pt-4">
+    <p className="text-sm text-neutral-300">В xAI Console откройте API Keys, создайте ключ, скопируйте его и вставьте сюда.</p>
+    <a href="https://console.x.ai/" target="_blank" rel="noopener noreferrer" className="text-xs text-accent-300 underline">Открыть xAI Console ещё раз</a>
+    <label className="block text-xs text-neutral-400">Ключ xAI
+      <input aria-label="Ключ xAI" type="password" autoComplete="off" maxLength={4096} value={key}
+        onChange={e => { setKey(e.target.value); connect.reset(); }} disabled={keyBlocked || connect.isPending}
+        placeholder={keyBlocked ? "Сначала подтвердите ввод по HTTP" : "Вставьте ключ из xAI Console"}
+        className="mt-1 w-full rounded-lg border border-ink-700 bg-ink-900 p-2 text-sm disabled:opacity-40" />
+    </label>
+    <p className="text-xs text-neutral-500">Ключ хранится зашифрованным. Это подключение API xAI; оплата и доступ к моделям управляются в консоли.</p>
+    {insecure && <label className="flex items-center gap-2 text-xs text-amber-300"><input type="checkbox" checked={ack} onChange={e => onAck(e.target.checked)} />Я понимаю, что ключи по HTTP не шифруются при передаче.</label>}
+    {connect.isError && <p role="alert" className="text-sm text-red-300">{connect.error instanceof Error ? connect.error.message : "Не удалось подключить Grok"}</p>}
+    <div className="flex flex-wrap gap-2">
+      <button type="button" className="primary-button text-sm" disabled={keyBlocked || !key.trim() || connect.isPending} onClick={() => connect.mutate()}>{connect.isPending ? "Проверяем и загружаем модели…" : "Подключить и загрузить модели"}</button>
+      <button type="button" className="secondary-button text-sm" disabled={connect.isPending} onClick={() => { setKey(""); onClose(); }}>Отмена</button>
+    </div>
+  </div>;
 }

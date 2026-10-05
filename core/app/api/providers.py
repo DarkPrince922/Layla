@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_session
 from app.models.provider import Provider
 from app.models.user import User
-from app.schemas.provider import ProviderCreate, ProviderOut
+from app.schemas.provider import GrokConnectRequest, ProviderCreate, ProviderOut
 from app.security import crypto
 from app.services import audit
 from app.services.auth import get_current_user
@@ -298,3 +298,54 @@ def _with_caps(provider: Provider, entries: list[dict]) -> list[ProviderModelInf
             dropped=list(c.get("drop") or []),
         ))
     return out
+
+
+@router.post("/connect/grok", response_model=ProviderOut)
+async def connect_grok(
+    body: GrokConnectRequest,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> ProviderOut:
+    """Validate an xAI key and publish its available Grok models atomically."""
+    import httpx
+    from app.models.enums import ProviderKind
+
+    key = body.api_key.strip()
+    if not key or any(c.isspace() for c in key):
+        raise HTTPException(422, "Вставьте ключ из xAI Console без пробелов")
+    candidate = Provider(name="Grok", kind=ProviderKind.openai_compatible,
+                         base_url="https://api.x.ai/v1")
+    try:
+        available = await provider_client.list_models(candidate, key)
+    except httpx.HTTPStatusError as exc:
+        code = exc.response.status_code
+        if code in (401, 403):
+            raise HTTPException(422, "xAI отклонил ключ. Проверьте ключ и доступ к моделям в консоли.") from exc
+        if code == 429:
+            raise HTTPException(429, "xAI ограничил запросы. Проверьте лимиты и повторите позже.") from exc
+        raise HTTPException(502, "xAI не удалось проверить подключение. Повторите позже.") from exc
+    except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+        raise HTTPException(502, "xAI недоступен или вернул некорректный список моделей") from None
+    names = list(dict.fromkeys(n for n in available if isinstance(n, str)
+        and n.startswith("grok-") and not any(x in n.lower() for x in ("imagine", "image", "video"))))
+    if not names:
+        raise HTTPException(422, "Для этого ключа не найдено моделей чата Grok. Проверьте доступ в xAI Console.")
+    provider = await session.scalar(select(Provider).where(
+        Provider.owner_id == user.id, Provider.name == "Grok",
+        Provider.base_url == "https://api.x.ai/v1"))
+    if not provider:
+        provider = candidate
+        provider.owner_id = user.id
+        session.add(provider)
+    previous = {m['name']: bool(m.get('enabled', True)) for m in (provider.models or [])}
+    provider.models = [{"name": n, "enabled": previous.get(n, True)} for n in names]
+    provider.secret_ref = crypto.encrypt(key)
+    provider.enabled = provider.active = True
+    if provider.default_model not in names:
+        provider.default_model = names[0]
+    await session.flush()
+    await audit.record(session, actor=user.id, action="provider.connect.grok", target=provider.id,
+                       meta={"model_count": len(names)})
+    await session.commit()
+    await session.refresh(provider)
+    return _to_out(provider)
