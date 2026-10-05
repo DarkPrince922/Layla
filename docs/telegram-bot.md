@@ -43,3 +43,14 @@ Migration: `0022_telegram_bot`, following `0021_grok_login`. Deploy with the usu
 migration/startup procedure. Telegram secrets are omitted from public errors and HTTPX
 request logging. Real Telegram delivery is not exercised by mocked unit tests; after
 deployment use Test notification, pair the account and run a small task to check delivery.
+
+## Agent request restarts
+
+A failed model request is retried up to five times after the initial attempt,
+with delays of 1, 2, 4, 8 and 16 seconds (bounded Retry-After hints are respected).
+This applies to tool agents, pentest workers, plain streaming chats and Design generation.
+Token/context/output length limit errors and cancellation do not enter this retry loop.
+Existing capability learning and context fitting remain separate recovery mechanisms.
+Retries happen before executing model-selected tools, preserving completed operations.
+Failed partial streaming text is retracted before the next attempt; retry progress is
+shown in the task. Final failure/completion notifications are sent after recovery ends.

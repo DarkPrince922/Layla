@@ -326,8 +326,8 @@ async def send_message(
                 ):
                     yield event
             else:
-                async for kind, text in provider_client.stream_chat(provider, key, model, payload):
-                    yield {"reasoning" if kind == "reasoning" else "delta": text}
+                async for kind, text in provider_client.stream_chat_with_retry(provider, key, model, payload):
+                    yield {kind if kind in ("reasoning", "retract", "retry") else "delta": text}
 
         try:
             async for event in events():

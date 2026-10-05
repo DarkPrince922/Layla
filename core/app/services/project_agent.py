@@ -415,7 +415,7 @@ def fit_context(conversation: list[dict], anchor: dict, caps: dict) -> int:
 async def _turn(provider, key, model, conversation, available, caps, anchor=None):
     """Один ход модели с автоповтором.
 
-    Временный сбой (обрыв, 429, 5xx) — повтор до len(RETRY_DELAYS) раз с паузой;
+    Ошибка, кроме лимита токенов — повтор до len(RETRY_DELAYS) раз с паузой;
     уже показанный текст хода откатывается событием retract. Отказ из-за
     неподдерживаемой части запроса — сразу повтор без неё, событие learned.
     key — строка или KeyRing: отказ из-за ключа (401/402/403/429) сразу повторяется
@@ -541,14 +541,11 @@ async def _turn(provider, key, model, conversation, available, caps, anchor=None
                 yield "retract", shown
             yield "learned", {exc.capability: exc.value}
         except Exception as exc:
-            if ring and getattr(exc, "key_failed", False) and ring.rotate(getattr(exc, "retry_after", None)):
-                if shown:
-                    yield "retract", shown
-                yield "key", {"status": exc.status, "label": ring.label}
-                continue
-            if not provider_errors.is_retryable(exc) or attempt >= len(provider_errors.RETRY_DELAYS):
+            if not provider_errors.should_retry_agent(exc) or attempt >= len(provider_errors.RETRY_DELAYS):
                 raise
             attempt += 1
+            if ring and getattr(exc, "key_failed", False) and ring.rotate(getattr(exc, "retry_after", None)):
+                yield "key", {"status": exc.status, "label": ring.label}
             delay = provider_errors.retry_delay(exc, attempt)
             if shown:
                 yield "retract", shown
