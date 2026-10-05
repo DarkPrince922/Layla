@@ -192,6 +192,21 @@ async def test_device_protocol_and_safe_url(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_subscription_model_catalog(monkeypatch):
+    real_client = httpx.AsyncClient
+    def handle(request):
+        assert str(request.url) == grok_oauth.BASE_URL + "/models"
+        assert request.headers["x-xai-token-auth"] == "xai-grok-cli"
+        return httpx.Response(200, json={"data": [
+            {"model": "grok-4.7", "id": "picker-alias", "context_window": 256000},
+            {"model": "grok-hidden", "hidden": True},
+        ]})
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real_client(transport=httpx.MockTransport(handle), **kw))
+    names = await provider_client.list_models(Provider(name="Grok", base_url=grok_oauth.BASE_URL), "grok-oauth:access")
+    assert names == ["grok-4.7"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("finish", ["response.completed", "response.incomplete", "disconnect"])
 async def test_responses_tools_are_atomic(monkeypatch, finish):
     real_client = httpx.AsyncClient

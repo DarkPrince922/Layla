@@ -218,7 +218,11 @@ async def list_models(provider: Provider, key: str | None) -> list[str]:
     for it in items:
         if isinstance(it, dict) and it.get("hidden"):
             continue
-        mid = it.get("id") or it.get("name") if isinstance(it, dict) else None
+        from app.services.grok_oauth import TOKEN_PREFIX
+        if isinstance(it, dict):
+            mid = (it.get("model") if key and key.startswith(TOKEN_PREFIX) else None) or it.get("id") or it.get("name")
+        else:
+            mid = None
         if mid:
             names.append(mid)
     return names
