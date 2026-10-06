@@ -268,3 +268,48 @@ def test_nested_named_span_does_not_replace_outer_alert_title():
     report = """<h3>SQL <span class='alert-name'>Injection</span> (error based)</h3>
     <span>High</span><h4>Affected items</h4><p>https://shop.example.com/p</p>"""
     assert acunetix.parse_report(report).findings[0]['type'] == 'SQL Injection (error based)'
+
+
+def _vertical_alert(location, name, severity, details, request='', description='Scanner evidence'):
+    return f'''<table><tr><td><b>{location}</b></td></tr>
+    <tr><td>Alert group</td><td><b>{name}</b></td></tr>
+    <tr><td>Severity</td><td>{severity}</td></tr>
+    <tr><td>Description</td><td>{description}</td></tr>
+    <tr><td>Details</td><td>{details}</td></tr>
+    <tr><td colspan="2"><code>{request}</code></td></tr></table>'''
+
+
+def test_affected_items_vertical_tables_keep_paths_requests_and_server_evidence():
+    report = '<table><tr><td>Start url</td><td>https://shop.example.com</td></tr></table>'
+    report += _vertical_alert('/legacy/', 'SQL Injection', 'Critical', 'Database error', 'GET /legacy/test HTTP/1.1')
+    report += _vertical_alert('Web Server', 'Library vulnerability', 'Medium', 'Version 1', description='CVE example A')
+    report += _vertical_alert('Web Server', 'Library vulnerability', 'Medium', 'Version 1', description='CVE example B')
+    parsed = acunetix.parse_report(report)
+    assert parsed.declared == 3
+    assert parsed.findings[0]['url'] == 'https://shop.example.com/legacy/'
+    assert parsed.findings[0]['method'] == 'GET'
+    assert 'GET /legacy/test HTTP/1.1' in parsed.findings[0]['description']
+    assert len({acunetix.dedup_key(f) for f in parsed.findings}) == 3
+    assert all(f['status'] is None for f in parsed.findings)
+
+
+def test_vertical_lists_split_affected_paths_without_adding_external_resources():
+    report = '<table><tr><td>Start url</td><td>https://shop.example.com</td></tr></table>'
+    report += _vertical_alert('Web Server', 'Directory listings (verified)', 'Medium',
+        'Folders with directory listing enabled:<ul><li>https://shop.example.com/a/</li><li>https://shop.example.com/b/</li></ul>')
+    report += _vertical_alert('/page/', 'Mixed content', 'Medium', 'Script URL: https://cdn.example.org/code.js', 'GET /page/ HTTP/1.1')
+    parsed = acunetix.parse_report(report)
+    assert parsed.declared == 2
+    assert [f['url'] for f in parsed.findings] == ['https://shop.example.com/a/', 'https://shop.example.com/b/', 'https://shop.example.com/page/']
+    assert all(f['status'] is None for f in parsed.findings)
+
+
+def test_vertical_request_fallback_and_no_cross_table_method_leak():
+    report = '<table><tr><td>Start url</td><td>https://shop.example.com</td></tr></table>'
+    report += _vertical_alert('Web Server', 'Library issue', 'Medium', 'Resource', 'POST /js/app.js HTTP/1.1')
+    report += _vertical_alert('Web Server', 'Weak cipher', 'Medium', 'TLS configuration')
+    items = acunetix.parse_report(report).findings
+    assert items[0]['url'] == 'https://shop.example.com/js/app.js'
+    assert items[0]['method'] == 'POST'
+    assert items[1]['url'] == 'https://shop.example.com'
+    assert items[1]['method'] is None

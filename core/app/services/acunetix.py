@@ -107,6 +107,8 @@ class _TableExtractor(HTMLParser):
         self._cell: list[str] | None = None
 
     def handle_starttag(self, tag, attrs):
+        if self._cell is not None and tag in ("br", "li", "pre", "code"):
+            self._cell.append("\n")
         if tag == "table":
             self._table = []
         elif tag == "tr" and self._table is not None:
@@ -536,7 +538,55 @@ def _parse_acunetix_xml(content: str) -> ParsedReport | None:
     return ParsedReport(findings=findings, declared=len(findings))
 
 
+def _parse_affected_tables(content: str) -> ParsedReport | None:
+    """Acunetix Affected Items: one vertical key/value table per alert."""
+    ext = _TableExtractor()
+    ext.feed(content)
+    base_url = None
+    for table in ext.tables:
+        for row in table:
+            if len(row) > 1 and _label(row[0]) in ("start url", "target url"):
+                match = _URL_RE.search(row[1])
+                if match:
+                    base_url = match.group(0)
+    findings, declared = [], 0
+    for table in ext.tables:
+        fields = {_label(row[0]): row[1] for row in table if len(row) == 2}
+        name = fields.get("alert group", "")
+        if (not _is_finding_title(name) or "severity" not in fields
+                or not table or len(table[0]) != 1 or "description" not in fields):
+            continue
+        declared += 1
+        blob = "\n".join(" | ".join(row) for row in table)
+        location = table[0][0] if table and len(table[0]) == 1 else ""
+        urls = []
+        if location.startswith(("/", "http://", "https://")):
+            urls.append(_affected_url(base_url or "", location))
+        details = fields.get("details", "")
+        # Explicit affected-resource lists, rather than arbitrary evidence links.
+        if re.match(r"(?:folders with directory listing|URLs where|paths without|locations without|cookies without|pages where)", details, re.I):
+            urls.extend(url.rstrip(".,;") for url in _URL_RE.findall(details)
+                        if base_url and urlparse(url).hostname == urlparse(base_url).hostname)
+        request = re.search(r"\b(GET|POST|PUT|DELETE|PATCH|HEAD)\s+(\S+)\s+HTTP/", blob)
+        if not urls and request:
+            urls.append(_affected_url(base_url or "", request.group(2)))
+        missing_location = not urls
+        if missing_location:
+            urls = [base_url]
+        param = fields.get("parameter") or fields.get("param")
+        for url in dict.fromkeys(urls):
+            findings.append({"type": name, "severity": normalize_severity(fields["severity"]),
+                "url": url, "param": param, "method": request.group(1) if request else None,
+                "status": _status_from(fields.get("status", "")), "description": blob[:20000],
+                # Same-name server alerts can describe distinct CVEs.
+                "evidence_key": sha256_of(blob) if missing_location else None})
+    return ParsedReport(findings, declared) if declared else None
+
+
 def _parse_html(content: str) -> ParsedReport:
+    affected_report = _parse_affected_tables(content)
+    if affected_report is not None:
+        return affected_report
     findings = _parse_tables(content)
     if not findings:
         findings = _parse_sections(content)
@@ -559,10 +609,11 @@ def parse_html(content: str) -> ParsedReport:
 
 
 def dedup_key(f: dict) -> str:
-    return "|".join(
+    key = "|".join(
         [
             str(f.get("type", "")).strip().lower(),
             str(f.get("url", "") or "").strip().lower(),
             str(f.get("param", "") or "").strip().lower(),
         ]
     )
+    return key + ("|" + f["evidence_key"] if f.get("evidence_key") else "")
