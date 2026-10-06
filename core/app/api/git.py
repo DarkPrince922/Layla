@@ -147,7 +147,8 @@ async def git_push(project_id: str, body: PushIn | None = None, user: User = Dep
     try:
         remote = (await gitops.status(root)).get("remote")
         username, token = await credential(session, user.id, remote)
-        done = await gitops.push(root, token, username, (body.branch if body else None))
+        done = await gitops.push(root, token, username, (body.branch if body else None),
+                                 user.display_name or "Layla", user.email)
     except gitops.GitError as exc:
         raise _fail(exc) from exc
     await audit.record(session, actor=user.id, action="project.git.push", target=project_id,
@@ -163,7 +164,7 @@ async def git_pull(project_id: str, user: User = Depends(get_current_user),
     try:
         remote = (await gitops.status(root)).get("remote")
         username, token = await credential(session, user.id, remote)
-        done = await gitops.pull(root, token, username)
+        done = await gitops.pull(root, token, username, user.display_name or "Layla", user.email)
     except gitops.GitError as exc:
         raise _fail(exc) from exc
     await audit.record(session, actor=user.id, action="project.git.pull", target=project_id)
