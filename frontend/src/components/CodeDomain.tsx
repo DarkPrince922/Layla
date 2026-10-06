@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Download,
+  Upload,
   MessageCircle,
   FileCode2,
   Sparkles,
@@ -57,6 +58,9 @@ export function CodeDomain() {
   const [stale, setStale] = useState(false);
   const [pending, setPending] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [uploadDirectory, setUploadDirectory] = useState("");
+  const [uploadNotice, setUploadNotice] = useState<string | null>(null);
+  const uploadInput = useRef<HTMLInputElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [runRequest, setRunRequest] = useState<RunRequest | null>(null);
   // Превью монтируется при первом открытии и дальше живёт (iframe не перезагружается при смене панели).
@@ -83,7 +87,7 @@ export function CodeDomain() {
   }, [projects, projectId, projectKey, refreshingProjects]);
   useEffect(() => { if (projectId) try { localStorage.setItem(projectKey, projectId); } catch {} }, [projectId, projectKey]);
   useEffect(() => { if (pane === "preview") setPreviewOpened(true); }, [pane]);
-  useEffect(() => { setPreviewOpened(false); setFilesChanged(0); }, [projectId]);
+  useEffect(() => { setPreviewOpened(false); setFilesChanged(0); setUploadNotice(null); setUploadDirectory(""); }, [projectId]);
   useEffect(() => {
     const open = (event: Event) => {
       const target = (event as CustomEvent).detail;
@@ -210,6 +214,32 @@ export function CodeDomain() {
     setChange(null);
     setStale(false);
     setPane("editor");
+  }
+  async function uploadFiles(selected: File[]) {
+    if (!projectId || !selected.length || !canLeave()) return;
+    const id = projectId;
+    setPending(true); setError(null); setUploadNotice(null);
+    let uploaded = 0;
+    try {
+      for (const file of selected) {
+        if (file.size > 10 * 1024 * 1024) throw new Error(`${file.name}: файл больше 10 МБ`);
+        const path = [uploadDirectory.trim().replace(/\/$/, ""), file.name].filter(Boolean).join("/");
+        const url = `/projects/${id}/upload?path=${encodeURIComponent(path)}`;
+        const existing = await api.get<{ sha256: string | null }>(url);
+        if (existing.sha256 && !(await confirmAction(`Заменить файл ${path} загруженным?`, "Заменить"))) continue;
+        await api.upload<FileChange>(url + (existing.sha256 ? `&expected_sha256=${existing.sha256}` : ""), file);
+        uploaded++;
+        if (openFile?.path === path) setStale(true);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось загрузить файлы");
+    } finally {
+      setUploadNotice(`Загружено файлов: ${uploaded} из ${selected.length}`);
+      setFilesChanged(n => n + uploaded);
+      await Promise.all([qc.invalidateQueries({ queryKey: ["project-files", id] }),
+        qc.invalidateQueries({ queryKey: ["git", id] })]);
+      setPending(false);
+    }
   }
   async function saveFile(remove = false) {
     if (!projectId || !openFile || pending) return;
@@ -406,6 +436,11 @@ export function CodeDomain() {
             <>
               <div className="flex items-center justify-between px-3 py-2">
                 <span className="text-[11px] text-neutral-500">Файлы проекта</span>
+                <input ref={uploadInput} type="file" multiple className="hidden" aria-label="Выбрать файлы для загрузки"
+                  onChange={e => { const selected = Array.from(e.target.files || []); e.target.value = ""; void uploadFiles(selected); }} />
+                <button disabled={pending} onClick={() => uploadInput.current?.click()} className={button}>
+                  <Upload className="h-4 w-4" />{pending ? "Подождите…" : "Загрузить"}
+                </button>
                 <button
                   onClick={() => setAddingFile(!addingFile)}
                   aria-label="Создать файл"
@@ -413,6 +448,13 @@ export function CodeDomain() {
                 >
                   <FilePlus2 className="h-4 w-4" />
                 </button>
+              </div>
+              <div className="px-3 pb-2">
+                <input value={uploadDirectory} onChange={e => setUploadDirectory(e.target.value)} disabled={pending}
+                  aria-label="Папка загрузки" placeholder="Папка загрузки, например src (необязательно)"
+                  className="w-full rounded-lg bg-ink-800 px-2 py-2 text-xs" />
+                <p className="mt-1 text-[11px] text-neutral-500">До 10 МБ на файл. Загрузка работает через HTTP и HTTPS.</p>
+                {uploadNotice && <p role="status" className="mt-1 text-xs text-emerald-300">{uploadNotice}</p>}
               </div>
               {addingFile && (
                 <form

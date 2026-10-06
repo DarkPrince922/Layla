@@ -21,6 +21,7 @@ from contextlib import contextmanager
 from pathlib import Path, PureWindowsPath
 
 MAX_FILE_BYTES = 1_000_000
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_ZIP_BYTES = 100 * 1024 * 1024
 MAX_ZIP_ENTRIES = 10_000
 _SKIP_DIRS = {".git", "node_modules", ".venv", "__pycache__", ".next"}
@@ -194,10 +195,10 @@ def preview_change(base: str | Path, rel: str, content: str | None) -> dict:
 def change_file(
     base: str | Path,
     rel: str,
-    content: str | None,
+    content: str | bytes | None,
     expected_sha256: str | None,
 ) -> dict:
-    """Create/edit/delete one text file. None content deletes; None hash creates.
+    """Create/edit/delete text, or store uploaded bytes. None hash creates.
 
     A create never overwrites. Edits/deletes require the SHA returned by read_file.
     Parents are created automatically. Directories cannot be deleted.
@@ -206,11 +207,14 @@ def change_file(
     parts = _parts(rel)
     if not parts:
         raise ValueError("Укажите путь файла")
-    data = content.encode("utf-8") if content is not None else None
+    upload = isinstance(content, bytes)
+    data = content if upload else content.encode("utf-8") if content is not None else None
+    limit = MAX_UPLOAD_BYTES if upload else MAX_FILE_BYTES
     if data is not None:
-        if len(data) > MAX_FILE_BYTES:
-            raise ValueError("Файл превышает допустимый размер (1 МБ)")
-        _text(data)
+        if len(data) > limit:
+            raise ValueError("Файл превышает допустимый размер")
+        if not upload:
+            _text(data)
     with (
         _root(base, write=True) as root,
         _directory(
@@ -220,14 +224,14 @@ def change_file(
         ) as parent,
     ):
         try:
-            old, info = _read_bytes(parent, parts[-1], MAX_FILE_BYTES)
+            old, info = _read_bytes(parent, parts[-1], limit)
         except FileNotFoundError:
             old, info = None, None
         if (old is None and expected_sha256 is not None) or (
             old is not None and _sha(old) != expected_sha256
         ):
             raise FileConflict("Файл изменился. Прочитайте его заново перед сохранением.")
-        before = _text(old) if old is not None else None
+        before = _text(old) if old is not None and not upload else None
         if data is None:
             if old is None:
                 raise FileNotFoundError(rel)
@@ -258,7 +262,24 @@ def change_file(
                 except FileNotFoundError:
                     pass
         os.fsync(parent)
+    if upload:
+        return {"path": "/".join(parts), "operation": "edit" if old is not None else "create",
+                "diff": "", "before_sha256": _sha(old) if old is not None else None,
+                "after_sha256": _sha(data)}
     return _change("/".join(parts), before, content)
+
+
+def upload_info(base: str | Path, rel: str) -> dict:
+    safe_join(base, rel)
+    parts = _parts(rel)
+    if not parts:
+        raise ValueError("Укажите путь файла")
+    try:
+        with _root(base) as root, _directory(root, parts[:-1]) as parent:
+            data, info = _read_bytes(parent, parts[-1], MAX_UPLOAD_BYTES)
+        return {"sha256": _sha(data), "size": info.st_size}
+    except FileNotFoundError:
+        return {"sha256": None, "size": 0}
 
 
 def export_zip(base: str | Path):

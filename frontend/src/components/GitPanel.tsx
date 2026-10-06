@@ -55,11 +55,13 @@ export function GitPanel({ projectId, onOpenFile }: { projectId: string; onOpenF
       await action();
       if (done) setNotice(done);
       setDiff(null);
-      await Promise.all([qc.invalidateQueries({ queryKey: key }), qc.invalidateQueries({ queryKey: ["git-log", projectId] }),
-        qc.invalidateQueries({ queryKey: ["git-credentials"] }), qc.invalidateQueries({ queryKey: ["project-files", projectId] })]);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Не получилось");
-    } finally { setBusy(null); }
+    } finally {
+      await Promise.all([qc.invalidateQueries({ queryKey: key }), qc.invalidateQueries({ queryKey: ["git-log", projectId] }),
+        qc.invalidateQueries({ queryKey: ["git-credentials"] }), qc.invalidateQueries({ queryKey: ["project-files", projectId] })]);
+      setBusy(null);
+    }
   }
 
   async function showDiff() {
@@ -140,6 +142,18 @@ export function GitPanel({ projectId, onOpenFile }: { projectId: string; onOpenF
             onClick={() => act("commit", () => api.post(`/projects/${projectId}/git/commit`, { message }).then(() => setMessage("")), "Коммит создан")}>
             {busy === "commit" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <GitCommitHorizontal className="h-3.5 w-3.5" />}Закоммитить всё
           </button>
+          {state.remote && <button className="primary-button !px-3 !py-2 text-xs" disabled={!message.trim() || !!busy}
+            onClick={async () => {
+              if (!(await confirmAction(`Сохранить все изменения коммитом и отправить ветку ${state.branch || "main"} в ${state.remote}?`, "Коммит и Push"))) return;
+              await act("commit-push", async () => {
+                await api.post(`/projects/${projectId}/git/commit`, { message });
+                setMessage("");
+                try { await api.post(`/projects/${projectId}/git/push`, {}); }
+                catch (e) { throw new Error(`Коммит создан, но Push не выполнен. ${e instanceof Error ? e.message : "Ошибка отправки"} После исправления нажмите Push повторно.`); }
+              }, "Изменения сохранены и отправлены");
+            }}>
+            {busy === "commit-push" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowUpFromLine className="h-3.5 w-3.5" />}Коммит и Push
+          </button>}
         </div>}
       </section>
 
@@ -167,6 +181,7 @@ export function GitPanel({ projectId, onOpenFile }: { projectId: string; onOpenF
       <section className={card}>
         <h3 className="flex items-center gap-2 text-sm font-semibold"><Link2 className="h-4 w-4 text-accent-300" />Удалённый репозиторий</h3>
         <p className="mt-1 text-xs text-neutral-500">Адрес https, например https://github.com/user/repo.git. Репозиторий на GitHub создаётся заранее (можно пустой).</p>
+        <p className="mt-1 text-xs text-neutral-500">Layla можно открыть через HTTP: отправку кода выполняет сервер. Для GitHub укажите HTTPS-адрес и токен с правом записи.</p>
         <div className="mt-3 flex flex-col gap-2 sm:flex-row">
           <input value={remote} onChange={e => setRemote(e.target.value)} placeholder={state.remote || "https://github.com/user/repo.git"} aria-label="Адрес удалённого репозитория"
             className="min-w-0 flex-1 rounded-xl bg-ink-900 px-3 py-2 font-mono text-xs outline-none" />

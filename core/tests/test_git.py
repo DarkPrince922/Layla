@@ -213,3 +213,28 @@ async def test_chat_worker_runs_git_tools(client, monkeypatch):
     assert body["status"] == "done", body
     card = (await client.get(f"/api/chats/{chat['id']}")).json()["messages"][-1]["meta"]["tools"][0]
     assert card["name"] == "git_status" and card["output"] == "Проект не под Git"
+
+
+async def test_http_upload_commit_and_server_push(client, monkeypatch):
+    project = await _setup(client, 'http-git@example.com')
+    pid = project['id']
+    assert (await client.put(f'/api/projects/{pid}/upload?path=src/main.py', content=b'print(42)\n')).status_code == 200
+    await client.put(f'/api/projects/{pid}/git/remote', json={'url': 'https://github.com/u/r.git'})
+    await client.put('/api/git/credentials', json={'host': 'github.com', 'token': 'test_TOKEN'})
+    committed = await client.post(f'/api/projects/{pid}/git/commit', json={'message': 'Upload via HTTP'})
+    assert committed.status_code == 200
+    calls = []
+    real = gitops._git
+
+    async def fake(root, *args, **kwargs):
+        if args and args[0] == 'push':
+            calls.append((args, kwargs))
+            return 0, 'ok', ''
+        return await real(root, *args, **kwargs)
+
+    monkeypatch.setattr(gitops, '_git', fake)
+    pushed = await client.post(f'/api/projects/{pid}/git/push', json={})
+    assert pushed.status_code == 200
+    assert calls[0][1]['secret'] == 'test_TOKEN'
+    assert list(calls[0][1]['config']) == ['http.https://github.com/.extraheader']
+    assert (await client.get(f'/api/projects/{pid}/git')).json()['changes'] == []
