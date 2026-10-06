@@ -1,9 +1,4 @@
-"""Инструменты агента для Git: статус, история, дифф, коммит и пуш.
-
-Коммит меняет только историю проекта, файлы не трогает — в режимах «План» и «Ревью» его
-нет, в режиме «С подтверждением» он ждёт решения. Пуш уходит наружу, поэтому ждёт
-подтверждения пользователя всегда, в любом режиме.
-"""
+"""Git tools for project synchronization and conflict repair, following chat mode."""
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
@@ -12,9 +7,9 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.services import gitops
 
-GIT_TOOLS = frozenset({"git_status", "git_log", "git_diff", "git_commit", "git_push"})
-GIT_MUTATING = frozenset({"git_commit", "git_push"})
-ALWAYS_ASK = frozenset({"git_push"})
+GIT_TOOLS = frozenset({"git_status", "git_log", "git_diff", "git_commit", "git_push", "git_sync", "git_conflicts", "git_resolve"})
+GIT_MUTATING = frozenset({"git_commit", "git_push", "git_sync", "git_resolve"})
+ALWAYS_ASK = frozenset()
 GIT_PERMISSION = "repo.git"
 MODEL_DIFF = 12_000
 
@@ -35,16 +30,37 @@ class GitPush(_NoArgs):
     branch: str | None = Field(default=None, max_length=200)
 
 
+class GitResolve(_NoArgs):
+    path: str = Field(min_length=1, max_length=4096)
+    expected_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    delete: bool = False
+
+
+class GitConflicts(_NoArgs):
+    path: str | None = Field(default=None, max_length=4096)
+
+
 _SCHEMAS = {"git_status": _NoArgs, "git_log": GitLog, "git_diff": _NoArgs, "git_commit": GitCommit,
-            "git_push": GitPush}
+            "git_push": GitPush, "git_sync": GitPush, "git_conflicts": GitConflicts, "git_resolve": GitResolve}
 _DESCRIPTIONS = {
     "git_status": "Git state of this project: branch, uncommitted changes, remote, ahead/behind, last commit.",
     "git_log": "Recent commits of this project (newest first).",
     "git_diff": "Uncommitted changes of this project as a unified diff (new files included).",
     "git_commit": "Commit all current project changes with a clear message (initialises git if needed). "
                   "Use it when the user asks to commit or after finishing a requested change set.",
-    "git_push": "Push the committed history to the project's remote repository. The user always has to "
-                "approve a push; only push when the user asked for it.",
+    "git_push": "Publish requested changes to the configured remote. Automatically syncs remote commits first. "
+                "If it reports conflicts, call git_conflicts, repair files, git_resolve each, git_commit and retry. "
+                "Commit uncommitted work first. Follow chat mode; Auto executes without extra confirmation.",
+    "git_sync": "Fetch and merge the current remote branch, preserving local commits and a backup ref. "
+                "Commit local changes first. On conflicts use git_conflicts, read_file/write_file to combine "
+                "both sides according to the task, git_resolve each file, then git_commit and git_push. "
+                "Never blindly discard either side; verify the combined code with available checks.",
+    "git_conflicts": "List unresolved merge files with base, local (ours) and remote (theirs) versions. "
+                     "Use optional path to focus on one conflict if output is truncated, read_file for "
+                     "the working copy and write_file to repair it.",
+    "git_resolve": "Stage a repaired conflict file, using its current SHA-256 from read_file. "
+                   "All conflict markers must be removed. For an intentional deletion first delete_file "
+                   "then call with delete=true. Finish all files and git_commit to complete the merge.",
 }
 
 
@@ -102,10 +118,18 @@ class GitAgent:
             if name == "git_commit":
                 done = await gitops.commit(self.root, args.message, self.author, self.email)
                 return {"commit": done}
+            if name == "git_conflicts":
+                return await gitops.conflicts(self.root, args.path)
+            if name == "git_resolve":
+                return await gitops.resolve(self.root, args.path, args.expected_sha256, args.delete)
+            if name == "git_sync":
+                remote = (await gitops.status(self.root)).get("remote")
+                username, token = await self.credential(remote)
+                return await gitops.synchronize(self.root, token, username, args.branch, self.author, self.email)
             if name == "git_push":
                 remote = (await gitops.status(self.root)).get("remote")
                 username, token = await self.credential(remote)
-                done = await gitops.push(self.root, token, username, args.branch)
+                done = await gitops.push(self.root, token, username, args.branch, self.author, self.email)
                 return {"branch": done["branch"], "output": done["output"][-1500:]}
         except gitops.GitError as exc:
             return {"error": str(exc)}

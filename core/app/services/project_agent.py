@@ -286,9 +286,10 @@ PREVIEW_NOTE = (
     "with check_preview (status, title, server logs) after changes."
 )
 GIT_NOTE = (
-    "\nGit: inspect with git_status / git_log / git_diff. Commit with git_commit when the user asks "
-    "or when they asked you to keep history; write short imperative messages. Push with git_push only "
-    "when the user asks — they approve every push."
+    "\nGit: inspect with git_status / git_log / git_diff. For requested publication, commit changes, "
+    "git_sync, repair conflicts using git_conflicts / file tools / git_resolve, finish git_commit, "
+    "verify and git_push. Preserve both sides' intended behavior. Follow chat mode: Auto requires no "
+    "extra confirmation; Confirm asks before mutations. Don't publish unrelated or unfinished work."
 )
 NO_RUN_NOTE = (
     "\nYou cannot execute commands, install packages, or verify runtime behavior here; do not claim "
@@ -790,11 +791,17 @@ def _git_summary(name: str, result: dict) -> str:
     if name == "git_commit":
         commit = result.get("commit") or {}
         return f"{commit.get('short', '')} {commit.get('message', '')}\n{commit.get('stat', '')}".strip()
+    if name == "git_conflicts":
+        return "\n".join(c["path"] for c in result.get("conflicts", [])) or "Конфликтов нет"
+    if name == "git_resolve":
+        return f"Разрешён: {result.get('resolved', '')} · осталось: {len(result.get('remaining', []))}"
+    if name == "git_sync" and result.get("conflicts"):
+        return "Конфликты: " + ", ".join(result["conflicts"])
     return result.get("output") or ""
 
 
 async def _git_tool(git, name: str, arguments: dict, event: dict, ask, approve):
-    """git_*: подтверждение (пуш — всегда), выполнение, карточка и результат для модели."""
+    """git_*: confirmation follows chat mode; execution and model feedback."""
     always = name in agent_git.ALWAYS_ASK
     if always or (ask is not None and name in agent_git.GIT_MUTATING):
         decider = approve if always else ask

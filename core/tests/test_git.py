@@ -66,6 +66,8 @@ async def test_remote_validation_and_token_stays_out_of_arguments(tmp_path, monk
     real = gitops._git
 
     async def fake(root, *args, config=None, timeout=60, secret=None, check=True):
+        if args and args[0] == "ls-remote":
+            return 0, "", ""
         if args and args[0] == "push":
             calls.append({"args": args, "config": config, "secret": secret})
             return 0, "", "remote: ok ghp_SECRET\n"
@@ -157,7 +159,7 @@ async def _agent(root, **kw):
                                                 git=git, **kw)]
 
 
-async def test_agent_commits_and_push_always_needs_approval(tmp_path, monkeypatch):
+async def test_agent_commits_and_auto_push_needs_no_extra_approval(tmp_path, monkeypatch):
     (tmp_path / "a.py").write_text("x = 1\n")
     seen = []
     _script(monkeypatch, [[{"name": "git_commit", "args": {"message": "Добавил a.py"}}],
@@ -168,21 +170,25 @@ async def test_agent_commits_and_push_always_needs_approval(tmp_path, monkeypatc
         asked.append(pending["name"])
         return "reject"
 
+    async def fake_push(*args, **kwargs):
+        return {"branch": "main", "output": "published"}
+
+    monkeypatch.setattr(gitops, "push", fake_push)
     events = await _agent(tmp_path, approve=approve)  # режим «Авто»
     cards = [e["tool"] for e in events if "tool" in e]
     commit = next(c for c in cards if c["name"] == "git_commit" and c["status"] == "done")
     assert "Добавил a.py" in commit["output"]
-    assert asked == ["git_push"]  # коммит в «Авто» без вопросов, пуш — всегда с вопросом
-    assert cards[-1]["name"] == "git_push" and cards[-1]["status"] == "rejected"
+    assert asked == []
+    assert cards[-1]["name"] == "git_push" and cards[-1]["status"] == "done"
     assert (await gitops.log(str(tmp_path)))[0]["message"] == "Добавил a.py"
-    assert "git_push only" in seen[0]["conversation"][0]["content"]
+    assert "git_sync" in seen[0]["conversation"][0]["content"]
 
 
 async def test_git_tools_follow_modes_and_permissions(tmp_path, monkeypatch):
     seen = []
     _script(monkeypatch, [], seen)
     await _agent(tmp_path, mode="plan")
-    assert seen[-1]["tools"] & agent_git.GIT_TOOLS == {"git_status", "git_log", "git_diff"}
+    assert seen[-1]["tools"] & agent_git.GIT_TOOLS == {"git_status", "git_log", "git_diff", "git_conflicts"}
     await _agent(tmp_path, permissions=["files.read"])
     assert not seen[-1]["tools"] & agent_git.GIT_TOOLS
     await _agent(tmp_path, permissions=["files.read", "repo.git"])
@@ -227,6 +233,8 @@ async def test_http_upload_commit_and_server_push(client, monkeypatch):
     real = gitops._git
 
     async def fake(root, *args, **kwargs):
+        if args and args[0] == 'ls-remote':
+            return 0, '', ''
         if args and args[0] == 'push':
             calls.append((args, kwargs))
             return 0, 'ok', ''
@@ -238,3 +246,139 @@ async def test_http_upload_commit_and_server_push(client, monkeypatch):
     assert calls[0][1]['secret'] == 'test_TOKEN'
     assert list(calls[0][1]['config']) == ['http.https://github.com/.extraheader']
     assert (await client.get(f'/api/projects/{pid}/git')).json()['changes'] == []
+
+
+async def _diverged_repositories(tmp_path, monkeypatch, conflict=False):
+    bare, local, other = (tmp_path / n for n in ('origin.git', 'local', 'other'))
+    for directory in (bare, local, other):
+        directory.mkdir()
+    original = gitops._git
+
+    async def local_transport(root, *args, config=None, **kw):
+        # Only test fixtures permit file transport; production keeps it disabled.
+        return await original(root, *args, config={**(config or {}), 'protocol.file.allow': 'always'}, **kw)
+
+    monkeypatch.setattr(gitops, '_git', local_transport)
+    await gitops._git(str(bare), 'init', '--bare', '-q', '-b', 'main')
+    await gitops.init(str(local))
+    (local / 'app.txt').write_text('base\n')
+    await gitops.commit(str(local), 'base', 'test', 'test@example.com')
+    await gitops._git(str(local), 'remote', 'add', 'origin', str(bare))
+    await gitops.push(str(local), None)
+    await gitops._git(str(tmp_path), 'clone', '-q', str(bare), str(other))
+    (local / ('app.txt' if conflict else 'local.txt')).write_text('local work\n')
+    await gitops.commit(str(local), 'local work', 'test', 'test@example.com')
+    (other / ('app.txt' if conflict else 'remote.txt')).write_text('remote work\n')
+    await gitops.commit(str(other), 'remote work', 'test', 'test@example.com')
+    await gitops.push(str(other), None)
+    return local, bare
+
+
+async def test_push_automatically_merges_diverged_history_without_force(tmp_path, monkeypatch):
+    local, bare = await _diverged_repositories(tmp_path, monkeypatch)
+    local_head = (await gitops.log(str(local), 1))[0]['sha']
+    await gitops.push(str(local), None)
+    assert (local / 'local.txt').read_text() == 'local work\n'
+    assert (local / 'remote.txt').read_text() == 'remote work\n'
+    assert (await gitops._git(str(bare), 'show', 'main:local.txt'))[1] == 'local work\n'
+    assert (await gitops._git(str(bare), 'show', 'main:remote.txt'))[1] == 'remote work\n'
+    assert (await gitops._git(str(local), 'merge-base', '--is-ancestor', local_head, 'HEAD'))[0] == 0
+    backups = (await gitops._git(str(local), 'for-each-ref', '--format=%(refname)', 'refs/heads/layla/sync-backup/'))[1]
+    assert backups.strip()
+    assert not (await gitops.status(str(local)))['changes']
+
+
+async def test_conflict_versions_resolution_markers_hash_and_finish(tmp_path, monkeypatch):
+    from app.services import files
+    local, bare = await _diverged_repositories(tmp_path, monkeypatch, conflict=True)
+    result = await gitops.synchronize(str(local), None)
+    assert result['state'] == 'conflicts' and result['conflicts'] == ['app.txt']
+    versions = (await gitops.conflicts(str(local)))['conflicts'][0]
+    assert versions['base'] == 'base\n'
+    assert versions['ours'] == 'local work\n'
+    assert versions['theirs'] == 'remote work\n'
+    with pytest.raises(gitops.GitError, match='неразрешённые'):
+        await gitops.commit(str(local), 'bad', 'test', 'test@example.com')
+    current = files.read_file(local, 'app.txt')
+    with pytest.raises(gitops.GitError, match='маркеры'):
+        await gitops.resolve(str(local), 'app.txt', current['sha256'])
+    change = files.change_file(local, 'app.txt', 'local work\nremote work\n', current['sha256'])
+    with pytest.raises(gitops.GitError, match='SHA-256'):
+        await gitops.resolve(str(local), 'app.txt', current['sha256'])
+    assert (await gitops.resolve(str(local), 'app.txt', change['after_sha256']))['remaining'] == []
+    with pytest.raises(gitops.GitError, match='git_conflicts'):
+        await gitops.push(str(local), None)
+    await gitops.commit(str(local), 'Resolve conflict preserving both changes', 'test', 'test@example.com')
+    await gitops.push(str(local), None)
+    assert (await gitops._git(str(bare), 'show', 'main:app.txt'))[1] == 'local work\nremote work\n'
+    assert not (await gitops.status(str(local)))['merging']
+
+
+async def test_sync_refuses_uncommitted_changes_and_preserves_them(tmp_path, monkeypatch):
+    local, _ = await _diverged_repositories(tmp_path, monkeypatch)
+    (local / 'draft.txt').write_text('unsaved work\n')
+    before = (await gitops.log(str(local), 1))[0]['sha']
+    with pytest.raises(gitops.GitError, match='git_commit'):
+        await gitops.synchronize(str(local), None)
+    assert (local / 'draft.txt').read_text() == 'unsaved work\n'
+    assert (await gitops.log(str(local), 1))[0]['sha'] == before
+
+
+async def test_confirm_mode_still_asks_before_push(tmp_path, monkeypatch):
+    await gitops.init(str(tmp_path))
+    (tmp_path / 'app.txt').write_text('work')
+    await gitops.commit(str(tmp_path), 'work', 'test', 'test@example.com')
+    _script(monkeypatch, [[{'name': 'git_push', 'args': {}}]])
+    asked = []
+
+    async def approve(pending):
+        asked.append(pending['name'])
+        return 'reject'
+
+    events = await _agent(tmp_path, mode='confirm', approve=approve)
+    assert asked == ['git_push']
+    assert any(e.get('tool', {}).get('status') == 'rejected' for e in events)
+
+
+async def test_agent_repairs_conflict_commits_and_pushes_in_auto(tmp_path, monkeypatch):
+    import hashlib
+    from app.services import files
+    local, bare = await _diverged_repositories(tmp_path, monkeypatch, conflict=True)
+    merged = 'local work\nremote work\n'
+    calls = []
+    step = 0
+
+    async def stream(provider, key, model, conversation, available, **kw):
+        nonlocal step
+        sequence = ['git_sync', 'git_conflicts', 'read_file', 'write_file', 'git_resolve', 'git_commit', 'git_push']
+        if step >= len(sequence):
+            yield ('content', 'Объединено и отправлено')
+            return
+        name = sequence[step]
+        args = {}
+        if name == 'read_file':
+            args = {'path': 'app.txt'}
+        elif name == 'write_file':
+            args = {'path': 'app.txt', 'content': merged, 'expected_sha256': files.read_file(local, 'app.txt')['sha256']}
+        elif name == 'git_resolve':
+            args = {'path': 'app.txt', 'expected_sha256': hashlib.sha256(merged.encode()).hexdigest()}
+        elif name == 'git_commit':
+            args = {'message': 'Combine local and remote work'}
+        assert name in {t['function']['name'] for t in available}
+        calls.append(name)
+        step += 1
+        yield ('tool_calls', [{'id': f'call{step}', 'type': 'function', 'function': {'name': name, 'arguments': json.dumps(args)}}])
+
+    monkeypatch.setattr(project_agent.tool_chat, 'stream_turn', stream)
+    asked = []
+
+    async def approve(pending):
+        asked.append(pending['name'])
+        return 'reject'
+
+    events = await _agent(local, mode='auto', approve=approve)
+    failures = [e['tool'] for e in events if e.get('tool', {}).get('status') == 'error']
+    assert failures == []
+    assert asked == []
+    assert calls[-1] == 'git_push'
+    assert (await gitops._git(str(bare), 'show', 'main:app.txt'))[1] == merged

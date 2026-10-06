@@ -12,6 +12,7 @@ import base64
 import os
 import re
 import tempfile
+import uuid
 from urllib.parse import urlparse
 
 MAX_DIFF = 400_000
@@ -170,6 +171,8 @@ async def status(root: str) -> dict:
         "changes": changes,
         "remote": clean_url(remote) if remote else None,
         "last_commit": (await log(root, 1) or [None])[0],
+        "merging": os.path.exists(os.path.join(root, ".git", "MERGE_HEAD")),
+        "conflicts": [c["path"] for c in changes if c["code"] in {"DD", "AU", "UD", "UA", "DU", "AA", "UU"}],
     }
 
 
@@ -256,9 +259,12 @@ async def commit(root: str, message: str, author: str, email: str) -> dict:
         raise GitError("Нужно сообщение коммита")
     if not is_repo(root):
         await init(root)
+    state = await status(root)
+    if state.get("conflicts"):
+        raise GitError("Есть неразрешённые конфликты. Исправьте файлы и вызовите git_resolve перед git_commit.")
     await _git(root, "add", "-A")
     code, _, _ = await _git(root, "diff", "--cached", "--quiet", check=False)
-    if code == 0:
+    if code == 0 and not state.get("merging"):
         raise GitError("Нечего коммитить: изменений нет")
     identity = {"user.name": author or "Layla", "user.email": email or "layla@localhost"}
     await _git(root, "commit", "-q", "-m", message[:5000], config=identity)
@@ -282,7 +288,8 @@ async def _remote_url(root: str) -> str:
     return out.strip()
 
 
-async def push(root: str, token: str | None, username: str | None = None, branch: str | None = None) -> dict:
+async def push(root: str, token: str | None, username: str | None = None, branch: str | None = None,
+               author: str = "Layla", email: str = "layla@localhost") -> dict:
     _require(root)
     url = await _remote_url(root)
     state = await status(root)
@@ -291,20 +298,105 @@ async def push(root: str, token: str | None, username: str | None = None, branch
         raise GitError("Некорректное имя ветки")
     if not state.get("last_commit"):
         raise GitError("Сначала сделайте коммит")
+    synced = await synchronize(root, token, username, branch, author, email)
+    if synced["state"] in ("conflicts", "needs_commit"):
+        raise GitError("Ветки объединены с конфликтами. Вызовите git_conflicts, исправьте файлы, "
+                       "git_resolve для каждого файла, затем git_commit и повторите git_push.")
     config = _auth(url, username, token) if token else {}
     _, out, err = await _git(root, "push", "--porcelain", "-u", "origin", f"HEAD:refs/heads/{branch}",
                              config=config, timeout=180, secret=token)
     return {"branch": branch, "output": (out + err).strip()[-3000:], "status": await status(root)}
 
 
-async def pull(root: str, token: str | None, username: str | None = None) -> dict:
+async def synchronize(root: str, token: str | None, username: str | None = None,
+                       branch: str | None = None, author: str = "Layla", email: str = "layla@localhost") -> dict:
     _require(root)
     url = await _remote_url(root)
     config = _auth(url, username, token) if token else {}
     state = await status(root)
-    if state.get("upstream"):
-        args = ["pull", "--ff-only", "--no-rebase"]
-    else:
-        args = ["pull", "--ff-only", "--no-rebase", "origin", state.get("branch") or "main"]
-    _, out, err = await _git(root, *args, config=config, timeout=180, secret=token)
-    return {"output": (out + err).strip()[-3000:], "status": await status(root)}
+    if state.get("merging"):
+        return {"state": "conflicts" if state.get("conflicts") else "needs_commit",
+                "conflicts": state.get("conflicts", []), "status": state,
+                "output": "Завершите текущее слияние: git_conflicts → исправление файлов → git_resolve → git_commit."}
+    if any(os.path.exists(os.path.join(root, ".git", name)) for name in ("rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD")):
+        raise GitError("В проекте уже выполняется другая операция Git. Сначала завершите или отмените её.")
+    if state.get("changes"):
+        raise GitError("Сначала сохраните изменения коммитом git_commit, затем повторите git_sync или git_push.")
+    branch = branch or state.get("branch")
+    if not branch or not _BRANCH.fullmatch(branch):
+        raise GitError("Для синхронизации нужна именованная ветка")
+    _, refs, _ = await _git(root, "ls-remote", "--heads", "origin", f"refs/heads/{branch}",
+                           config=config, timeout=180, secret=token)
+    if not refs.strip():
+        return {"state": "new_branch", "output": "Удалённой ветки пока нет; можно выполнить Push.", "status": state}
+    await _git(root, "fetch", "--no-tags", "origin", f"refs/heads/{branch}",
+               config=config, timeout=180, secret=token)
+    if (await _git(root, "merge-base", "--is-ancestor", "FETCH_HEAD", "HEAD", check=False))[0] == 0:
+        return {"state": "synced", "conflicts": [], "output": "Удалённые изменения уже включены.",
+                "status": await status(root)}
+    backup = "layla/sync-backup/" + uuid.uuid4().hex
+    await _git(root, "branch", backup, "HEAD")
+    identity = {"user.name": author or "Layla", "user.email": email or "layla@localhost"}
+    code, out, err = await _git(root, "merge", "--no-edit", "--no-stat", "FETCH_HEAD",
+                               config=identity, check=False)
+    after = await status(root)
+    if code and not after.get("conflicts"):
+        raise GitError("Не удалось объединить ветки: " + (err or out).strip()[-600:])
+    return {"state": "conflicts" if after.get("conflicts") else "synced",
+            "conflicts": after.get("conflicts", []), "backup_branch": backup,
+            "output": (out + err).strip()[-3000:], "status": after}
+
+
+async def pull(root: str, token: str | None, username: str | None = None,
+               author: str = "Layla", email: str = "layla@localhost") -> dict:
+    return await synchronize(root, token, username, author=author, email=email)
+
+
+async def conflicts(root: str, path: str | None = None) -> dict:
+    state = await status(root)
+    items = []
+    paths = state.get("conflicts", [])
+    if path is not None:
+        if path not in paths:
+            raise GitError("Этот файл не является неразрешённым конфликтом")
+        paths = [path]
+    budget = 36000
+    truncated = False
+    for path in paths[:50]:
+        if budget <= 0:
+            truncated = True
+            break
+        versions = {}
+        for number, name in ((1, "base"), (2, "ours"), (3, "theirs")):
+            code, text, _ = await _git(root, "show", f":{number}:{path}", check=False)
+            shown = text[:min(12000, budget)]
+            versions[name] = shown if code == 0 else None
+            versions[name + "_truncated"] = code == 0 and len(text) > len(shown)
+            truncated = truncated or versions[name + "_truncated"]
+            budget -= len(shown)
+        items.append({"path": path, **versions})
+    return {"merging": state.get("merging", False), "conflicts": items,
+            "paths": paths, "truncated": truncated or len(paths) > 50}
+
+
+async def resolve(root: str, path: str, expected_sha256: str | None, delete: bool = False) -> dict:
+    from app.services import files
+    state = await status(root)
+    if path not in state.get("conflicts", []):
+        raise GitError("Этот файл не является неразрешённым конфликтом")
+    try:
+        target = files.safe_join(root, path)
+        if delete:
+            if target.exists():
+                raise GitError("Сначала явно удалите файл инструментом delete_file, затем git_resolve с delete=true.")
+        else:
+            current = files.read_file(root, path)
+            if not expected_sha256 or current["sha256"] != expected_sha256:
+                raise GitError("Прочитайте текущую версию файла и передайте её SHA-256.")
+            text = current["content"]
+            if re.search(r"^(?:<<<<<<< |>>>>>>> |\|\|\|\|\|\|\| |=======$)", text, re.M):
+                raise GitError("В файле остались маркеры конфликта. Сначала исправьте содержимое.")
+    except (ValueError, OSError) as exc:
+        raise GitError(str(exc)) from exc
+    await _git(root, "add", "--", path)
+    return {"resolved": path, "remaining": (await status(root)).get("conflicts", [])}
