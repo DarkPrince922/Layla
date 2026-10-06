@@ -22,6 +22,8 @@ BASE_URL = "https://cli-chat-proxy.grok.com/v1"
 CLIENT_ID = os.getenv("LAYLA_GROK_CLIENT_ID", "b1a00492-073a-47ea-816f-4c329264a828")
 SCOPES = "openid profile email offline_access grok-cli:access api:access"
 TOKEN_PREFIX = "grok-oauth:"
+# xAI compatibility version for the Responses adapter, independent of Layla release version.
+PROTOCOL_VERSION = "1.0.13"
 
 
 def chat_models(names):

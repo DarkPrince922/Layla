@@ -197,6 +197,8 @@ async def test_subscription_model_catalog(monkeypatch):
     def handle(request):
         assert str(request.url) == grok_oauth.BASE_URL + "/models"
         assert request.headers["x-xai-token-auth"] == "xai-grok-cli"
+        assert request.headers["x-grok-client-version"] == "1.0.13"
+        assert request.headers["x-grok-client-identifier"] == "layla"
         return httpx.Response(200, json={"data": [
             {"model": "grok-4.7", "id": "picker-alias", "context_window": 256000},
             {"model": "grok-hidden", "hidden": True},
@@ -222,6 +224,8 @@ async def test_responses_tools_are_atomic(monkeypatch, finish):
         assert str(request.url) == "https://cli-chat-proxy.grok.com/v1/responses"
         assert request.headers["authorization"] == "Bearer access"
         assert request.headers["x-xai-token-auth"] == "xai-grok-cli"
+        assert request.headers["x-grok-client-version"] == "1.0.13"
+        assert request.headers["x-grok-client-identifier"] == "layla"
         body = json.loads(request.content)
         assert body["tools"][0]["name"] == "lookup"
         assert body["input"][1]["type"] == "function_call_output"
@@ -241,3 +245,13 @@ async def test_responses_tools_are_atomic(monkeypatch, finish):
         with pytest.raises(OutputLimitError if finish == "response.incomplete" else ProviderError):
             await collect()
         assert all(kind != "tool_calls" for kind, _ in output)
+
+
+def test_grok_wire_version_is_separate_from_layla_release():
+    from app.services.provider_client import _headers
+    provider = Provider(name='Grok', base_url=grok_oauth.BASE_URL)
+    headers = _headers(provider, 'grok-oauth:access')
+    assert headers['x-grok-client-version'] == grok_oauth.PROTOCOL_VERSION
+    assert tuple(map(int, headers['x-grok-client-version'].split('.'))) >= (1, 0, 13)
+    assert headers['x-grok-client-identifier'] == 'layla'
+    assert 'x-grok-client-version' not in _headers(provider, 'ordinary-api-key')

@@ -187,3 +187,77 @@ def test_xml_doctype_rejected_as_xxe_guard():
 def test_parse_html_alias_still_works():
     # Старое имя функции сохранено для совместимости.
     assert acunetix.parse_html(_XML).declared == 2
+
+
+_AFFECTED_REPORT = """
+<html><head><style>.fake { color: red }</style></head><body>
+<h1>Acunetix Security Audit</h1>
+<h2>Total alerts found</h2><b>Critical</b><span>4</span>
+<table><tr><th>Severity</th><th>Affected items</th></tr><tr><td>High</td><td>3</td></tr></table>
+<p>Target: https://shop.example.com/</p>
+<h2>High</h2>
+<h3><span>SQL</span> Injection</h3>
+<h4>Severity: High</h4>
+<h4>Description</h4><p>A SQL error was observed. Confidence: 95%.</p>
+<h4>Affected items</h4><p>GET https://shop.example.com/a?id=1 Parameter: id</p>
+<p>GET https://shop.example.com/b?id=2 Parameter: id</p>
+<h4>References</h4><a href="https://docs.example.org/sql">Documentation</a>
+<h3>Cross-site Scripting</h3><span>Medium</span>
+<h4>Affected items</h4><p>POST https://shop.example.com/search Parameter: q</p>
+<h4>Attack details</h4><p>Status: Unconfirmed</p>
+<h4>Web references</h4><p>https://code.jquery.com/jquery.js</p>
+<h2>Informational</h2><h3>Server version disclosure</h3>
+<h4>Affected items</h4><p>/status</p>
+<script>const fake = 'Critical https://evil.example/';</script>
+</body></html>
+"""
+
+
+def test_affected_items_report_preserves_names_instances_and_ignores_summaries():
+    parsed = acunetix.parse_report(_AFFECTED_REPORT)
+    assert len(parsed.findings) == 4
+    assert [f["type"] for f in parsed.findings] == ["SQL Injection", "SQL Injection", "Cross-site Scripting", "Server version disclosure"]
+    assert [f["severity"] for f in parsed.findings] == [Severity.high, Severity.high, Severity.medium, Severity.info]
+    assert [f["url"] for f in parsed.findings] == ["https://shop.example.com/a?id=1", "https://shop.example.com/b?id=2", "https://shop.example.com/search", "https://shop.example.com/status"]
+    assert all(f["status"] is None for f in parsed.findings)
+    assert 'A SQL error was observed' in parsed.findings[0]['description']
+
+
+def test_vertical_alert_group_labels_and_nested_headings():
+    report = """<h1>Acunetix report</h1><p>https://shop.example.com/</p>
+    <table><tr><td>Alert group</td><td>Blind SQL Injection</td></tr>
+    <tr><td>Severity</td><td>High</td></tr></table>
+    <h4>Affected items</h4><p>/login?id=1</p><p>Parameter: id Method: POST</p>
+    <h4>References</h4><a href='https://elsewhere.example/reference'>Reference</a>"""
+    item = acunetix.parse_report(report).findings[0]
+    assert item['type'] == 'Blind SQL Injection'
+    assert item['url'] == 'https://shop.example.com/login?id=1'
+    assert item['method'] == 'POST'
+    assert item['param'] == 'id'
+
+
+def test_confidence_and_negative_status_are_not_confirmation():
+    for text in ('95%', 'Confidence: 100%', 'not confirmed', 'Unconfirmed', 'not verified'):
+        assert acunetix._status_from(text) is None
+    assert acunetix._status_from('Confirmed') == 'confirmed'
+    assert acunetix._status_from('Status: Verified') == 'confirmed'
+
+
+def test_summary_only_does_not_create_fake_critical_findings():
+    parsed = acunetix.parse_report('<h1>Acunetix</h1><h2>Total alerts found</h2>Critical 4<h2>High</h2><h3>Affected items</h3>https://example.com')
+    assert not parsed.findings
+
+
+def test_xml_keeps_technical_evidence():
+    parsed = acunetix.parse_report(_XML)
+    assert 'GET /product.php?id=1 HTTP/1.1' in parsed.findings[0]['description']
+    assert 'HTTP/1.1 500' in parsed.findings[0]['description']
+
+
+
+def test_each_affected_item_retains_own_method_and_parameter():
+    report = """<p class='MsoHeading3'><span>SQL Injection</span></p><p>High</p>
+    <h4>Affected items</h4><p>GET https://shop.example.com/a Parameter: id</p>
+    <p>POST https://shop.example.com/b Parameter: sort</p>"""
+    items = acunetix.parse_report(report).findings
+    assert [(i['method'], i['param']) for i in items] == [('GET', 'id'), ('POST', 'sort')]

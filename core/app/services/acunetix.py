@@ -139,10 +139,11 @@ def _col(headers: list[str], *names: str) -> int | None:
 
 
 def _status_from(text: str) -> str | None:
-    if _CONFIRMED_RE.search(text or ""):
-        return "confirmed"
-    m = re.search(r"(\d{1,3})\s*%", text or "")
-    if m and int(m.group(1)) >= 90:
+    text = (text or "").strip()
+    if re.search(r"unconfirmed|unverified|not (?:confirmed|verified)|не подтвержд", text, re.I):
+        return None
+    if re.fullmatch(r"confirmed|verified|подтверждено|подтвержден", text, re.I) or re.search(
+            r"^(?:confirmed|verified) via\b|(?:status|state|статус)\s*:\s*(?:confirmed|verified|подтвержден)", text, re.I):
         return "confirmed"
     return None
 
@@ -160,6 +161,8 @@ def _parse_tables(content: str) -> list[dict]:
         if sev_i is None or url_i is None:
             continue
         type_i = _col(headers, "type", "alert", "name", "vulnerabilit", "threat", "title")
+        if type_i is None:
+            continue  # severity/affected-count summary tables are not findings
         param_i = _col(headers, "parameter", "param", "variable", "input")
         method_i = _col(headers, "method")
         status_i = _col(headers, "status", "state", "confidence", "confirm")
@@ -171,7 +174,8 @@ def _parse_tables(content: str) -> list[dict]:
                 return row[i] if i is not None and i < len(row) else ""
 
             url = (cell(url_i) or "").strip() or None
-            if is_reference_host(url):
+            name = cell(type_i).strip()
+            if not _is_finding_title(name) or is_reference_host(url) or (url and not _URL_RE.fullmatch(url)):
                 continue
             findings.append(
                 {
@@ -190,109 +194,202 @@ def _parse_tables(content: str) -> list[dict]:
 # Стратегия 2: DOM-секции (заголовок уязвимости + важность + затронутые URL)
 # --------------------------------------------------------------------------- #
 class _DomExtractor(HTMLParser):
-    """Линейный поток событий: заголовки, метки важности, текст, ссылки."""
-
+    """Ordered semantic headings/text; nested markup must not end a heading early."""
     _HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
-    _NAMEY = ("title", "name", "vuln", "alert", "heading", "issue")
+    _VOID = {"br", "hr", "img", "input", "meta", "link", "wbr", "source", "area", "base", "embed", "param", "track", "col"}
 
-    def __init__(self) -> None:
+    def __init__(self):
         super().__init__()
-        self.events: list[tuple[str, str]] = []
-        self._cap_heading = False
-        self._buf: list[str] = []
-        self._href: str | None = None
+        self.events = []
+        self.stack = []
+        self.captures = []
+        self.ignored = 0
 
     def handle_starttag(self, tag, attrs):
         ad = dict(attrs)
-        cls = (ad.get("class") or "").lower()
-        if tag in self._HEADING_TAGS or (
-            tag in ("span", "div", "a", "strong", "td") and any(n in cls for n in self._NAMEY)
-        ):
-            self._cap_heading = True
-            self._buf = []
-        if tag == "a" and ad.get("href"):
-            href = ad["href"]
-            if href.startswith("http"):
-                self.events.append(("url", href))
+        if tag in ("script", "style", "head"):
+            self.ignored += 1
+        if tag not in self._VOID:
+            self.stack.append(tag)
+        if self.ignored:
+            return
+        cls = ad.get("class") or ""
+        heading = tag in self._HEADING_TAGS or bool(re.search(
+            r"(?:^|[ _-])(?:title|(?:mso)?heading[1-6]?|(?:vuln|alert|issue)[_-]?name)(?:$|[ _-])", cls, re.I))
+        if heading:
+            index = len(self.events)
+            self.events.append(("heading", ""))
+            self.captures.append((len(self.stack), index, []))
+        if tag == "a" and ad.get("href", "").startswith(("http://", "https://")):
+            self.events.append(("url", ad["href"]))
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+        if tag not in self._VOID:
+            self.handle_endtag(tag)
 
     def handle_endtag(self, tag):
-        if self._cap_heading and (
-            tag in self._HEADING_TAGS or tag in ("span", "div", "a", "strong", "td")
-        ):
-            text = " ".join("".join(self._buf).split())
-            if text:
-                self.events.append(("heading", text))
-            self._cap_heading = False
-            self._buf = []
+        if self.stack and tag in self.stack:
+            depth = len(self.stack) - self.stack[::-1].index(tag)
+            for cap in list(self.captures):
+                if cap[0] >= depth:
+                    value = " ".join("".join(cap[2]).split())
+                    match = re.fullmatch(r"severity\s*:?\s*(critical|high|medium|low|informational|info)", value, re.I)
+                    kind = "sev" if match else ("groupsev" if _SEV_WORD_RE.fullmatch(value) else "heading")
+                    if match:
+                        value = match.group(1)
+                    self.events[cap[1]] = (kind, value)
+                    self.captures.remove(cap)
+            self.stack = self.stack[:depth - 1]
+        if tag in ("script", "style", "head") and self.ignored:
+            self.ignored -= 1
 
     def handle_data(self, data):
-        if self._cap_heading:
-            self._buf.append(data)
-        chunk = data.strip()
-        if not chunk:
+        if self.ignored:
             return
-        if _SEV_WORD_RE.match(chunk):
-            self.events.append(("sev", chunk))
+        for depth, index, buf in self.captures:
+            buf.append(data)
+        if self.captures:
+            return
+        value = " ".join(data.split())
+        if not value:
+            return
+        match = re.fullmatch(r"(?:severity\s*:?\s*)?(critical|high|medium|low|informational|info)", value, re.I)
+        if match:
+            self.events.append(("sev", match.group(1)))
         else:
-            self.events.append(("text", chunk))
-            for u in _URL_RE.findall(chunk):
-                self.events.append(("url", u))
+            self.events.append(("text", value))
+            self.events.extend(("url", url) for url in _URL_RE.findall(value))
 
 
-def _parse_sections(content: str) -> list[dict]:
+_STRUCTURAL = {
+    "affected items", "affected item", "affected urls", "affected url", "affected pages",
+    "total alerts found", "alert group", "alert details", "vulnerability details", "vulnerabilities",
+    "severity", "risk", "confidence", "status", "description", "impact", "recommendation",
+    "recommendations", "remediation", "references", "web references", "details", "attack details",
+    "technical details", "request", "request headers", "response", "response headers",
+    "summary", "executive summary", "scan summary", "scan details", "scan information", "scan results",
+    "target", "target url", "start url", "scan url", "url", "location", "affects", "parameter", "method", "cvss", "cvss score", "cwe", "cve",
+    "high", "medium", "low", "critical", "informational", "info",
+}
+_AFFECTED = {"affected items", "affected item", "affected urls", "affected url", "affected pages"}
+_REFERENCE_LABELS = {"references", "web references"}
+
+
+def _label(value):
+    return re.sub(r"\s+", " ", value).strip().rstrip(":").lower()
+
+
+def _is_finding_title(value):
+    label = _label(value)
+    return bool(value and len(value) <= 500 and label not in _STRUCTURAL
+                and not re.match(r"^(?:acunetix|scan (?:report|summary|details)|total alerts|affected items|executive summary)\b", label)
+                and not value.isdigit() and not _URL_RE.fullmatch(value))
+
+
+def _parse_sections(content):
     ext = _DomExtractor()
     ext.feed(content)
-    ev = ext.events
+    findings, current = [], None
+    group_severity, pending, base_url = None, None, None
+    affected, references = False, False
 
-    findings: list[dict] = []
-    last_heading = "Unknown"
-    i = 0
-    while i < len(ev):
-        kind, val = ev[i]
-        if kind == "heading":
-            last_heading = val
+    def finish():
+        if not current or current["severity"] is None:
+            return
+        # Summary counts are not instances; real detail sections can lack a URL.
+        if not current["urls"] and not current["details"]:
+            return
+        blob = "\n".join(current["text"])
+        pm, mm = _PARAM_RE.search(blob), _METHOD_RE.search(blob)
+        for item in current["urls"] or [{"url": None}]:
+            findings.append({"type": current["type"], "severity": current["severity"], "url": item["url"],
+                "param": item.get("param") or (pm.group(1) if pm else None),
+                "method": item.get("method") or (mm.group(1) if mm else None),
+                "status": _status_from(blob), "description": blob[:20000] or None})
+
+    def title(value):
+        nonlocal current, affected, references
+        if not _is_finding_title(value):
+            return
+        finish()
+        current = {"type": value, "severity": group_severity, "urls": [], "text": [], "details": False}
+        affected, references = False, False
+
+    def target(value):
+        nonlocal base_url
+        value = value.strip().rstrip(".,;")
+        if not current:
+            if not base_url and not is_reference_host(value):
+                base_url = value
+            return
+        if references or is_reference_host(value):
+            return
+        # Explicit details/description links are evidence, not affected URLs.
+        if not affected and current["details"]:
+            return
+        context = current["text"][-1] if current["text"] else ""
+        pm, mm = _PARAM_RE.search(context), _METHOD_RE.search(context)
+        param, method = pm.group(1) if pm else None, mm.group(1) if mm else None
+        match = next((item for item in current["urls"] if item["url"] == value
+            and (not param or not item.get("param") or item["param"] == param)), None)
+        if match is None:
+            current["urls"].append({"url": value, "param": param, "method": method})
+        else:
+            match["param"] = param or match.get("param")
+            match["method"] = method or match.get("method")
+
+    for kind, value in ext.events:
+        label = _label(value)
+        if kind == "groupsev":
+            if current and not current["urls"] and not current["details"]:
+                current["severity"] = normalize_severity(value)
+            else:
+                finish()
+                current = None
+            group_severity = normalize_severity(value)
+            pending = None
         elif kind == "sev":
-            # Собрать контекст до следующей метки важности / нового заголовка.
-            j = i + 1
-            url = None
-            param = None
-            method = None
-            ctx: list[str] = []
-            heading = last_heading
-            while j < len(ev) and ev[j][0] not in ("sev",):
-                k2, v2 = ev[j]
-                if k2 == "heading":
-                    # заголовок после severity часто и есть имя уязвимости
-                    if heading == "Unknown" or heading.lower() in ("high", "medium", "low", "critical"):
-                        heading = v2
-                    else:
-                        break
-                elif k2 == "url" and not is_reference_host(v2):
-                    url = url or v2
-                elif k2 == "text":
-                    ctx.append(v2)
-                j += 1
-            blob = " ".join(ctx)
-            pm = _PARAM_RE.search(blob)
-            if pm:
-                param = pm.group(1)
-            mm = _METHOD_RE.search(blob)
-            if mm:
-                method = mm.group(1)
-            findings.append(
-                {
-                    "severity": normalize_severity(val),
-                    "type": (heading or "Unknown").strip() or "Unknown",
-                    "url": url,
-                    "param": param,
-                    "method": method,
-                    "status": _status_from(blob),
-                }
-            )
-            i = j - 1
-        i += 1
-    # Отбросить пустые (без типа и без url) шумовые записи.
-    return [f for f in findings if (f["type"] and f["type"] != "Unknown") or f["url"]]
+            if current:
+                current["severity"] = normalize_severity(value)
+        elif kind in ("heading", "text"):
+            if label in _STRUCTURAL:
+                if label == "alert group":
+                    pending = "title"
+                elif label in _AFFECTED:
+                    affected, references = True, False
+                elif label in _REFERENCE_LABELS:
+                    affected, references = False, True
+                elif label in ("description", "impact", "recommendation", "recommendations", "remediation", "details", "attack details", "technical details", "request", "request headers", "response", "response headers"):
+                    affected, references = False, False
+                    if current:
+                        current["details"] = True
+                elif label in ("summary", "executive summary", "scan summary", "scan information", "scan results", "total alerts found"):
+                    finish()
+                    current = None
+                    group_severity = None
+                continue
+            if pending == "title":
+                title(value)
+                pending = None
+            elif kind == "heading":
+                title(value)
+            elif current:
+                current["text"].append(value)
+                if affected and current["urls"] and not _URL_RE.search(value):
+                    pm, mm = _PARAM_RE.search(value), _METHOD_RE.search(value)
+                    if pm:
+                        current["urls"][-1]["param"] = pm.group(1)
+                    if mm:
+                        current["urls"][-1]["method"] = mm.group(1)
+                if re.match(r"^(?:affected|affects|url|location)\s*:", value, re.I):
+                    affected, references = True, False
+                if affected and base_url and value.startswith("/") and not value.startswith("//"):
+                    target(urljoin(base_url, value))
+        elif kind == "url":
+            target(value)
+    finish()
+    return findings
 
 
 # --------------------------------------------------------------------------- #
@@ -432,7 +529,8 @@ def _parse_acunetix_xml(content: str) -> ParsedReport | None:
                 "url": url,
                 "param": param,
                 "method": method,
-                "status": _status_from(blob),
+                "status": _status_from(_findtext(item, "Status") or blob),
+                "description": "\n\n".join(filter(None, [blob, request, _findtext(item, "TechnicalDetails/Response")]))[:20000] or None,
             }
         )
     return ParsedReport(findings=findings, declared=len(findings))
