@@ -131,3 +131,50 @@ async def test_import_bad_url_rejected(client):
     )
     r = await client.post("/api/projects/import", json={"repo_url": "file:///etc/passwd"})
     assert r.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_http_upload_binary_replace_conflict_and_archive(client):
+    import hashlib
+    import io
+    import zipfile
+    await client.post('/api/auth/register', json={'email': 'upload@example.com', 'password': 'hunter2hunter2'})
+    project = (await client.post('/api/projects', json={'name': 'Upload'})).json()
+    url = f"/api/projects/{project['id']}/upload?path=assets/icon.bin"
+    assert (await client.get(url)).json()['sha256'] is None
+    data = b'\x00\xff\x89image'
+    result = await client.put(url, content=data, headers={'Content-Type': 'application/octet-stream'})
+    assert result.status_code == 200
+    sha = result.json()['after_sha256']
+    assert sha == hashlib.sha256(data).hexdigest()
+    assert (await client.get(url)).json()['sha256'] == sha
+    assert (await client.put(url, content=b'overwrite')).status_code == 409
+    edited = await client.put(url + '&expected_sha256=' + sha, content=b'\x00new')
+    assert edited.status_code == 200 and edited.json()['operation'] == 'edit'
+    assert (await client.put(url + '&expected_sha256=' + sha, content=b'stale')).status_code == 409
+    archive = await client.get(f"/api/projects/{project['id']}/archive")
+    with zipfile.ZipFile(io.BytesIO(archive.content)) as z:
+        assert z.read('assets/icon.bin') == b'\x00new'
+
+
+@pytest.mark.asyncio
+async def test_upload_limits_paths_symlinks_and_owner(client, monkeypatch, tmp_path):
+    from pathlib import Path
+    await client.post('/api/auth/register', json={'email': 'up-owner@example.com', 'password': 'hunter2hunter2'})
+    project = (await client.post('/api/projects', json={'name': 'Upload'})).json()
+    prefix = f"/api/projects/{project['id']}/upload?path="
+    for path in ('../outside', '/absolute', '.git/config'):
+        assert (await client.put(prefix + path, content=b'data')).status_code == 400
+    outside = tmp_path / 'outside.bin'
+    outside.write_bytes(b'keep')
+    (Path(project['path']) / 'link').symlink_to(outside)
+    assert (await client.put(prefix + 'link', content=b'bad')).status_code == 400
+    assert outside.read_bytes() == b'keep'
+    monkeypatch.setattr(files, 'MAX_UPLOAD_BYTES', 3)
+    assert (await client.put(prefix + 'large', content=b'1234')).status_code == 413
+    assert not (Path(project['path']) / 'large').exists()
+    await client.post('/api/auth/logout')
+    assert (await client.put(prefix + 'no-auth', content=b'x')).status_code == 401
+    await client.post('/api/auth/register', json={'email': 'up-other@example.com', 'password': 'hunter2hunter2'})
+    assert (await client.put(prefix + 'foreign', content=b'x')).status_code == 404
+    assert (await client.get(prefix + 'foreign')).status_code == 404

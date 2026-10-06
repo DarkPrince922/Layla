@@ -7,7 +7,7 @@ from pathlib import Path
 from urllib.parse import quote
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -244,6 +244,39 @@ async def delete_project_file(
         target=project.id,
         meta={"path": change["path"]},
     )
+    await session.commit()
+    sandbox.preview_touch(user.id, project.id)
+    return change
+
+
+@router.get("/{project_id}/upload")
+async def project_upload_info(project_id: str, path: str = Query(..., min_length=1, max_length=4096),
+                              user: User = Depends(get_current_user),
+                              session: AsyncSession = Depends(get_session)) -> dict:
+    project = await _owned_project(session, user, project_id)
+    with file_errors():
+        return await run_in_threadpool(files.upload_info, _project_root(project), path)
+
+
+@router.put("/{project_id}/upload", response_model=FileChange)
+async def upload_project_file(project_id: str, request: Request,
+                              path: str = Query(..., min_length=1, max_length=4096),
+                              expected_sha256: str | None = Query(default=None, pattern=r"^[a-f0-9]{64}$"),
+                              user: User = Depends(get_current_user),
+                              session: AsyncSession = Depends(get_session)) -> dict:
+    project = await _owned_project(session, user, project_id)
+    with file_errors():
+        files.safe_join(_project_root(project), path)
+    data = bytearray()
+    async for chunk in request.stream():
+        if len(data) + len(chunk) > files.MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="Файл превышает допустимый размер (10 МБ)")
+        data.extend(chunk)
+    with file_errors():
+        change = await run_in_threadpool(files.change_file, _project_root(project), path,
+                                        bytes(data), expected_sha256)
+    await audit.record(session, actor=user.id, action="project.file.upload", target=project.id,
+                       meta={"path": change["path"], "size": len(data)})
     await session.commit()
     sandbox.preview_touch(user.id, project.id)
     return change

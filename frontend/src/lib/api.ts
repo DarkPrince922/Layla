@@ -43,6 +43,8 @@ export const api = {
     request<T>(p, { method: "PATCH", body: body ? JSON.stringify(body) : undefined }),
   del: <T>(p: string, body?: unknown) =>
     request<T>(p, { method: "DELETE", body: body ? JSON.stringify(body) : undefined }),
+  upload: <T>(p: string, file: File) =>
+    request<T>(p, { method: "PUT", headers: { "Content-Type": "application/octet-stream" }, body: file }),
 };
 
 // ---- OSINT / intelligence (M3) ----
