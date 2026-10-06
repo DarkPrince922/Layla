@@ -184,14 +184,14 @@ async def resolve_provider(
 
 def _headers(provider: Provider, key: str | None) -> dict[str, str]:
     h = {"Content-Type": "application/json"}
-    from app.services.grok_oauth import TOKEN_PREFIX, wire_credentials
+    from app.services.grok_oauth import PROTOCOL_VERSION, TOKEN_PREFIX, wire_credentials
     if key and key.startswith(TOKEN_PREFIX):
         data = wire_credentials(key)
         h["Authorization"] = "Bearer " + data["access_token"]
         h["X-XAI-Token-Auth"] = "xai-grok-cli"
         h["x-authenticateresponse"] = "authenticate-response"
         h["x-grok-client-identifier"] = "layla"
-        h["x-grok-client-version"] = "0.1.0"
+        h["x-grok-client-version"] = PROTOCOL_VERSION
         if data.get("user_id"):
             h["x-userid"] = data["user_id"]
         return h
