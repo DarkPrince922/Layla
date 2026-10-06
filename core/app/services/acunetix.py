@@ -216,7 +216,7 @@ class _DomExtractor(HTMLParser):
         cls = ad.get("class") or ""
         heading = tag in self._HEADING_TAGS or bool(re.search(
             r"(?:^|[ _-])(?:title|(?:mso)?heading[1-6]?|(?:vuln|alert|issue)[_-]?name)(?:$|[ _-])", cls, re.I))
-        if heading:
+        if heading and not self.captures:
             index = len(self.events)
             self.events.append(("heading", ""))
             self.captures.append((len(self.stack), index, []))

@@ -261,3 +261,10 @@ def test_each_affected_item_retains_own_method_and_parameter():
     <p>POST https://shop.example.com/b Parameter: sort</p>"""
     items = acunetix.parse_report(report).findings
     assert [(i['method'], i['param']) for i in items] == [('GET', 'id'), ('POST', 'sort')]
+
+
+
+def test_nested_named_span_does_not_replace_outer_alert_title():
+    report = """<h3>SQL <span class='alert-name'>Injection</span> (error based)</h3>
+    <span>High</span><h4>Affected items</h4><p>https://shop.example.com/p</p>"""
+    assert acunetix.parse_report(report).findings[0]['type'] == 'SQL Injection (error based)'
