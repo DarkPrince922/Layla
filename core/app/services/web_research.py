@@ -18,6 +18,10 @@ from app.services.scope import check_target
 
 CVE_RE = re.compile(r'\bCVE-\d{4}-\d{4,19}\b', re.IGNORECASE)
 MAX_BYTES = 1_000_000
+# CISA Known Exploited Vulnerabilities: авторитетный keyless-фид активно
+# эксплуатируемых CVE, обновляется быстрее оценки NVD (в нём есть wp2shell и т.п.).
+KEV_URL = 'https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json'
+KEV_MAX_BYTES = 6_000_000
 _cache: dict[str, tuple[float, dict]] = {}
 _nvd_lock = asyncio.Lock()
 _nvd_next = 0.0
@@ -56,7 +60,7 @@ async def public_addresses(host: str) -> list[str]:
     return addresses
 
 
-async def fetch(url: str, blocked: list[str] = ()) -> dict:
+async def fetch(url: str, blocked: list[str] = (), *, max_bytes: int = MAX_BYTES) -> dict:
     """Pin the validated IP in the URL; retain original Host and TLS SNI/cert checks."""
     async with asyncio.timeout(30), httpx.AsyncClient(
             trust_env=False, follow_redirects=False, timeout=httpx.Timeout(12, connect=8)) as client:
@@ -83,20 +87,22 @@ async def fetch(url: str, blocked: list[str] = ()) -> dict:
                 content = bytearray()
                 async for chunk in response.aiter_bytes():
                     content.extend(chunk)
-                    if len(content) > MAX_BYTES:
-                        raise ValueError('Ответ источника превышает 1 МБ')
+                    if len(content) > max_bytes:
+                        raise ValueError(f'Ответ источника превышает {max_bytes // 1_000_000 or 1} МБ')
                 return {'url': str(target), 'http_status': response.status_code,
                         'content_type': response.headers.get('content-type', ''),
                         'text': content.decode('utf-8', errors='replace'), 'checked_at': now()}
     raise ValueError('Слишком много перенаправлений источника')
 
 
-async def source(url: str, blocked: list[str] = (), *, nvd: bool = False) -> dict:
+async def source(url: str, blocked: list[str] = (), *, nvd: bool = False, max_bytes: int = MAX_BYTES) -> dict:
     """Cache successes briefly, keep network failures distinct from a missing record."""
     validate_url(url, blocked)  # Cache must not bypass a changed engagement scope.
     cached = _cache.get(url)
     if cached and cached[0] > time.monotonic():
         return dict(cached[1], cached=True)
+    # Forward max_bytes only when raised, so the default fetch(url, blocked) contract is untouched.
+    extra = {} if max_bytes == MAX_BYTES else {'max_bytes': max_bytes}
     try:
         if nvd:
             global _nvd_next
@@ -106,9 +112,9 @@ async def source(url: str, blocked: list[str] = (), *, nvd: bool = False) -> dic
                     return dict(cached[1], cached=True)
                 await asyncio.sleep(max(0, _nvd_next - time.monotonic()))
                 _nvd_next = time.monotonic() + 6.1
-                result = await fetch(url, blocked)
+                result = await fetch(url, blocked, **extra)
         else:
-            result = await fetch(url, blocked)
+            result = await fetch(url, blocked, **extra)
     except (httpx.HTTPError, OSError, TimeoutError, ValueError) as exc:
         return {'url': url, 'status': 'unavailable', 'checked_at': now(),
                 'error': f'{type(exc).__name__}: источник недоступен; существование CVE не установлено'}
@@ -169,6 +175,31 @@ async def lookup_cve(cve_id: str, blocked: list[str] = ()) -> dict:
             'note': 'Не удалось подтвердить публичную запись. Это НЕ означает, что CVE не существует: возможны резервирование, задержка публикации/индексации, ошибка ID или недоступность источника. Проверь vendor advisory и другие источники.'}
 
 
+async def cisa_kev(query: str, blocked: list[str] = ()) -> list[dict]:
+    """Активно эксплуатируемые CVE из CISA KEV по продукту (keyless, часто свежее NVD).
+    Фильтр по буквенным словам запроса (версии игнорируются — их в KEV нет)."""
+    terms = [t for t in query.lower().split() if any(ch.isalpha() for ch in t)]
+    if not terms:
+        return []
+    resp = await source(KEV_URL, blocked, max_bytes=KEV_MAX_BYTES)
+    data = _json(resp)
+    if not isinstance(data, dict):
+        return []
+    out = []
+    for v in data.get('vulnerabilities', []):
+        if not isinstance(v, dict):
+            continue
+        hay = ' '.join(str(v.get(k, '')) for k in
+                       ('vendorProject', 'product', 'vulnerabilityName', 'shortDescription')).lower()
+        if all(t in hay for t in terms):
+            out.append({'cve_id': v.get('cveID'), 'vendor': v.get('vendorProject'), 'product': v.get('product'),
+                        'name': v.get('vulnerabilityName'), 'date_added': v.get('dateAdded'),
+                        'required_action': v.get('requiredAction')})
+            if len(out) >= 15:
+                break
+    return out
+
+
 async def search_cves(query: str, blocked: list[str] = ()) -> dict:
     query = query.strip()
     if not query or len(query) > 300:
@@ -176,15 +207,25 @@ async def search_cves(query: str, blocked: list[str] = ()) -> dict:
     response = await source('https://services.nvd.nist.gov/rest/json/cves/2.0?' + urlencode({
         'keywordSearch': query, 'resultsPerPage': 10}), blocked, nvd=True)
     data = _json(response)
+    try:
+        kev = await cisa_kev(query, blocked)  # best-effort: недоступность KEV не ломает поиск
+    except (ValueError, OSError):
+        kev = []
     if data is None:
-        return {'status': 'unavailable', 'source_url': response['url'], 'checked_at': response['checked_at'],
-                'note': 'NVD не вернул корректные данные. Отсутствие CVE не установлено.'}
-    return {'status': 'ok', 'source_url': response['url'], 'checked_at': response['checked_at'],
-            'total_results': data.get('totalResults'), 'results': [{
-                'cve_id': c['id'], 'published': c.get('published'), 'status': c.get('vulnStatus'),
-                'descriptions': _text_entries(c.get('descriptions')), 'references': c.get('references', [])[:5]
-            } for row in data.get('vulnerabilities', [])[:10] if isinstance(row, dict)
-                and isinstance(c := row.get('cve'), dict) and c.get('id')]}
+        result = {'status': 'unavailable', 'source_url': response['url'], 'checked_at': response['checked_at'],
+                  'note': 'NVD не вернул корректные данные. Отсутствие CVE не установлено.'}
+    else:
+        result = {'status': 'ok', 'source_url': response['url'], 'checked_at': response['checked_at'],
+                  'total_results': data.get('totalResults'), 'results': [{
+                      'cve_id': c['id'], 'published': c.get('published'), 'status': c.get('vulnStatus'),
+                      'descriptions': _text_entries(c.get('descriptions')), 'references': c.get('references', [])[:5]
+                  } for row in data.get('vulnerabilities', [])[:10] if isinstance(row, dict)
+                      and isinstance(c := row.get('cve'), dict) and c.get('id')]}
+    if kev:
+        result['cisa_kev'] = kev
+        result['note'] = ('CISA KEV: перечисленные CVE активно эксплуатируются (часто появляются там раньше оценки '
+                          'NVD). Сопоставь затронутые версии по advisory и проверь каждую через lookup_cve по ID.')
+    return result
 
 
 async def search_web(query: str, blocked: list[str] = ()) -> dict:

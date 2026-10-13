@@ -214,7 +214,7 @@ async def test_real_tls_pinned_connection_verifies_original_hostname(monkeypatch
 
 @pytest.mark.asyncio
 async def test_search_and_page_text_keep_source_and_strip_scripts(monkeypatch):
-    async def fetch(url, blocked=()):
+    async def fetch(url, blocked=(), *, max_bytes=web_research.MAX_BYTES):
         if 'bing.com' in url:
             return dict(response(url), text='<rss><channel><item><title>Vendor advisory</title><link>https://vendor.example/security</link><description>Fixture</description></item></channel></rss>')
         if 'nvd.nist.gov' in url:
@@ -241,6 +241,52 @@ async def test_search_web_routes_cve_queries_to_structured_sources(monkeypatch):
     assert called['cve'] == 'CVE-2026-60137'
     assert res['status'] == 'ok' and res['cve_id'] == 'CVE-2026-60137'
     assert 'Wordfence' in res['note']
+
+
+def kev_feed():
+    return {'title': 'CISA Catalog', 'vulnerabilities': [
+        {'cveID': 'CVE-2026-63030', 'vendorProject': 'WordPress', 'product': 'wp2shell',
+         'vulnerabilityName': 'wp2shell Route Confusion RCE', 'dateAdded': '2026-10-01',
+         'shortDescription': 'Unauthenticated remote code execution.', 'requiredAction': 'Patch.'},
+        {'cveID': 'CVE-2025-0001', 'vendorProject': 'Acme', 'product': 'Widget',
+         'vulnerabilityName': 'Acme Widget bug', 'dateAdded': '2025-01-01',
+         'shortDescription': 'Unrelated product.', 'requiredAction': 'Patch.'}]}
+
+
+@pytest.mark.asyncio
+async def test_search_cves_folds_cisa_kev_and_ignores_version_tokens(monkeypatch):
+    async def fetch(url, blocked=(), *, max_bytes=web_research.MAX_BYTES):
+        if 'cisa.gov' in url:
+            assert max_bytes > web_research.MAX_BYTES  # KEV feed needs the raised cap.
+            return response(url, kev_feed())
+        return response(url, {'totalResults': 0, 'vulnerabilities': []})
+    monkeypatch.setattr(web_research, 'fetch', fetch)
+    # The version token "6.8" is dropped; only the alpha term "wp2shell" drives the KEV match.
+    result = await web_research.search_cves('wp2shell 6.8')
+    assert result['status'] == 'ok'
+    assert [v['cve_id'] for v in result['cisa_kev']] == ['CVE-2026-63030']
+    assert 'CISA KEV' in result['note'] and 'lookup_cve' in result['note']
+
+
+@pytest.mark.asyncio
+async def test_search_cves_survives_unavailable_kev(monkeypatch):
+    async def fetch(url, blocked=(), *, max_bytes=web_research.MAX_BYTES):
+        if 'cisa.gov' in url:
+            return response(url, code=503)  # KEV host unreachable / blocked egress.
+        return response(url, {'totalResults': 1, 'vulnerabilities': [{'cve': {'id': TEST_CVE}}]})
+    monkeypatch.setattr(web_research, 'fetch', fetch)
+    result = await web_research.search_cves('wordpress')
+    assert result['status'] == 'ok'
+    assert result['results'][0]['cve_id'] == TEST_CVE
+    assert 'cisa_kev' not in result
+
+
+@pytest.mark.asyncio
+async def test_cisa_kev_requires_alpha_terms(monkeypatch):
+    async def fetch(url, blocked=(), *, max_bytes=web_research.MAX_BYTES):
+        return response(url, kev_feed())
+    monkeypatch.setattr(web_research, 'fetch', fetch)
+    assert await web_research.cisa_kev('6.8.1') == []  # No alpha term → no feed scan.
 
 
 @pytest.mark.asyncio
