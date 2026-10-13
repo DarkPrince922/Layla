@@ -19,6 +19,23 @@ def test_command_timeout_default_is_one_hour():
     assert inspect.signature(ssh_exec.run).parameters['timeout'].default == 3600
 
 
+async def test_attack_box_runner_never_returns_empty_output(monkeypatch):
+    # Успешная команда без stdout/stderr не должна прийти агенту пустой строкой.
+    from types import SimpleNamespace
+
+    from app.api import agent as agentmod
+
+    async def fake_run(cfg, command, timeout=agentmod.ssh_exec.COMMAND_TIMEOUT):
+        return agentmod.ssh_exec.SSHResult(exit_code=0, output='   \n', truncated=False, host_key='k')
+
+    monkeypatch.setattr(agentmod.ssh_exec, 'run', fake_run)
+    server = SimpleNamespace(host='h', port=22, user='u', auth='key', secret_ref=None, host_key=None)
+    runner, pin = agentmod._attack_box_runner(server)
+    out = await runner('mkdir -p x')
+    assert out.strip() and 'код 0' in out
+    assert pin['host_key'] == 'k'
+
+
 async def _handle(process: asyncssh.SSHServerProcess) -> None:
     cmd = process.command or "echo layla-ok"
     process.stdout.write(f"ran: {cmd}")

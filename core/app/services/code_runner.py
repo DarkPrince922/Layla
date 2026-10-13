@@ -270,12 +270,22 @@ def _shown(text: str) -> str:
     return sandbox.squeeze(sandbox.clean(text), SHOWN_OUTPUT)[0]
 
 
+def _nonempty_output(output: str, exit_code) -> str:
+    # Не отдаём модели пустую строку: без вывода она принимает успех за сбой или зависание.
+    if (output or "").strip():
+        return output
+    if exit_code in (0, None):
+        return ("[Завершено успешно (код 0), вывода в stdout/stderr нет. Это нормально для записи в файл "
+                "или команды без вывода; нужный результат читай из файла отдельной командой.]")
+    return f"[Завершено с кодом {exit_code}, но без текстового вывода.]"
+
+
 def _command_result(event: dict, text: str, took: float) -> dict:
     model_text, cut = sandbox.squeeze(text, MODEL_OUTPUT)
     result = {
         "exit_code": event.get("code"),
         "duration_s": event.get("duration", round(took, 2)),
-        "output": model_text,
+        "output": _nonempty_output(model_text, event.get("code")),
     }
     if event.get("signal"):
         result["signal"] = event["signal"]
@@ -308,6 +318,7 @@ def _code_result(data: dict) -> dict:
     ran = _stage(data.get("run"))
     if ran is not None:
         result.update(ran)
+        result["output"] = _nonempty_output(result.get("output", ""), result.get("exit_code"))
     shown = []
     if compiled is not None and (compiled["output"] or compiled["exit_code"]):
         shown.append(f"[compile · exit {compiled['exit_code']}]\n{compiled['output']}")

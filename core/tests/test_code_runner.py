@@ -322,3 +322,12 @@ async def test_sync_connection_failure_is_a_sandbox_error(tmp_path, monkeypatch)
     runner = code_runner.Runner("u-1", "p-1", str(tmp_path))
     items = [item async for item in runner.command(code_runner.RunCommand(command="ls"))]
     assert "не отвечает" in items[-1]["result"]["error"]
+
+
+def test_nonempty_output_note_for_blank_result():
+    # run_code/run_command не должны отдавать модели пустую строку вывода.
+    assert code_runner._nonempty_output("hi", 0) == "hi"
+    note0 = code_runner._nonempty_output("", 0)
+    assert note0.strip() and "код 0" in note0
+    note1 = code_runner._nonempty_output("   \n", 1)
+    assert note1.strip() and "кодом 1" in note1
