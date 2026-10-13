@@ -229,6 +229,21 @@ async def test_search_and_page_text_keep_source_and_strip_scripts(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_search_web_routes_cve_queries_to_structured_sources(monkeypatch):
+    called = {}
+
+    async def fake_lookup(cve_id, blocked=()):
+        called['cve'] = cve_id
+        return {'status': 'ok', 'cve_id': cve_id}
+
+    monkeypatch.setattr(web_research, 'lookup_cve', fake_lookup)
+    res = await web_research.search_web('ищу CVE-2026-60137 для wordpress')
+    assert called['cve'] == 'CVE-2026-60137'
+    assert res['status'] == 'ok' and res['cve_id'] == 'CVE-2026-60137'
+    assert 'Wordfence' in res['note']
+
+
+@pytest.mark.asyncio
 async def test_agent_checks_new_cve_before_answer_even_in_plan_without_offense(client, monkeypatch):
     eid = await _setup(client, monkeypatch)
     async def fetch(url, blocked=()):

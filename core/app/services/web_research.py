@@ -191,6 +191,15 @@ async def search_web(query: str, blocked: list[str] = ()) -> dict:
     query = query.strip()
     if not query or len(query) > 300:
         raise ValueError('Поисковый запрос должен содержать от 1 до 300 символов')
+    # Узкий CVE-запрос в общий веб-поиск даёт мусор (словари/реклама) — ведём его в
+    # структурированные источники (MITRE + NVD), а не в Bing RSS.
+    cve = CVE_RE.search(query)
+    if cve:
+        structured = await lookup_cve(cve.group(0).upper(), blocked)
+        structured['note'] = ('CVE-запрос направлен в структурированные источники (MITRE/NVD). '
+                               'Пустой ответ не значит, что CVE нет: для WordPress проверь Wordfence Intelligence '
+                               'и Patchstack через read_web_page, для остального — vendor advisory.')
+        return structured
     response = await source('https://www.bing.com/search?' + urlencode({'q': query, 'format': 'rss'}), blocked)
     try:
         if response.get('http_status') != 200 or '<!DOCTYPE' in response.get('text', '').upper():
@@ -200,7 +209,7 @@ async def search_web(query: str, blocked: list[str] = ()) -> dict:
                     'snippet': (item.findtext('description') or '')[:1500]} for item in tree.findall('./channel/item')[:8]]
     except (ValueError, ET.ParseError):
         return {'status': 'unavailable', 'source_url': response['url'], 'checked_at': response['checked_at'],
-                'note': 'Веб-поиск не вернул результаты. Используй lookup_cve/search_cves или официальный advisory; не делай вывод о несуществовании CVE.'}
+                'note': 'Веб-поиск не вернул результаты. Используй lookup_cve/search_cves или официальный advisory (для WordPress — Wordfence Intelligence и Patchstack через read_web_page); не делай вывод о несуществовании CVE.'}
     return {'status': 'ok', 'source_url': response['url'], 'checked_at': response['checked_at'],
             'results': results, 'note': 'Поисковые фрагменты не являются доказательством: прочитай первичный источник через read_web_page.'}
 
