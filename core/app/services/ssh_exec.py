@@ -138,7 +138,14 @@ async def run(cfg: SSHConfig, command: str, timeout: int = COMMAND_TIMEOUT) -> S
         try:
             result = await conn.run(command, timeout=timeout, check=False)
         except asyncssh.TimeoutError as exc:
-            raise SSHError(f"Команда не завершилась за {timeout} c") from exc
+            # Отдаём частичный вывод, собранный до убийства по таймауту, чтобы долгая
+            # экстракция не теряла весь прогресс (asyncssh.TimeoutError несёт stdout/stderr).
+            out = str(getattr(exc, "stdout", "") or "")
+            err = str(getattr(exc, "stderr", "") or "")
+            partial = out if not err else (f"{out}\n{err}" if out else err)
+            tail = partial[-8000:]
+            suffix = f" Частичный вывод до остановки:\n{tail}" if tail.strip() else " Частичного вывода не получено."
+            raise SSHError(f"Команда не завершилась за {timeout} c.{suffix}") from exc
         stdout = result.stdout or ""
         stderr = result.stderr or ""
         combined = stdout if not stderr else f"{stdout}\n{stderr}" if stdout else stderr
