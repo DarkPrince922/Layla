@@ -22,9 +22,36 @@ MAX_BYTES = 1_000_000
 # эксплуатируемых CVE, обновляется быстрее оценки NVD (в нём есть wp2shell и т.п.).
 KEV_URL = 'https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json'
 KEV_MAX_BYTES = 6_000_000
+NVD_URL = 'https://services.nvd.nist.gov/rest/json/cves/2.0?'
+NVD_SPACING = 6.1  # NVD keyless rate limit: ≥6s между запросами.
+# Версия «6.9.4» почти никогда не встречается в описании CVE дословно (там «before 6.9.5»),
+# поэтому keyword по версии мимо; CPE-матч NVD сам сопоставляет версию с диапазоном затронутых.
+_VERSION_RE = re.compile(r'\b\d+(?:\.\d+){1,4}\b')
+_PRODUCT_STOP = {'core', 'cms', 'plugin', 'plugins', 'theme', 'themes', 'module', 'modules',
+                 'server', 'version', 'ver', 'the', 'app', 'framework', 'engine', 'cve'}
 _cache: dict[str, tuple[float, dict]] = {}
 _nvd_lock = asyncio.Lock()
 _nvd_next = 0.0
+
+
+def _cpe_from_query(query: str) -> str | None:
+    """Собрать CPE-строку «продукт + версия» для NVD virtualMatchString.
+    Продукт — первое буквенное слово не из стоп-листа, версия — первый dotted-токен."""
+    vm = _VERSION_RE.search(query)
+    if not vm:
+        return None
+    product = next((t.lower() for t in re.findall(r'[A-Za-z][A-Za-z0-9_+-]*', query)
+                    if t.lower() not in _PRODUCT_STOP), None)
+    if not product:
+        return None
+    return f'cpe:2.3:a:*:{product}:{vm.group(0)}:*:*:*:*:*:*:*'
+
+
+def _nvd_rows(data) -> list[dict]:
+    return [{'cve_id': c['id'], 'published': c.get('published'), 'status': c.get('vulnStatus'),
+             'descriptions': _text_entries(c.get('descriptions')), 'references': c.get('references', [])[:5]}
+            for row in (data.get('vulnerabilities', []) if isinstance(data, dict) else [])[:20]
+            if isinstance(row, dict) and isinstance(c := row.get('cve'), dict) and c.get('id')]
 
 
 def now() -> str:
@@ -111,7 +138,7 @@ async def source(url: str, blocked: list[str] = (), *, nvd: bool = False, max_by
                 if cached and cached[0] > time.monotonic():
                     return dict(cached[1], cached=True)
                 await asyncio.sleep(max(0, _nvd_next - time.monotonic()))
-                _nvd_next = time.monotonic() + 6.1
+                _nvd_next = time.monotonic() + NVD_SPACING
                 result = await fetch(url, blocked, **extra)
         else:
             result = await fetch(url, blocked, **extra)
@@ -204,23 +231,37 @@ async def search_cves(query: str, blocked: list[str] = ()) -> dict:
     query = query.strip()
     if not query or len(query) > 300:
         raise ValueError('Поисковый запрос должен содержать от 1 до 300 символов')
-    response = await source('https://services.nvd.nist.gov/rest/json/cves/2.0?' + urlencode({
-        'keywordSearch': query, 'resultsPerPage': 10}), blocked, nvd=True)
+    response = await source(NVD_URL + urlencode({'keywordSearch': query, 'resultsPerPage': 10}), blocked, nvd=True)
     data = _json(response)
+    # Версионный CPE-матч: keyword не находит «6.9.4», когда запись говорит «before 6.9.5».
+    cpe = _cpe_from_query(query)
+    cpe_data = None
+    if cpe:
+        try:
+            cpe_resp = await source(NVD_URL + urlencode({'virtualMatchString': cpe, 'resultsPerPage': 50}), blocked, nvd=True)
+            cpe_data = _json(cpe_resp)
+        except (ValueError, OSError):
+            cpe_data = None
     try:
         kev = await cisa_kev(query, blocked)  # best-effort: недоступность KEV не ломает поиск
     except (ValueError, OSError):
         kev = []
-    if data is None:
+    if data is None and cpe_data is None:
         result = {'status': 'unavailable', 'source_url': response['url'], 'checked_at': response['checked_at'],
                   'note': 'NVD не вернул корректные данные. Отсутствие CVE не установлено.'}
     else:
+        rows, seen = [], set()
+        for src in (cpe_data, data):  # сначала версионный матч — он релевантнее keyword
+            for r in _nvd_rows(src):
+                if r['cve_id'] not in seen:
+                    seen.add(r['cve_id'])
+                    rows.append(r)
         result = {'status': 'ok', 'source_url': response['url'], 'checked_at': response['checked_at'],
-                  'total_results': data.get('totalResults'), 'results': [{
-                      'cve_id': c['id'], 'published': c.get('published'), 'status': c.get('vulnStatus'),
-                      'descriptions': _text_entries(c.get('descriptions')), 'references': c.get('references', [])[:5]
-                  } for row in data.get('vulnerabilities', [])[:10] if isinstance(row, dict)
-                      and isinstance(c := row.get('cve'), dict) and c.get('id')]}
+                  'total_results': (data or {}).get('totalResults'), 'results': rows[:20]}
+        if cpe:
+            result['cpe_match'] = cpe
+            result['note'] = ('Версионный CPE-матч NVD: перечисленные CVE затрагивают указанную версию '
+                              'по диапазонам advisory. Проверь каждую через lookup_cve по ID.')
     if kev:
         result['cisa_kev'] = kev
         result['note'] = ('CISA KEV: перечисленные CVE активно эксплуатируются (часто появляются там раньше оценки '
