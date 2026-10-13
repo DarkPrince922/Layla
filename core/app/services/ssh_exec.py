@@ -17,6 +17,7 @@ from dataclasses import dataclass
 import asyncssh
 
 CONNECT_TIMEOUT = 15
+COMMAND_TIMEOUT = 3600  # c: потолок на одну команду (долгие сканы/эксплойты); вывод буферизуется, не стримится
 MAX_OUTPUT = 200_000  # байт вывода команды, дальше обрезается
 
 
@@ -130,7 +131,7 @@ async def probe(cfg: SSHConfig) -> SSHResult:
         await conn.wait_closed()
 
 
-async def run(cfg: SSHConfig, command: str, timeout: int = 300) -> SSHResult:
+async def run(cfg: SSHConfig, command: str, timeout: int = COMMAND_TIMEOUT) -> SSHResult:
     """Выполнить команду на attack box и вернуть объединённый вывод (stdout+stderr)."""
     conn, host_key = await _connect(cfg)
     try:

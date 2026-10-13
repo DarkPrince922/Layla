@@ -12,6 +12,13 @@ from app.services import ssh_exec
 pytestmark = pytest.mark.asyncio
 
 
+def test_command_timeout_default_is_one_hour():
+    import inspect
+    # Долгие сканы/эксплойты не должны резаться на 300 c.
+    assert ssh_exec.COMMAND_TIMEOUT == 3600
+    assert inspect.signature(ssh_exec.run).parameters['timeout'].default == 3600
+
+
 async def _handle(process: asyncssh.SSHServerProcess) -> None:
     cmd = process.command or "echo layla-ok"
     process.stdout.write(f"ran: {cmd}")
