@@ -242,14 +242,29 @@ async def lsp_stop(owner: str, project: str) -> dict:
 
 
 @app.post("/workspaces/{owner}/{project}/lsp")
-async def lsp_query(owner: str, project: str, body: LspIn) -> dict:
+async def lsp_query(owner: str, project: str, body: LspIn, request: Request) -> dict:
     ws = _workspace(owner, project)
     try:
         check_path(body.path)
         if not ws.path.is_dir():
             raise lsp.LspError("Сначала синхронизируйте файлы проекта")
-        async with _slots_sem(), _locks[ws.uid]:
-            return await language_servers.query(ws, body)
+        async def guarded():
+            async with _slots_sem(), _locks[ws.uid]:
+                return await language_servers.query(ws, body)
+
+        task = asyncio.create_task(guarded())
+        try:
+            while True:
+                done, _ = await asyncio.wait({task}, timeout=0.2)
+                if done:
+                    return await task
+                if await request.is_disconnected():
+                    raise HTTPException(status_code=499, detail="Запрос LSP отменён")
+        finally:
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
     except (ValueError, OSError, TimeoutError) as exc:
         message = "Language server не ответил за 30 секунд; повторите запрос" if isinstance(exc, TimeoutError) else str(exc)
         raise HTTPException(status_code=503, detail=message[:1000]) from exc

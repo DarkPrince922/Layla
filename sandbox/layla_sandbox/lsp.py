@@ -181,6 +181,7 @@ class Session:
                                  "workspace": {"configuration": True, "workspaceFolders": True,
                                                "applyEdit": False},
                                  "textDocument": {"publishDiagnostics": {"versionSupport": True},
+                                                  "callHierarchy": {"dynamicRegistration": False},
                                                   "documentSymbol": {"hierarchicalDocumentSymbolSupport": True}}},
             })
             self.capabilities = result.get("capabilities", {})

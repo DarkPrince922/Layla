@@ -8,6 +8,7 @@ import shutil
 import sys
 
 import pytest
+from fastapi import HTTPException
 
 from layla_sandbox import lsp, server
 
@@ -203,6 +204,28 @@ async def test_timeout_removes_pending_request_and_malformed_frame_fails_start(t
     with pytest.raises(lsp.LspError, match="прервана"):
         await registry.query(ws, body())
     assert not registry.items
+
+
+async def test_http_disconnect_cancels_server_operation_and_closes_process(tmp_path, monkeypatch):
+    fake(tmp_path, monkeypatch, delay=60)
+    registry, ws, sessions = lsp.Registry(), Workspace(tmp_path), []
+    original = lsp.Session.start
+
+    async def start(session):
+        sessions.append(session)
+        await original(session)
+
+    class Disconnected:
+        async def is_disconnected(self):
+            return True
+
+    monkeypatch.setattr(lsp.Session, "start", start)
+    monkeypatch.setattr(server, "language_servers", registry)
+    monkeypatch.setattr(server, "_workspace", lambda *_: ws)
+    with pytest.raises(HTTPException) as error:
+        await server.lsp_query("owner", "project", body(), Disconnected())
+    assert error.value.status_code == 499
+    assert sessions and sessions[0].proc.returncode is not None and not registry.items
 
 
 def test_external_encoded_paths_and_oversized_results_are_filtered(tmp_path):
