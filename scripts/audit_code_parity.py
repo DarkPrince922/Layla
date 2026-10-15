@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -110,6 +111,22 @@ def build(root: Path) -> dict:
     tools = [{"archive_tool": name, "status": TOOL_PARITY[name][0],
               "layla": TOOL_PARITY[name][1], "notes": TOOL_PARITY[name][2]}
              for name in tool_names]
+    missing_imports = []
+    import_count = 0
+    root_absolute = root.resolve()
+    for path in source_files:
+        if path.suffix not in (".ts", ".tsx"):
+            continue
+        content = path.read_text(errors="replace")
+        for specifier in re.findall(r'''(?:from\s*|import\s*\(\s*)['"](\.[^'"]+)['"]''', content):
+            import_count += 1
+            target = path.parent / specifier
+            candidates = (target, target.with_suffix(".ts"), target.with_suffix(".tsx"),
+                          target.with_suffix(".d.ts"), target.with_suffix(".json"),
+                          target / "index.ts", target / "index.tsx")
+            if not any(candidate.resolve().is_relative_to(root_absolute) and candidate.is_file()
+                       for candidate in candidates):
+                missing_imports.append({"file": path.relative_to(root).as_posix(), "import": specifier})
     return {
         "format": 1,
         "goal": "Full functional correspondence in Code. No excluded archive subsystems.",
@@ -121,6 +138,14 @@ def build(root: Path) -> dict:
             "unclassified": "Inventoried but requires further behavioral decomposition.",
         },
         "archive": {"file_count": len(files), "content_digest": digest.hexdigest(), "files": files},
+        "dependency_audit": {
+            "method": "Static relative-import scan; does not infer build-time generated modules or private package contents.",
+            "relative_import_occurrences": import_count,
+            "unresolved_occurrences": len(missing_imports),
+            "unresolved": missing_imports,
+            "build_manifests": [name for name in ("package.json", "package-lock.json", "bun.lock", "bun.lockb", "tsconfig.json")
+                                if (root / name).is_file()],
+        },
         "tool_count": len(tools), "tools": tools,
         "subsystems": [{"id": ident, "status": status, "archive_paths": paths, "notes": notes}
                        for ident, status, paths, notes in SUBSYSTEMS],
