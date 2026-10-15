@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from app.config import get_settings
-from app.services import agent_git, files, project_agent, tool_chat
+from app.services import agent_git, code_notebooks, code_state, files, project_agent, tool_chat
 
 
 def call(name, arguments, ident="call1"):
@@ -183,7 +183,10 @@ async def test_agent_creates_reads_edits_deletes_and_persists(
         requests.append(body)
         round_number = len(requests) - 1
         # Файловые инструменты и git проекта (запуск кода — только если песочница подключена).
-        assert len(body["tools"]) == len(project_agent.TOOLS) + len(agent_git.GIT_TOOLS)
+        assert len(body["tools"]) == (
+            len(project_agent.TOOLS) + len(agent_git.GIT_TOOLS)
+            + len(code_state.TOOLS) + len(code_notebooks.TOOLS)
+        )
         history = results(body, native)
         if round_number == 0:
             return provider_response(native, [call("list_files", {"path": "."})])

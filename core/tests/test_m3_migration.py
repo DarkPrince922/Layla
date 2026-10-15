@@ -9,6 +9,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine
 
 from app.db import Base
@@ -34,9 +36,12 @@ def test_fresh_migration(tmp_path):
     path = tmp_path / "fresh.db"
     migrate(path)
     migrate(path)  # already at head
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    expected_head = ScriptDirectory.from_config(config).get_current_head()
     with sqlite3.connect(path) as db:
-        assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0022_telegram_bot"
-        assert {"osint_artifacts", "osint_lookups", "grok_logins", "telegram_bot_states", "telegram_notifications"} <= {
+        assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == expected_head
+        assert {"osint_artifacts", "osint_lookups", "grok_logins", "telegram_bot_states", "telegram_notifications", "code_states"} <= {
             r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
 

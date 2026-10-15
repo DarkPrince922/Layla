@@ -85,6 +85,11 @@ def launch(sessionmaker: async_sessionmaker[AsyncSession], job_id: str, worker) 
     task.add_done_callback(lambda done: _tasks.pop(job_id, None))
 
 
+def has_worker(job_id: str) -> bool:
+    task = _tasks.get(job_id)
+    return task is not None and not task.done()
+
+
 async def cancel(job_id: str, maker) -> bool:
     task = _tasks.get(job_id)
     if task is None:

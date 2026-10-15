@@ -202,17 +202,34 @@ def repo_map(root: str, args: RepoMap) -> dict:
 
 
 def list_skills(root: str, _args: ListSkills) -> dict:
-    try:
-        entries = files.list_dir(root, ".layla/skills")
-    except FileNotFoundError:
-        entries = []
-    return {"skills": [Path(item["name"]).stem for item in entries
-                       if not item["is_dir"] and item["name"].endswith(".md")]}
+    found = set()
+    for directory in (".layla/skills", ".claude/skills", ".agents/skills"):
+        try:
+            entries = files.list_dir(root, directory)
+        except FileNotFoundError:
+            continue
+        for item in entries:
+            if item["is_dir"]:
+                try:
+                    files.read_file(root, item["path"] + "/SKILL.md")
+                except (OSError, ValueError):
+                    continue
+                found.add(item["name"])
+            elif item["name"].endswith(".md"):
+                found.add(Path(item["name"]).stem)
+    return {"skills": sorted(found)}
 
 
 def read_skill(root: str, args: ReadSkill) -> dict:
-    result = files.read_file(root, f".layla/skills/{args.name}.md")
-    return {"name": args.name, "content": result["content"]}
+    for directory in (".layla/skills", ".claude/skills", ".agents/skills"):
+        for suffix in (f"{args.name}.md", f"{args.name}/SKILL.md"):
+            path = f"{directory}/{suffix}"
+            try:
+                result = files.read_file(root, path)
+            except FileNotFoundError:
+                continue
+            return {"name": args.name, "content": result["content"]}
+    raise FileNotFoundError(args.name)
 
 
 def execute(root: str, name: str, arguments: dict) -> dict:
