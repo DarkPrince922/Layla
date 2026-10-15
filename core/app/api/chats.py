@@ -30,6 +30,7 @@ from app.db import get_session, get_sessionmaker
 from app.models.chat import Chat, Checkpoint, Message
 from app.models.enums import Domain
 from app.models.job import Job
+from app.models.mcp import McpServer
 from app.models.persona import Persona
 from app.models.provider import Provider
 from app.models.user import Project, User, Workspace
@@ -47,6 +48,7 @@ from app.schemas.job import JobOut
 from app.services import (
     agent_git,
     audit,
+    code_mcp,
     code_runner,
     design_gen,
     files,
@@ -82,6 +84,13 @@ _TOOL_LABELS = {
     "git_commit": "Git: коммит",
     "git_push": "Git: пуш",
 }
+
+
+async def _code_mcp(session: AsyncSession, owner_id: str, persona_id: str | None):
+    rows = list(await session.scalars(select(McpServer).where(
+        McpServer.owner_id == owner_id, McpServer.enabled.is_(True))))
+    allowed = [row for row in rows if not row.personas or (persona_id and persona_id in row.personas)]
+    return await code_mcp.McpAgent.create(allowed) if allowed else None
 
 router = APIRouter(prefix="/chats", tags=["chats"])
 
@@ -265,6 +274,7 @@ async def send_message(
         if chat.project_id:
             project = await _owned_project(session, user, chat.project_id)
             root = _project_root(project)
+        mcp = await _code_mcp(session, user.id, chat.persona_id) if root and chat.domain == Domain.code else None
         model = body.model or chat.model
         if not model:
             raise HTTPException(status_code=400, detail="Не выбрана модель")
@@ -323,6 +333,7 @@ async def send_message(
                     extra=await run_in_threadpool(project_agent.project_rules, root),
                     runner=code_runner.Runner(user.id, chat.project_id, root),
                     git=await _git_agent(maker, user.id, root),
+                    mcp=mcp,
                 ):
                     yield event
             else:
@@ -617,6 +628,7 @@ async def run_chat(
     chat.provider_id = provider_id
     owner_id = user.id
     domain = chat.domain.value
+    persona_id = chat.persona_id
     created_root = None
     if chat.project_id:
         project = await _owned_project(session, user, chat.project_id)
@@ -733,9 +745,10 @@ async def run_chat(
                 messages = await _compact_before_turn(h, maker, chat_id, prov, key, model, caps) or messages
             runner = code_runner.Runner(owner_id, project_id, root)
             git = await _git_agent(maker, owner_id, root)
+            mcp = await _code_mcp(h.session, owner_id, persona_id) if domain == "code" else None
             async for event in project_agent.run(prov, key, model, messages, root, permissions,
                                                  mode=mode, approve=approve, caps=caps, extra=extra,
-                                                 runner=runner, git=git):
+                                                 runner=runner, git=git, mcp=mcp):
                 if "delta" in event:
                     full.append(event["delta"])
                 elif "retract" in event:
