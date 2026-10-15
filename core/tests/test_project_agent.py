@@ -15,6 +15,7 @@ from app.services import (
     code_state,
     code_teams,
     code_workers,
+    code_workspace,
     files,
     project_agent,
     tool_chat,
@@ -194,7 +195,7 @@ async def test_agent_creates_reads_edits_deletes_and_persists(
         # Файловые инструменты и git проекта (запуск кода — только если песочница подключена).
         assert len(body["tools"]) == (
             len(project_agent.TOOLS) + len(agent_git.GIT_TOOLS)
-            + len(code_state.TOOLS) + len(code_notebooks.TOOLS) + len(code_workers.TOOLS) + len(code_teams.TOOLS) - 1
+            + len(code_state.TOOLS) + len(code_notebooks.TOOLS) + len(code_workers.TOOLS) + len(code_teams.TOOLS) + len(code_workspace.TOOLS) - 1
         )
         history = results(body, native)
         if round_number == 0:
@@ -273,7 +274,8 @@ async def test_agent_creates_reads_edits_deletes_and_persists(
     await client.post(
         f"/api/chats/{chat['id']}/messages", json={"content": "Какие файлы изменены?"}
     )
-    assert "Applied project changes" in json.dumps(requests[-1])
+    # Full protocol results now survive the next turn, independently of UI annotations.
+    assert any(item.get("change", {}).get("path") == "src/main.py" for item in results(requests[-1], native))
 
 
 @pytest.mark.parametrize("native", [False, True])

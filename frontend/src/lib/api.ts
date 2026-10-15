@@ -271,6 +271,7 @@ export interface FileChange {
 export interface ToolEvent {
   id: string;
   name: string;
+  workspace_id?: string | null;
   path: string;
   status: "running" | "pending" | "done" | "error" | "rejected";
   error?: string;
@@ -438,6 +439,14 @@ export async function downloadProject(project: Project): Promise<void> {
   link.click();
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+export async function downloadCodeWorkspace(chatId: string, workspaceId: string, name: string): Promise<void> {
+  const res = await fetch(`${BASE}/chats/${chatId}/workspaces/${workspaceId}/archive`, { credentials: "include" });
+  if (!res.ok) { const body = await res.json().catch(() => ({})); throw new ApiError(res.status, body.detail || "Не удалось скачать копию"); }
+  const url = URL.createObjectURL(await res.blob());
+  const link = document.createElement("a"); link.href = url; link.download = `${name}.zip`;
+  document.body.appendChild(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 interface StreamHandlers {

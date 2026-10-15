@@ -10,7 +10,7 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncIterator
-from contextlib import suppress
+from contextlib import aclosing, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -28,8 +28,10 @@ from app.api.projects import _default_workspace, _owned_project, _project_root
 from app.config import get_settings
 from app.db import get_session, get_sessionmaker
 from app.models.chat import Chat, Checkpoint, Message
+from app.models.code_session import CodeLeadEntry, CodeLeadTurn
 from app.models.code_team import CodeTranscript
 from app.models.code_worker import CodeWorker
+from app.models.code_workspace import CodeWorkspaceCheckpoint
 from app.models.enums import Domain
 from app.models.job import Job
 from app.models.mcp import McpServer
@@ -51,13 +53,17 @@ from app.services import (
     agent_git,
     audit,
     code_hooks,
+    code_lead,
     code_lsp,
     code_mcp,
     code_runner,
+    code_sessions,
     code_state,
     code_teams,
     code_workers,
+    code_workspace,
     design_gen,
+    files,
     history,
     jobs,
     project_agent,
@@ -111,7 +117,7 @@ async def _owned_chat(session: AsyncSession, user: User, chat_id: str) -> Chat:
     return chat
 
 
-async def _worker_manager(session, maker, user, chat_id):
+async def _worker_manager(session, maker, user, chat_id, *, active=True):
     chat = await _owned_chat(session, user, chat_id)
     if chat.domain != Domain.code or not chat.project_id:
         raise HTTPException(status_code=404, detail="Воркеры Code не найдены")
@@ -120,20 +126,121 @@ async def _worker_manager(session, maker, user, chat_id):
     if chat.persona_id:
         persona = await session.get(Persona, chat.persona_id)
         permissions = persona.allowed_tools if persona is not None else []
-    return code_workers.Manager(code_state.Runtime(maker, user.id, chat_id, chat.project_id),
-                                _project_root(project), permissions, provider_id=chat.provider_id, model=chat.model)
+    runtime = code_state.Runtime(maker, user.id, chat_id, chat.project_id)
+    source = _project_root(project)
+    root, workspace = source, None
+    if active:
+        try:
+            root, workspace = await code_workspace.Runtime(runtime, source, permissions).current()
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return code_workers.Manager(runtime, root, permissions, provider_id=chat.provider_id, model=chat.model,
+                                source_root=source, workspace_id=workspace.id if workspace else None)
+
+
+async def _lead_workspace(session, maker, user, chat_id):
+    manager = await _worker_manager(session, maker, user, chat_id, active=False)
+    return code_workspace.Runtime(manager.runtime, manager.root, manager.permissions,
+                                  git=await _git_agent(maker, user.id, manager.root))
+
+
+@router.get("/{chat_id}/workspaces")
+async def get_code_workspaces(chat_id: str, user: User = Depends(get_current_user),
+                              session: AsyncSession = Depends(get_session), maker=Depends(get_sessionmaker)) -> dict:
+    workspace = await _lead_workspace(session, maker, user, chat_id)
+    return await workspace.call("worktree_list", {})
+
+
+@router.post("/{chat_id}/workspaces/{action}")
+async def control_code_workspace(chat_id: str, action: str, body: dict, user: User = Depends(get_current_user),
+                                 session: AsyncSession = Depends(get_session), maker=Depends(get_sessionmaker)) -> dict:
+    name = {"enter": "enter_worktree", "resume": "resume_worktree", "exit": "exit_worktree", "publish": "worktree_publish"}.get(action)
+    if not name:
+        raise HTTPException(status_code=404, detail="Действие не найдено")
+    workspace = await _lead_workspace(session, maker, user, chat_id)
+    result = await workspace.call(name, body)
+    if "error" in result:
+        raise HTTPException(status_code=409, detail=result["error"])
+    return result
+
+
+@router.get("/{chat_id}/workspaces/{workspace_id}/diff")
+async def get_workspace_diff(chat_id: str, workspace_id: str, user: User = Depends(get_current_user),
+                              session: AsyncSession = Depends(get_session), maker=Depends(get_sessionmaker)) -> dict:
+    workspace = await _lead_workspace(session, maker, user, chat_id)
+    result = await workspace.call("worktree_diff", {"workspace_id": workspace_id})
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
+@router.get("/{chat_id}/workspaces/{workspace_id}/files")
+async def get_workspace_files(chat_id: str, workspace_id: str, path: str = ".", user: User = Depends(get_current_user),
+                               session: AsyncSession = Depends(get_session), maker=Depends(get_sessionmaker)) -> dict:
+    workspace = await _lead_workspace(session, maker, user, chat_id)
+    if not workspace.tools():
+        raise HTTPException(status_code=403, detail="Персона не разрешает чтение проекта")
+    try:
+        row = await workspace.owned(session, workspace_id)
+        if row.status not in ("active", "kept"):
+            raise ValueError("Рабочая копия недоступна")
+        root = code_workspace.paths(workspace.root, workspace.runtime.project_id, row.id)[2]
+        target = files.safe_join(root, path)
+        return {"files": await run_in_threadpool(files.list_dir, root, path)} if target.is_dir() else await run_in_threadpool(files.read_file, root, path)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/{chat_id}/workspaces/{workspace_id}/archive")
+async def download_code_workspace(chat_id: str, workspace_id: str, user: User = Depends(get_current_user),
+                                   session: AsyncSession = Depends(get_session), maker=Depends(get_sessionmaker)):
+    workspace = await _lead_workspace(session, maker, user, chat_id)
+    if not workspace.tools():
+        raise HTTPException(status_code=403, detail="Персона не разрешает чтение проекта")
+    try:
+        row = await workspace.owned(session, workspace_id)
+        if row.status not in ("active", "kept"):
+            raise ValueError("Рабочая копия недоступна")
+        buffer = await run_in_threadpool(files.export_zip, code_workspace.paths(workspace.root, workspace.runtime.project_id, row.id)[2])
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    def chunks():
+        try:
+            while data := buffer.read(65536):
+                yield data
+        finally:
+            buffer.close()
+    return StreamingResponse(chunks(), media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{row.name}.zip"'})
 
 
 @router.get("/{chat_id}/team")
 async def get_code_team(chat_id: str, team_id: str | None = None, before: int | None = Query(None, ge=0),
                         user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session),
                         maker=Depends(get_sessionmaker)) -> dict:
-    manager = await _worker_manager(session, maker, user, chat_id)
+    manager = await _worker_manager(session, maker, user, chat_id, active=False)
     try:
         await manager.list()
         return await manager.team.info(team_id, before=before)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/{chat_id}/session")
+async def get_code_session(chat_id: str, offset: int = Query(0, ge=0), limit: int = Query(25, ge=1, le=100),
+                           user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session),
+                           maker=Depends(get_sessionmaker)) -> dict:
+    manager = await _worker_manager(session, maker, user, chat_id, active=False)
+    if manager.permissions is not None and "files.read" not in manager.permissions:
+        raise HTTPException(status_code=403, detail="Персона не разрешает чтение сессии")
+    rows = list((await session.execute(select(CodeLeadEntry, CodeLeadTurn).join(CodeLeadTurn).where(
+        CodeLeadTurn.chat_id == chat_id, CodeLeadTurn.owner_id == user.id,
+        CodeLeadTurn.project_id == manager.project_id
+    ).order_by(CodeLeadTurn.created_at, CodeLeadTurn.id, CodeLeadEntry.sequence).offset(offset).limit(limit + 1))).all())
+    return {"entries": [{"turn_id": turn.id, "sequence": entry.sequence, "active": turn.active,
+                         "status": turn.status, "message": entry.message} for entry, turn in rows[:limit]],
+            "next_offset": offset + limit if len(rows) > limit else None}
 
 
 @router.post("/{chat_id}/team/create")
@@ -442,6 +549,8 @@ async def send_message(
     # Подготовка вне стрима: проверка прав, модель, провайдер, ключ.
     async with maker() as session:
         chat = await _owned_chat(session, user, chat_id)
+        if chat.domain == Domain.code and (user.id, chat_id) in code_lead.ACTIVE_CHATS:
+            raise HTTPException(status_code=409, detail="В этом Code-чате уже выполняется задача")
         root = None
         permissions = None
         if chat.persona_id:
@@ -464,10 +573,11 @@ async def send_message(
                 "Добавьте провайдера и включите «активен» в настройках.",
             )
         key = await provider_client.pick_key(session, provider)
-        session.add(Message(chat_id=chat_id, role="user", content=body.content))
+        input_message = Message(chat_id=chat_id, role="user", content=body.content, created_at=datetime.now(UTC))
+        session.add(input_message)
         await session.commit()
         payload = await _build_messages(session, chat)
-        assistant = Message(chat_id=chat_id, role="assistant", content="", meta={})
+        assistant = Message(chat_id=chat_id, role="assistant", content="", meta={}, created_at=datetime.now(UTC))
         session.add(assistant)
         await session.commit()
         msg_id = assistant.id
@@ -506,46 +616,50 @@ async def send_message(
 
         async def events():
             if root:
-                async for event in project_agent.run(
-                    provider, key, model, payload, root, permissions,
+                runtime = code_state.Runtime(maker, user.id, chat.id, chat.project_id) if chat.domain == Domain.code else None
+                workers = code_workers.Manager(runtime, root, permissions, provider_id=provider.id, model=model) if runtime else None
+                transcript = code_sessions.LeadTranscript(runtime, msg_id, input_message.id, workers.team,
+                                                         provider_id=provider.id, model=model) if runtime else None
+                messages = await transcript.load(payload) if transcript else payload
+                engine = code_lead.run if runtime is not None else project_agent.run
+                async with aclosing(engine(
+                    provider, key, model, messages, root, permissions,
                     extra=await run_in_threadpool(project_agent.project_rules, root),
                     runner=code_runner.Runner(user.id, chat.project_id, root),
                     git=await _git_agent(maker, user.id, root),
                     mcp=mcp,
-                    runtime=code_state.Runtime(maker, user.id, chat.id, chat.project_id)
-                    if chat.domain == Domain.code else None,
-                    workers=code_workers.Manager(code_state.Runtime(maker, user.id, chat.id, chat.project_id),
-                                                 root, permissions, provider_id=provider.id, model=model)
-                    if chat.domain == Domain.code else None,
+                    runtime=runtime, workers=workers, transcript=transcript,
                     lsp=code_lsp.Client(user.id, chat.project_id, root) if chat.domain == Domain.code else None,
                     workflow=code_hooks.Runtime(code_runner.Runner(user.id, chat.project_id, root), permissions,
                                                 session_id=chat.id) if chat.domain == Domain.code else None,
-                ):
-                    yield event
+                )) as stream:
+                    async for event in stream:
+                        yield event
             else:
                 async for kind, text in provider_client.stream_chat_with_retry(provider, key, model, payload):
                     yield {kind if kind in ("reasoning", "retract", "retry") else "delta": text}
 
         try:
-            async for event in events():
-                if "checkpoint" in event:
-                    # Служебное событие: сохраняем до изменения файла, клиенту не отправляем.
-                    await _save_checkpoint(maker, chat_id, msg_id, event["checkpoint"])
-                    checkpointed = True
-                    continue
-                if "delta" in event:
-                    full.append(event["delta"])
-                elif "retract" in event:
-                    full[:] = [_drop_tail("".join(full), event["retract"])]
-                elif "reasoning" in event:
-                    reasoning.append(event["reasoning"])
-                elif "tool" in event:
-                    tool = event["tool"]
-                    tool_events[tool["id"]] = tool
-                    if tool["status"] != "running":
-                        # Persist each completed operation before acknowledging it over SSE.
-                        await persist(tool.get("change"))
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode()
+            async with aclosing(events()) as stream:
+                async for event in stream:
+                    if "checkpoint" in event:
+                        # Служебное событие: сохраняем до изменения файла, клиенту не отправляем.
+                        await _save_checkpoint(maker, chat_id, msg_id, event["checkpoint"])
+                        checkpointed = True
+                        continue
+                    if "delta" in event:
+                        full.append(event["delta"])
+                    elif "retract" in event:
+                        full[:] = [_drop_tail("".join(full), event["retract"])]
+                    elif "reasoning" in event:
+                        reasoning.append(event["reasoning"])
+                    elif "tool" in event:
+                        tool = event["tool"]
+                        tool_events[tool["id"]] = tool
+                        if tool["status"] != "running":
+                            # Persist each completed operation before acknowledging it over SSE.
+                            await persist(tool.get("change"))
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode()
             completed = True
         except Exception as exc:  # noqa: BLE001 — SSE must terminate with a saved partial response
             stream_error = (
@@ -603,9 +717,13 @@ async def _audit_run(maker, owner_id: str, project_id: str, tool: dict) -> None:
 async def _save_checkpoint(maker, chat_id: str, message_id: str, point: dict) -> None:
     """Исходное состояние файла — до того, как агент его изменит (для отката)."""
     async with maker() as session:
-        session.add(Checkpoint(chat_id=chat_id, message_id=message_id, path=point["path"],
+        checkpoint = Checkpoint(chat_id=chat_id, message_id=message_id, path=point["path"],
                                content=point["content"], encoding=point.get("encoding", "utf-8"),
-                               mode=point.get("mode"), created_at=datetime.now(UTC)))
+                               mode=point.get("mode"), created_at=datetime.now(UTC))
+        session.add(checkpoint)
+        if point.get("workspace_id"):
+            await session.flush()
+            session.add(CodeWorkspaceCheckpoint(checkpoint_id=checkpoint.id, workspace_id=point["workspace_id"]))
         await session.commit()
 
 
@@ -684,18 +802,38 @@ async def rollback_to(
         raise HTTPException(status_code=400, detail="Для этого ответа нет контрольной точки.")
     project = await _owned_project(session, user, chat.project_id)
     try:
-        restored = await run_in_threadpool(_restore, _project_root(project), points)
+        locations = dict((await session.execute(select(CodeWorkspaceCheckpoint.checkpoint_id,
+            CodeWorkspaceCheckpoint.workspace_id).where(CodeWorkspaceCheckpoint.checkpoint_id.in_([p.id for p in points])))).all())
+        bindings = code_workspace.Runtime(code_state.Runtime(None, user.id, chat_id, chat.project_id), _project_root(project))
+        grouped = {}
+        for point in points:
+            root = _project_root(project)
+            if workspace_id := locations.get(point.id):
+                workspace = await bindings.owned(session, workspace_id)
+                if workspace.status not in ("active", "kept"):
+                    raise ValueError("Рабочая копия контрольной точки удалена; исходный проект не подставляется вместо неё")
+                root = str(code_workspace.paths(root, project.id, workspace.id)[2])
+                if not Path(root).is_dir():
+                    raise ValueError("Рабочая копия контрольной точки отсутствует")
+            grouped.setdefault(root, []).append(point)
+        restored = []
+        for root, group in grouped.items():
+            restored.extend(await run_in_threadpool(_restore, root, group))
     except (OSError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=f"Не удалось вернуть файлы: {exc}") from exc
     rolled = 0
     for message in later:
         meta = dict(message.meta or {})
+        if chat.domain == Domain.code and history.is_summary(message):
+            message.meta = {**meta, "disabled": True, "rolled_back": True}
         if meta.get("checkpoint") and not meta.get("rolled_back"):
             meta["rolled_back"] = True
             message.meta = meta
             rolled += 1
     for point in points:
         await session.delete(point)
+    if chat.domain == Domain.code:
+        await code_sessions.invalidate(session, chat_id, [message.id for message in later])
     paths = sorted(set(restored))
     await audit.record(session, actor=user.id, action="chat.rollback", target=chat_id,
                        meta={"message_id": message_id, "paths": paths})
@@ -762,6 +900,8 @@ async def run_chat(
         previous = await session.scalar(select(Job).where(Job.chat_id == chat_id, Job.request_id == body.request_id))
         if previous:
             return previous
+    if chat.domain == Domain.code and (user.id, chat_id) in code_lead.ACTIVE_CHATS:
+        raise HTTPException(status_code=409, detail="В этом Code-чате уже выполняется задача")
     active = await session.scalar(select(Job).where(Job.chat_id == chat_id, Job.status.in_(jobs.ACTIVE)))
     if active is not None and jobs.is_orphaned(active):
         # Задача числится активной, но её воркер умер — не держим чат запертым.
@@ -928,79 +1068,91 @@ async def run_chat(
             runtime = code_state.Runtime(maker, owner_id, chat_id, project_id) if domain == "code" else None
             workers = code_workers.Manager(runtime, root, permissions, provider_id=prov.id, model=model,
                                            mode=mode, caps=caps) if runtime is not None else None
-            async for event in project_agent.run(prov, key, model, messages, root, permissions,
+            transcript = code_sessions.LeadTranscript(runtime, msg_id, user_message.id, workers.team,
+                                                     provider_id=prov.id, model=model) if runtime else None
+            if transcript is not None:
+                messages = await transcript.load(messages)
+            engine = code_lead.run if runtime is not None else project_agent.run
+            async with aclosing(engine(prov, key, model, messages, root, permissions,
                                                  mode=mode, approve=approve, caps=caps, extra=extra,
                                                  runner=runner, git=git, mcp=mcp, runtime=runtime, workers=workers,
                                                  lsp=code_lsp.Client(owner_id, project_id, root) if domain == "code" else None,
                                                  workflow=code_hooks.Runtime(runner, permissions, mode=mode,
-                                                                             session_id=chat_id) if domain == "code" else None):
-                if "delta" in event:
-                    full.append(event["delta"])
-                elif "retract" in event:
-                    # Ход повторяется — уже показанный кусок ответа убираем, чтобы не задвоился.
-                    full[:] = [_drop_tail("".join(full), event["retract"])]
-                    await persist()
-                elif "trimmed" in event:
-                    await h.step(f"История длиннее контекста модели — {event['trimmed']} старых "
-                                 "сообщений не отправлено модели (в чате они остались)")
-                elif "retry" in event:
-                    info = event["retry"]
-                    await h.step(f"Нет связи с моделью — повтор {info['attempt']} из {info['max']} "
-                                 f"через {info['delay']:g} с")
-                elif "key" in event:
-                    await h.step(project_agent.key_label(event["key"]))
-                elif "cut" in event:
-                    await h.step(project_agent.cut_label(event["cut"]))
-                elif "todos" in event:
-                    todos[:] = event["todos"]
-                    current = next((t["content"] for t in todos if t["status"] == "in_progress"), None)
-                    done = sum(t["status"] == "done" for t in todos)
-                    await h.step(f"План: {done} из {len(todos)}" + (f" · {current}" if current else ""))
-                    await persist()
-                elif "overthink" in event:
-                    await h.step(project_agent.overthink_label(event["overthink"]))
-                elif "checkpoint" in event:
-                    await _save_checkpoint(maker, chat_id, msg_id, event["checkpoint"])
-                    if not checkpointed:
-                        checkpointed = True
+                                                                             session_id=chat_id) if domain == "code" else None,
+                                                 transcript=transcript, **({"job_id": h.job.id} if runtime else {}))) as stream:
+                async for event in stream:
+                    if "workspace" in event:
+                        # A control notification must not consume the first
+                        # partial-answer flush; the provider may pause next.
+                        await h.set_result({"workspace": event["workspace"]})
+                        continue
+                    if "delta" in event:
+                        full.append(event["delta"])
+                    elif "retract" in event:
+                        # Ход повторяется — уже показанный кусок ответа убираем, чтобы не задвоился.
+                        full[:] = [_drop_tail("".join(full), event["retract"])]
                         await persist()
-                elif "shrunk" in event:
-                    await h.step(f"Длинная задача: {event['shrunk']} старых результатов инструментов "
-                                 "ужато, чтобы не упереться в контекст")
-                elif "learned" in event:
-                    # Запоминаем, чего модель не умеет, чтобы дальше сразу слать правильный запрос.
-                    known = dict(prov.model_caps or {})
-                    known[model] = {**(known.get(model) or {}), **event["learned"]}
-                    prov.model_caps = known
-                    await h.session.commit()
-                    await h.step(_learned_label(event["learned"]))
-                elif "reasoning" in event:
-                    reasoning.append(event["reasoning"])
-                    await h.reason(event["reasoning"])
-                elif "tool" in event:
-                    tool = event["tool"]
-                    previous = tools.get(tool["id"])
-                    tools[tool["id"]] = tool
-                    if previous is not None and previous["status"] == tool["status"] == "running":
-                        # Живой вывод команды: шаг не повторяем, сохраняется ниже не чаще раза в 0.7 с.
-                        pass
-                    else:
-                        label = _TOOL_LABELS.get(tool["name"], tool["name"])
-                        target = tool.get("path") or tool.get("command", "")[:120]
-                        suffix = {"error": " — ошибка", "done": " — готово", "rejected": " — отклонено"}.get(tool["status"], "")
-                        if tool["name"] in code_runner.RUN_TOOLS and tool["status"] == "done":
-                            suffix = f" — код выхода {tool.get('exit_code')}"
-                        if tool["status"] != "pending":
-                            await h.step(f"{label}: {target}{suffix}")
-                        # В аудит — только применённые изменения, не превью на подтверждение.
-                        await persist(tool.get("change") if tool["status"] == "done" else None)
-                        if tool.get("change") and tool["status"] == "done":
-                            sandbox.preview_touch(owner_id, project_id)  # запущенное превью подхватит правку
-                        if ((tool["name"] in (code_runner.RUN_TOOLS | code_runner.SHELL_TOOLS) or tool["name"] in agent_git.GIT_MUTATING or tool["name"] == "project_hook")
-                                and tool["status"] in ("done", "error")):
-                            await _audit_run(maker, owner_id, project_id, tool)
-                if time.monotonic() - last_persist >= 0.7:
-                    await persist()
+                    elif "trimmed" in event:
+                        await h.step(f"История длиннее контекста модели — {event['trimmed']} старых "
+                                     "сообщений не отправлено модели (в чате они остались)")
+                    elif "retry" in event:
+                        info = event["retry"]
+                        await h.step(f"Нет связи с моделью — повтор {info['attempt']} из {info['max']} "
+                                     f"через {info['delay']:g} с")
+                    elif "key" in event:
+                        await h.step(project_agent.key_label(event["key"]))
+                    elif "cut" in event:
+                        await h.step(project_agent.cut_label(event["cut"]))
+                    elif "todos" in event:
+                        todos[:] = event["todos"]
+                        current = next((t["content"] for t in todos if t["status"] == "in_progress"), None)
+                        done = sum(t["status"] == "done" for t in todos)
+                        await h.step(f"План: {done} из {len(todos)}" + (f" · {current}" if current else ""))
+                        await persist()
+                    elif "overthink" in event:
+                        await h.step(project_agent.overthink_label(event["overthink"]))
+                    elif "checkpoint" in event:
+                        await _save_checkpoint(maker, chat_id, msg_id, event["checkpoint"])
+                        if not checkpointed:
+                            checkpointed = True
+                            await persist()
+                    elif "shrunk" in event:
+                        await h.step(f"Длинная задача: {event['shrunk']} старых результатов инструментов "
+                                     "ужато, чтобы не упереться в контекст")
+                    elif "learned" in event:
+                        # Запоминаем, чего модель не умеет, чтобы дальше сразу слать правильный запрос.
+                        known = dict(prov.model_caps or {})
+                        known[model] = {**(known.get(model) or {}), **event["learned"]}
+                        prov.model_caps = known
+                        await h.session.commit()
+                        await h.step(_learned_label(event["learned"]))
+                    elif "reasoning" in event:
+                        reasoning.append(event["reasoning"])
+                        await h.reason(event["reasoning"])
+                    elif "tool" in event:
+                        tool = event["tool"]
+                        previous = tools.get(tool["id"])
+                        tools[tool["id"]] = tool
+                        if previous is not None and previous["status"] == tool["status"] == "running":
+                            # Живой вывод команды: шаг не повторяем, сохраняется ниже не чаще раза в 0.7 с.
+                            pass
+                        else:
+                            label = _TOOL_LABELS.get(tool["name"], tool["name"])
+                            target = tool.get("path") or tool.get("command", "")[:120]
+                            suffix = {"error": " — ошибка", "done": " — готово", "rejected": " — отклонено"}.get(tool["status"], "")
+                            if tool["name"] in code_runner.RUN_TOOLS and tool["status"] == "done":
+                                suffix = f" — код выхода {tool.get('exit_code')}"
+                            if tool["status"] != "pending":
+                                await h.step(f"{label}: {target}{suffix}")
+                            # В аудит — только применённые изменения, не превью на подтверждение.
+                            await persist(tool.get("change") if tool["status"] == "done" else None)
+                            if tool.get("change") and tool["status"] == "done":
+                                sandbox.preview_touch(owner_id, project_id)  # запущенное превью подхватит правку
+                            if ((tool["name"] in (code_runner.RUN_TOOLS | code_runner.SHELL_TOOLS) or tool["name"] in agent_git.GIT_MUTATING or tool["name"] == "project_hook")
+                                    and tool["status"] in ("done", "error")):
+                                await _audit_run(maker, owner_id, project_id, tool)
+                    if time.monotonic() - last_persist >= 0.7:
+                        await persist()
             await h.step("Ответ сохранён", progress=1.0)
         except asyncio.CancelledError:
             error = "Задача остановлена. Выполненные изменения сохранены."

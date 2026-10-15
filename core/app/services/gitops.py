@@ -13,6 +13,7 @@ import os
 import re
 import tempfile
 import uuid
+from pathlib import Path
 from urllib.parse import urlparse
 
 MAX_DIFF = 400_000
@@ -38,6 +39,7 @@ def _env(extra: dict[str, str] | None = None) -> dict[str, str]:
         "SSH_ASKPASS": "",
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_OPTIONAL_LOCKS": "0",
     }
     config = {
         "core.hooksPath": os.devnull,
@@ -79,7 +81,35 @@ async def _git(root: str, *args: str, config: dict[str, str] | None = None, time
 
 
 def is_repo(root: str) -> bool:
-    return os.path.isdir(os.path.join(root, ".git"))
+    return _metadata(root) is not None
+
+
+def _metadata(root: str) -> Path | None:
+    marker = Path(root) / ".git"
+    if marker.is_dir():
+        return marker
+    # Only the application-owned layout is accepted. An uploaded .git file
+    # cannot redirect server Git operations into another account's repository.
+    base = Path(root).absolute()
+    if base.name != "worktree" or not any(parent.name in (".layla-code-workspaces", ".layla-code-workers") for parent in base.parents):
+        return None
+    try:
+        if any(part.is_symlink() for part in (base, *base.parents)) or marker.is_symlink():
+            return None
+        text = marker.read_text()
+        target = Path(text.removeprefix("gitdir: ").strip())
+        expected = base.parent / "repository/.git/worktrees"
+        if not text.startswith("gitdir: ") or target.parent != expected or not target.is_dir():
+            return None
+        if any(part.is_symlink() for part in (target, *target.parents)):
+            return None
+        if (target / "gitdir").read_text().strip() != str(marker):
+            return None
+        if (target / "commondir").read_text().strip() != "../..":
+            return None
+        return target
+    except (OSError, ValueError):
+        return None
 
 
 def _require(root: str) -> None:
@@ -171,7 +201,7 @@ async def status(root: str) -> dict:
         "changes": changes,
         "remote": clean_url(remote) if remote else None,
         "last_commit": (await log(root, 1) or [None])[0],
-        "merging": os.path.exists(os.path.join(root, ".git", "MERGE_HEAD")),
+        "merging": (_metadata(root) / "MERGE_HEAD").exists(),
         "conflicts": [c["path"] for c in changes if c["code"] in {"DD", "AU", "UD", "UA", "DU", "AA", "UU"}],
     }
 
@@ -318,7 +348,7 @@ async def synchronize(root: str, token: str | None, username: str | None = None,
         return {"state": "conflicts" if state.get("conflicts") else "needs_commit",
                 "conflicts": state.get("conflicts", []), "status": state,
                 "output": "Завершите текущее слияние: git_conflicts → исправление файлов → git_resolve → git_commit."}
-    if any(os.path.exists(os.path.join(root, ".git", name)) for name in ("rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD")):
+    if any((_metadata(root) / name).exists() for name in ("rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD")):
         raise GitError("В проекте уже выполняется другая операция Git. Сначала завершите или отмените её.")
     if state.get("changes"):
         raise GitError("Сначала сохраните изменения коммитом git_commit, затем повторите git_sync или git_push.")
@@ -362,19 +392,19 @@ async def conflicts(root: str, path: str | None = None) -> dict:
         paths = [path]
     budget = 36000
     truncated = False
-    for path in paths[:50]:
+    for rel in paths[:50]:
         if budget <= 0:
             truncated = True
             break
         versions = {}
         for number, name in ((1, "base"), (2, "ours"), (3, "theirs")):
-            code, text, _ = await _git(root, "show", f":{number}:{path}", check=False)
+            code, text, _ = await _git(root, "show", f":{number}:{rel}", check=False)
             shown = text[:min(12000, budget)]
             versions[name] = shown if code == 0 else None
             versions[name + "_truncated"] = code == 0 and len(text) > len(shown)
             truncated = truncated or versions[name + "_truncated"]
             budget -= len(shown)
-        items.append({"path": path, **versions})
+        items.append({"path": rel, **versions})
     return {"merging": state.get("merging", False), "conflicts": items,
             "paths": paths, "truncated": truncated or len(paths) > 50}
 
@@ -394,7 +424,7 @@ async def resolve(root: str, path: str, expected_sha256: str | None, delete: boo
             if not expected_sha256 or current["sha256"] != expected_sha256:
                 raise GitError("Прочитайте текущую версию файла и передайте её SHA-256.")
             text = current["content"]
-            if re.search(r"^(?:<<<<<<< |>>>>>>> |\|\|\|\|\|\|\| |=======$)", text, re.M):
+            if re.search(r"^(?:<<<<<<< |>>>>>>> |\|\|\|\|\|\|\| |=======$)", text, re.MULTILINE):
                 raise GitError("В файле остались маркеры конфликта. Сначала исправьте содержимое.")
     except (ValueError, OSError) as exc:
         raise GitError(str(exc)) from exc
