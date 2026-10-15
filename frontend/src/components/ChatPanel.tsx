@@ -9,6 +9,7 @@ import { ApiError, GIT_TOOLS, RUN_TOOLS, api, downloadProject, type FileContent,
 import { useAuth } from "@/store/auth";
 import { FileDiff } from "@/components/FileDiff";
 import { RunCard } from "@/components/RunOutput";
+import { CodeWorkerPanel, type CodeWorker } from "@/components/CodeWorkerPanel";
 import { confirmAction } from "@/components/ConfirmDialog";
 
 const active = (job?: Job | null) => !!job && ["queued", "running"].includes(job.status);
@@ -382,7 +383,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
       <button aria-label="Новый чат" onClick={() => select(null)} disabled={sending || !ready} className="icon-button"><Plus className="h-5 w-5" /></button>
     </div>
     <div ref={scroll} className="chat-scroll min-h-0 flex-1 space-y-5 overflow-y-auto p-5">
-      {domain === "code" && chatId && ready && <CodeWorkState key={`${scope}:${chatId}`} chatId={chatId} scope={scope} running={running} onResume={text => send({ text, mode })} />}
+      {domain === "code" && chatId && ready && <CodeWorkState key={`${scope}:${chatId}`} chatId={chatId} scope={scope} running={running} canApply={mode === "auto" || mode === "confirm"} onResume={text => send({ text, mode })} />}
       {history.isError || detail.isError ? <p role="alert" className="text-red-300">Не удалось загрузить историю. <button onClick={() => { history.refetch(); detail.refetch(); }} className="underline">Повторить</button></p> : !ready || (chatId && detail.isPending) ? <p className="text-sm text-neutral-500">Загрузка истории…</p> : !messages.length && <div className="chat-welcome mx-auto my-12 max-w-sm text-center"><div className="empty-orb mx-auto mb-5"><Bot className="h-7 w-7" /></div><h2 className="text-xl font-semibold">Что сделаем сегодня?</h2><p className="mt-3 text-sm leading-relaxed text-neutral-400">Опишите задачу. Можно переключаться между разделами и создавать новые чаты — работа продолжится, история и файлы сохранятся.</p></div>}
       {messages.map(m => m.meta?.kind === "summary" ? <details key={m.id} className="rounded-xl border border-dashed border-ink-600 px-4 py-2 text-xs text-neutral-400">
         <summary className="flex cursor-pointer list-none items-center gap-2 [&::-webkit-details-marker]:hidden"><FoldVertical className="h-3.5 w-3.5 shrink-0 text-accent-300" /><span className="flex-1">Контекст сжат · {m.meta.count || "старые"} сообщений выше модель видит как сводку</span><ChevronDown className="h-3.5 w-3.5" /></summary>
@@ -435,21 +436,23 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
 type DurableTask = { id: string; subject: string; description: string; status: "pending" | "in_progress" | "completed"; blocked: boolean; blocked_by: string[]; owner?: string | null; result: string };
 type CodeQuestion = { id: string; status: "pending" | "answered"; questions: { header: string; question: string; options: { label: string; description: string }[]; multi_select: boolean }[]; answers: Record<string, string[]> };
 
-function CodeWorkState({ chatId, scope, running, onResume }: { chatId: string; scope: string; running: boolean; onResume: (text: string) => Promise<void> }) {
+function CodeWorkState({ chatId, scope, running, canApply, onResume }: { chatId: string; scope: string; running: boolean; canApply: boolean; onResume: (text: string) => Promise<void> }) {
   const state = useQuery({
     queryKey: ["code-state", scope, chatId, running],
-    queryFn: () => api.get<{ tasks: DurableTask[]; memory: Record<string, { content: string }>; questions?: CodeQuestion[] }>(`/chats/${chatId}/code-state`),
-    refetchInterval: running ? 1500 : false,
+    queryFn: () => api.get<{ tasks: DurableTask[]; memory: Record<string, { content: string }>; questions?: CodeQuestion[]; workers?: CodeWorker[] }>(`/chats/${chatId}/code-state`),
+    refetchInterval: query => running || query.state.data?.workers?.some(worker => worker.status === "queued" || worker.status === "running") ? 1500 : false,
     retry: false,
   });
   const tasks = state.data?.tasks || [];
   const notes = Object.entries(state.data?.memory || {});
   const questions = state.data?.questions || [];
-  if (!tasks.length && !notes.length && !questions.length) return null;
+  const workers = state.data?.workers || [];
+  if (!tasks.length && !notes.length && !questions.length && !workers.length) return null;
   const done = tasks.filter(task => task.status === "completed").length;
   const working = tasks.filter(task => task.status === "in_progress").length;
   const subjects = new Map(tasks.map(task => [task.id, task.subject]));
   return <div className="space-y-3">
+    <CodeWorkerPanel workers={workers} chatId={chatId} scope={scope} parentRunning={running} canApply={canApply} refresh={() => state.refetch()} onResume={onResume} />
     {questions.slice(-3).map(group => <CodeQuestionForm key={group.id} chatId={chatId} group={group} onSaved={() => state.refetch()} onResume={onResume} />)}
     {(tasks.length > 0 || notes.length > 0) && <details className="rounded-xl border border-accent-500/20 bg-accent-500/5 p-3 text-xs">
     <summary className="flex cursor-pointer list-none items-center gap-2 [&::-webkit-details-marker]:hidden">

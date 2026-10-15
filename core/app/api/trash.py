@@ -123,7 +123,7 @@ async def purge_chat(chat_id: str, user: User = Depends(get_current_user),
     folder = await trash.remove_chat(session, chat)
     await audit.record(session, actor=user.id, action="chat.purge", target=chat_id)
     await session.commit()
-    await trash.purge_dirs([folder] if folder else [])
+    await trash.purge_dirs(([folder] if folder else []) + trash.code_worker_cleanup.take(session))
 
 
 @router.delete("/projects/{project_id}", status_code=204)
@@ -133,7 +133,7 @@ async def purge_project(project_id: str, user: User = Depends(get_current_user),
     folder = await trash.remove_project(session, project)
     await audit.record(session, actor=user.id, action="project.purge", target=project_id)
     await session.commit()
-    await trash.purge_dirs([folder] if folder else [])
+    await trash.purge_dirs(([folder] if folder else []) + trash.code_worker_cleanup.take(session))
 
 
 @router.delete("", status_code=204)
@@ -153,4 +153,4 @@ async def empty_trash(user: User = Depends(get_current_user),
             folders.append(folder)
     await audit.record(session, actor=user.id, action="trash.empty", target=user.id)
     await session.commit()
-    await trash.purge_dirs(folders)
+    await trash.purge_dirs(folders + trash.code_worker_cleanup.take(session))

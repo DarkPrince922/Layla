@@ -258,10 +258,11 @@ async def test_review_mode_is_read_only(client, monkeypatch):
     assert state["status"] == "done", state
     assert calls[0]["tools"] == {
         "list_files", "read_file", "update_todos", "glob_files", "grep_files", "repo_map",
-        "list_skills", "read_skill", "delegate_agent", "web_search", "web_fetch", "github_search",
+        "list_skills", "read_skill", "web_search", "web_fetch", "github_search",
         "git_status", "git_log", "git_diff", "git_conflicts",
         "task_create", "task_get", "task_list", "task_update", "memory_search", "notebook_read",
         "ask_user",
+        "agent_start", "command_start", "worker_list", "worker_output", "worker_wait",
     }
     assert "REVIEW MODE" in calls[0]["conversation"][0]["content"]
 
