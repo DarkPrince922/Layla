@@ -62,7 +62,10 @@ async def list_tools(
         async with asyncio.timeout(timeout):
             async with _session(transport=transport, command=command, url=url, env=env) as session:
                 result = await session.list_tools()
-                return [{"name": t.name, "description": t.description} for t in result.tools]
+                return [{"name": t.name, "description": t.description,
+                         "input_schema": getattr(t, "inputSchema", None) or
+                                         {"type": "object", "additionalProperties": True}}
+                        for t in result.tools]
     except TimeoutError as exc:
         raise RuntimeError("Таймаут подключения к MCP-серверу") from exc
     except Exception as exc:

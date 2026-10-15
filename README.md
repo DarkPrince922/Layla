@@ -142,7 +142,10 @@ See [M3 usage, upgrade instructions and limits](docs/OSINT.md).
 **Code workspace update**
 - Local projects from scratch, safe text file create/edit/delete, and ZIP downloads.
 - Project-bound chat with OpenAI-compatible / Anthropic file tools, persona access
-  checks, persisted diffs and chat history; no shell execution in this flow.
+  checks, persisted diffs and chat history; repository map, glob/regex search,
+  public web/GitHub research, up to three read-only specialists and enabled MCP tools.
+- Isolated shell/code execution, dependency installation, tests, live preview and
+  autonomous Git inspection/commit/sync; project skills live in `.layla/skills/*.md`.
 - Editable files, stale-version conflict detection, and panels that fit mobile screens.
 - [Usage, API, migration and limits](docs/CODE_PROJECTS.md);
   [proposed UI references](docs/UI_REFERENCES.md).
