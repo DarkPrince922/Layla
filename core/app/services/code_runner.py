@@ -7,13 +7,17 @@ from __future__ import annotations
 
 import time
 from collections.abc import AsyncIterator
+from contextlib import aclosing
+from typing import Literal
 
+import anyio
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from starlette.concurrency import run_in_threadpool
 
 from app.services import files, sandbox
 
 RUN_TOOLS = frozenset({"run_command", "run_code", "start_preview", "check_preview", "stop_preview"})
+SHELL_TOOLS = frozenset({"command_changes"})
 PREVIEW_TOOLS = frozenset({"start_preview", "check_preview", "stop_preview"})
 # Что запускает команды — в режиме «С подтверждением» ждёт решения пользователя.
 NEEDS_APPROVAL = frozenset({"run_command", "run_code", "start_preview"})
@@ -34,6 +38,16 @@ class RunCommand(BaseModel):
     command: str = Field(min_length=1, max_length=8000)
     timeout: int = Field(default=sandbox.DEFAULT_TIMEOUT, ge=1, le=sandbox.MAX_TIMEOUT)
     stdin: str | None = Field(default=None, max_length=100_000)
+    shell: Literal["bash", "powershell"] = "bash"
+    cwd: str = Field(default=".", max_length=4096)
+    run_in_background: bool = False
+    interactive: bool = False
+
+
+class CommandChanges(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["list", "apply", "discard"] = "list"
+    change_id: str | None = Field(default=None, pattern=r"^[0-9a-f-]{36}$")
 
 
 class RunCode(BaseModel):
@@ -67,7 +81,7 @@ class StopPreview(BaseModel):
 
 
 _SCHEMAS = {"run_command": RunCommand, "run_code": RunCode, "start_preview": StartPreview,
-            "check_preview": CheckPreview, "stop_preview": StopPreview}
+            "check_preview": CheckPreview, "stop_preview": StopPreview, "command_changes": CommandChanges}
 
 
 def can_run(permissions: list[str] | None) -> bool:
@@ -84,7 +98,7 @@ def command_tool(box: dict) -> dict:
     listed = ", ".join(f"{name} ({version})" for name, version in tools.items()) or "bash"
     network = _NETWORK.get(box.get("network"), _NETWORK["off"])
     limit = (box.get("limits") or {}).get("max_timeout", sandbox.MAX_TIMEOUT)
-    return _spec("run_command", (
+    description = (
         "Run a bash command in this project's sandbox: a working copy of the current project files "
         f"with its own dependencies. Available: {listed}. A Python virtualenv (.venv) is active, so "
         "`pip install -r requirements.txt` works; `npm install` puts node_modules into the copy; "
@@ -95,7 +109,17 @@ def command_tool(box: dict) -> dict:
         "dependency, add it to requirements.txt / package.json, then install). Non-interactive: no "
         f"TTY, pass input via stdin. Killed at timeout (default 120 s, max {limit} s), so do not "
         "start servers or watchers; run one-shot commands."
-    ), RunCommand)
+    )
+    if box.get("file_changes"):
+        description = description.replace(
+            "Files the command creates or changes stay in the sandbox and are NOT saved to the project: change project files only with the file tools (for a new dependency, add it to requirements.txt / package.json, then install).",
+            "Eligible created/edited/deleted files return to the project with diffs and rollback checkpoints. Concurrent editor changes cause a conflict; results stay in command_changes until applied/discarded. Dependencies, caches and .git are excluded. Limits: 200 files / 32 MiB, 10 MiB per file."
+        ).replace("so do not start servers or watchers; run one-shot commands.",
+                  "use run_in_background=true or command_start for long-running commands. interactive=true keeps stdin open for REPLs (python -u -i, node -i, bash); use command_input and worker_output/stop. Interactive commands outlive this turn.")
+        description = description.replace("Non-interactive: no TTY, pass input via stdin.",
+                                          "No PTY. Foreground input uses stdin; interactive background commands accept command_input.")
+        description += " cwd is relative to project root (default .); shells available: " + ", ".join(box.get("shells", ["bash"])) + "."
+    return _spec("run_command", description, RunCommand)
 
 
 def code_tool(runtimes: list[dict]) -> dict:
@@ -138,6 +162,8 @@ def validate(name: str, arguments: dict) -> tuple[BaseModel | None, str | None]:
 
 def label(name: str, arguments: dict) -> str:
     """Что показать в карточке и на подтверждении: команда или язык с файлами."""
+    if name == "command_changes":
+        return "Файлы команды: " + str(arguments.get("action", "list"))
     if name == "run_command":
         return str(arguments.get("command") or "")[:2000]
     if name == "start_preview":
@@ -158,6 +184,18 @@ class Runner:
         self.owner_id = owner_id
         self.project_id = project_id
         self.root = root
+        self._command_chunks = []
+        self._active_stream = None
+
+    async def close(self):
+        stream, self._active_stream = self._active_stream, None
+        if stream is not None:
+            with anyio.CancelScope(shield=True):
+                await stream.aclose()
+
+    @property
+    def partial_output(self):
+        return _shown("".join(self._command_chunks))
 
     async def tools(self) -> list[dict]:
         found = []
@@ -165,6 +203,8 @@ class Runner:
         if box is not None:
             found.append(command_tool(box))
             found.extend(preview_tools())
+            if box.get("file_changes"):
+                found.append(_spec("command_changes", "Inspect pending command file changes after a conflict, interrupted connection or rejected import. action=apply retries with hash checks, diffs and rollback; discard explicitly abandons the pending result (requires change_id from list). No following command can overwrite an unresolved packet.", CommandChanges))
         runtimes = await sandbox.runtimes()
         if runtimes:
             found.append(code_tool(runtimes))
@@ -173,26 +213,45 @@ class Runner:
     async def command(self, args: RunCommand) -> AsyncIterator[dict]:
         """События {"output": весь вывод на сейчас} по ходу и {"result": ...} в конце."""
         chunks: list[str] = []
+        self._command_chunks = chunks
         exit_event: dict | None = None
         notes: list[str] = []
         shown_at = 0.0
+        dirty = False
         started = time.monotonic()
+        packet = None
         try:
-            async for event in sandbox.run(self.owner_id, self.project_id, self.root, args.command,
-                                           timeout=args.timeout, stdin=args.stdin):
-                kind = event.get("type")
-                if kind == "output":
-                    chunks.append(event.get("data", ""))
-                    if time.monotonic() - shown_at >= LIVE_EVERY:
+            box = await sandbox.info()
+            options = {}
+            if box and box.get("file_changes"):
+                options = {"collect_changes": True, "shell": args.shell, "cwd": args.cwd, "interactive": args.interactive}
+            elif args.shell != "bash" or args.cwd != "." or args.interactive:
+                raise sandbox.SandboxError("Для shell/cwd/REPL пересоберите sandbox: текущий backend не поддерживает shell lifecycle")
+            self._active_stream = sandbox.run(self.owner_id, self.project_id, self.root, args.command,
+                                              timeout=args.timeout, stdin=args.stdin, **options)
+            async with aclosing(self._active_stream) as events:
+                async for event in events:
+                    kind = event.get("type")
+                    if kind == "changes":
+                        packet = event
+                    elif kind == "output":
+                        chunks.append(event.get("data", ""))
+                        dirty = True
+                        if time.monotonic() - shown_at >= LIVE_EVERY:
+                            shown_at = time.monotonic()
+                            dirty = False
+                            yield {"output": _shown("".join(chunks))}
+                    elif kind == "heartbeat" and dirty:
                         shown_at = time.monotonic()
+                        dirty = False
                         yield {"output": _shown("".join(chunks))}
-                elif kind == "info":
-                    notes.append(event.get("data", ""))
-                    yield {"info": event.get("data", "")}
-                elif kind == "exit":
-                    exit_event = event
-                elif kind == "error":
-                    raise sandbox.SandboxError(event.get("data") or "Песочница не выполнила команду")
+                    elif kind == "info":
+                        notes.append(event.get("data", ""))
+                        yield {"info": event.get("data", "")}
+                    elif kind == "exit":
+                        exit_event = event
+                    elif kind == "error":
+                        raise sandbox.SandboxError(event.get("data") or "Песочница не выполнила команду")
         except sandbox.SandboxError as exc:
             yield {"result": {"error": str(exc)}}
             return
@@ -203,7 +262,12 @@ class Runner:
         if exit_event is None:
             yield {"result": {"error": "Песочница не сообщила результат команды", "output": _shown(text)}}
             return
-        yield {"result": _command_result(exit_event, text, time.monotonic() - started)}
+        result = _command_result(exit_event, text, time.monotonic() - started)
+        if packet is not None:
+            result["shell_packet"] = packet
+        elif options.get("collect_changes"):
+            result["error"] = "Песочница не вернула пакет файлов; проверьте command_changes перед продолжением"
+        yield {"result": result}
 
     async def call(self, name: str, args: BaseModel) -> dict:
         """Инструменты без живого вывода: run_code и превью."""
@@ -289,9 +353,13 @@ def _command_result(event: dict, text: str, took: float) -> dict:
     }
     if event.get("signal"):
         result["signal"] = event["signal"]
+        if not text.strip():
+            result["output"] = f"[Команда остановлена сигналом {event['signal']}; успешное завершение не подтверждено.]"
     if event.get("timed_out"):
         result["timed_out"] = True
         result["note"] = "The command was killed at the timeout."
+        if not text.strip():
+            result["output"] = "[Команда остановлена по таймауту; частичные файлы и вывод сохранены.]"
     if cut or event.get("truncated"):
         result["output_truncated"] = True
     result["shown"] = _shown(text)

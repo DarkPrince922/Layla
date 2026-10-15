@@ -159,6 +159,29 @@ def read_text(base: str | Path, rel: str) -> str:
     return read_file(base, rel)["content"]
 
 
+def read_blob(base: str | Path, rel: str) -> dict:
+    safe_join(base, rel)
+    parts = _parts(rel)
+    if not parts:
+        raise ValueError("Укажите путь файла")
+    with _root(base) as root, _directory(root, parts[:-1]) as parent:
+        data, info = _read_bytes(parent, parts[-1], MAX_UPLOAD_BYTES)
+    return {"path": "/".join(parts), "data": data, "sha256": _sha(data),
+            "mode": stat.S_IMODE(info.st_mode) & 0o777}
+
+
+def blob_change(path: str, before: bytes | None, after: bytes | None) -> dict:
+    try:
+        change = _change(path, _text(before) if before is not None else None,
+                         _text(after) if after is not None else None)
+    except ValueError:
+        change = {"path": path, "operation": "create" if before is None else "delete" if after is None else "edit",
+                  "diff": f"Binary file {path}: {len(before or b'')} → {len(after or b'')} bytes\n",
+                  "before_sha256": _sha(before) if before is not None else None,
+                  "after_sha256": _sha(after) if after is not None else None, "binary": True}
+    return change
+
+
 def _change(path: str, before: str | None, after: str | None) -> dict:
     operation = "create" if before is None else "delete" if after is None else "edit"
     lines = difflib.unified_diff(
@@ -197,6 +220,7 @@ def change_file(
     rel: str,
     content: str | bytes | None,
     expected_sha256: str | None,
+    *, binary: bool = False, mode: int | None = None, expected_mode: int | None = None,
 ) -> dict:
     """Create/edit/delete text, or store uploaded bytes. None hash creates.
 
@@ -207,8 +231,8 @@ def change_file(
     parts = _parts(rel)
     if not parts:
         raise ValueError("Укажите путь файла")
-    upload = isinstance(content, bytes)
-    data = content if upload else content.encode("utf-8") if content is not None else None
+    upload = isinstance(content, bytes) or binary
+    data = content if isinstance(content, bytes) else content.encode("utf-8") if content is not None else None
     limit = MAX_UPLOAD_BYTES if upload else MAX_FILE_BYTES
     if data is not None:
         if len(data) > limit:
@@ -231,6 +255,8 @@ def change_file(
             old is not None and _sha(old) != expected_sha256
         ):
             raise FileConflict("Файл изменился. Прочитайте его заново перед сохранением.")
+        if expected_mode is not None and (info is None or stat.S_IMODE(info.st_mode) & 0o777 != expected_mode):
+            raise FileConflict("Исполняемый флаг файла изменился. Прочитайте его заново.")
         before = _text(old) if old is not None and not upload else None
         if data is None:
             if old is None:
@@ -245,7 +271,8 @@ def change_file(
                     stream.write(data)
                     stream.flush()
                     os.fchmod(
-                        stream.fileno(), stat.S_IMODE(info.st_mode) & 0o777 if info else 0o644
+                        stream.fileno(), mode & 0o777 if mode is not None
+                        else stat.S_IMODE(info.st_mode) & 0o777 if info else 0o644
                     )
                     os.fsync(stream.fileno())
                 if old is None:
@@ -263,9 +290,7 @@ def change_file(
                     pass
         os.fsync(parent)
     if upload:
-        return {"path": "/".join(parts), "operation": "edit" if old is not None else "create",
-                "diff": "", "before_sha256": _sha(old) if old is not None else None,
-                "after_sha256": _sha(data)}
+        return blob_change("/".join(parts), old, data)
     return _change("/".join(parts), before, content)
 
 

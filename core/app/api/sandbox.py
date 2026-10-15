@@ -3,21 +3,28 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from contextlib import aclosing
+from typing import Literal
 
+import anyio
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from starlette.concurrency import run_in_threadpool
 
 from app.api.projects import _owned_project, _project_root
 from app.db import get_session, get_sessionmaker
+from app.models.code_shell import CodeShellRun
 from app.models.job import Job
 from app.models.user import User
 from app.schemas.job import JobOut
-from app.services import audit, code_lsp, code_runner, jobs, preview, sandbox
+from app.services import audit, code_lsp, code_runner, code_shell, files, jobs, preview, sandbox
 from app.services.auth import get_current_user, require_admin
 
 router = APIRouter(tags=["sandbox"])
+_shell_imports: set[str] = set()
 
 
 @router.get("/projects/{project_id}/lsp")
@@ -129,6 +136,8 @@ class RunIn(BaseModel):
     command: str = Field(min_length=1, max_length=8000)
     timeout: int = Field(default=sandbox.DEFAULT_TIMEOUT, ge=1, le=sandbox.MAX_TIMEOUT)
     stdin: str | None = Field(default=None, max_length=100_000)
+    shell: Literal["bash", "powershell"] = "bash"
+    cwd: str = Field(default=".", max_length=4096)
 
 
 def _sse(event: dict) -> bytes:
@@ -141,6 +150,7 @@ async def run_in_project(
     body: RunIn,
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
+    maker=Depends(get_sessionmaker),
 ) -> StreamingResponse:
     """Терминал проекта: команда в песочнице, вывод — потоком (SSE)."""
     project = await _owned_project(session, user, project_id)
@@ -151,16 +161,148 @@ async def run_in_project(
 
     async def stream() -> AsyncIterator[bytes]:
         try:
-            async for event in sandbox.run(user.id, project_id, root, body.command,
-                                           timeout=body.timeout, stdin=body.stdin):
-                if event.get("type") == "output":
-                    event = {**event, "data": sandbox.clean(event.get("data", ""))}
-                yield _sse(event)
+            box = await sandbox.info()
+            options = {"collect_changes": True, "shell": body.shell, "cwd": body.cwd} if box and box.get("file_changes") else {}
+            if not options and (body.shell != "bash" or body.cwd != "."):
+                raise sandbox.SandboxError("Пересоберите sandbox для shell/cwd")
+            async with aclosing(sandbox.run(user.id, project_id, root, body.command,
+                                           timeout=body.timeout, stdin=body.stdin, **options)) as events:
+                async for event in events:
+                    if event.get("type") == "changes":
+                        async for imported in _import_shell(maker, user, project_id, root, event):
+                            yield _sse(imported)
+                    else:
+                        if event.get("type") == "output":
+                            event = {**event, "data": sandbox.clean(event.get("data", ""))}
+                        yield _sse(event)
         except sandbox.SandboxError as exc:
             yield _sse({"type": "error", "data": str(exc)})
 
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"})
+
+
+async def _import_shell(maker, user, project_id, root, packet):
+    runner = code_runner.Runner(user.id, project_id, root)
+    async with maker() as session:
+        await _owned_project(session, user, project_id)
+        job = CodeShellRun(owner_id=user.id, project_id=project_id, status="running", result={"checkpoints": [],
+                            "expected": {item["path"]: item["after_sha256"] for item in packet.get("changes", [])},
+                            "expected_modes": {item["path"]: item.get("mode") for item in packet.get("changes", [])}})
+        session.add(job)
+        await session.commit()
+        _shell_imports.add(job.id)
+        finished = False
+        try:
+            async for item in code_shell.apply(runner, packet, {"id": job.id, "name": "shell_file"}):
+                if "checkpoint" in item:
+                    await _owned_project(session, user, project_id)
+                    job.result = {**job.result, "checkpoints": [*job.result["checkpoints"], item["checkpoint"]]}
+                    await session.commit()
+                elif "tool" in item:
+                    yield {"type": "file_change", "change": item["tool"]["change"]}
+                elif "shell_result" in item:
+                    result = item["shell_result"]
+                    job.status, job.error = ("error" if result.get("error") else "done"), result.get("error")
+                    job.result = {**job.result, "summary": result}
+                    await audit.record(session, actor=user.id, action="project.shell.import", target=project_id,
+                                       meta={"run_id": job.id, "paths": [change["path"] for change in result.get("applied", [])]})
+                    await session.commit()
+                    finished = True
+                    sandbox.preview_touch(user.id, project_id)
+                    yield {"type": "files", "run_id": job.id, **result}
+        finally:
+            _shell_imports.discard(job.id)
+            if not finished:
+                with anyio.CancelScope(shield=True):
+                    job.status, job.error = "error", "Импорт прервался; checkpoint сохранён, пакет доступен для повторного применения"
+                    await session.commit()
+
+
+@router.get("/projects/{project_id}/command-changes")
+async def pending_shell(project_id: str, user: User = Depends(get_current_user),
+                         session: AsyncSession = Depends(get_session)) -> dict:
+    project = await _owned_project(session, user, project_id)
+    try:
+        packet = await code_shell.fetch(code_runner.Runner(user.id, project_id, _project_root(project)))
+        return await run_in_threadpool(code_shell.describe, packet, _project_root(project))
+    except (ValueError, OSError, sandbox.SandboxError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/projects/{project_id}/command-changes")
+async def resolve_shell(project_id: str, body: code_runner.CommandChanges, user: User = Depends(get_current_user),
+                         session: AsyncSession = Depends(get_session), maker=Depends(get_sessionmaker)) -> dict:
+    project = await _owned_project(session, user, project_id)
+    runner = code_runner.Runner(user.id, project_id, _project_root(project))
+    try:
+        packet = await code_shell.fetch(runner)
+        if not body.change_id or body.change_id != packet.get("id"):
+            raise ValueError("Пакет изменений сменился; обновите список")
+        if body.action == "discard":
+            await code_shell.acknowledge(runner, packet)
+            await audit.record(session, actor=user.id, action="project.shell.discard", target=project_id,
+                               meta={"change_id": body.change_id})
+            await session.commit()
+            return {"discarded": body.change_id}
+        if body.action != "apply":
+            raise ValueError("Нужно apply или discard")
+        result = {"changes": []}
+        async for event in _import_shell(maker, user, project_id, runner.root, packet):
+            if event["type"] == "file_change":
+                result["changes"].append(event["change"])
+            else:
+                result.update(event)
+        return result
+    except (ValueError, OSError, sandbox.SandboxError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/projects/{project_id}/shell-history")
+async def shell_history(project_id: str, user: User = Depends(get_current_user),
+                          session: AsyncSession = Depends(get_session)) -> list[dict]:
+    await _owned_project(session, user, project_id)
+    rows = list(await session.scalars(select(CodeShellRun).where(CodeShellRun.owner_id == user.id,
+                                     CodeShellRun.project_id == project_id).order_by(CodeShellRun.created_at.desc()).limit(100)))
+    for row in rows:
+        if row.status == "running" and row.id not in _shell_imports:
+            row.status = "interrupted"
+    await session.commit()
+    return [{"id": row.id, "status": row.status, "rolled_back": row.result.get("rolled_back", False),
+             "paths": [point["path"] for point in row.result.get("checkpoints", [])]}
+            for row in rows if row.result.get("checkpoints")]
+
+
+@router.post("/projects/{project_id}/shell-history/{run_id}/rollback")
+async def rollback_shell(project_id: str, run_id: str, user: User = Depends(get_current_user),
+                           session: AsyncSession = Depends(get_session)) -> dict:
+    project = await _owned_project(session, user, project_id)
+    row = await session.get(CodeShellRun, run_id)
+    if row is None or row.owner_id != user.id or row.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Запуск не найден")
+    if row.id in _shell_imports or row.result.get("rolled_back"):
+        raise HTTPException(status_code=409, detail="Запуск работает или уже отменён")
+    root = _project_root(project)
+    try:
+        # Check every path before restoring any; never discard later editor changes silently.
+        for point in row.result.get("checkpoints", []):
+            try:
+                current = await run_in_threadpool(files.read_blob, root, point["path"])
+            except FileNotFoundError:
+                current = {"sha256": None, "mode": None}
+            expected_mode = row.result.get("expected_modes", {}).get(point["path"])
+            if current["sha256"] != row.result["expected"][point["path"]] or expected_mode is not None and current["mode"] != expected_mode:
+                raise ValueError(point["path"] + ": файл изменился после команды; автоматический откат отклонён")
+        for point in reversed(row.result.get("checkpoints", [])):
+            await run_in_threadpool(code_shell.restore, root, point, expected_sha256=row.result["expected"][point["path"]],
+                                    expected_mode=row.result.get("expected_modes", {}).get(point["path"]))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    row.result = {**row.result, "rolled_back": True}
+    await audit.record(session, actor=user.id, action="project.shell.rollback", target=project_id, meta={"run_id": run_id})
+    await session.commit()
+    sandbox.preview_touch(user.id, project_id)
+    return {"restored": [point["path"] for point in row.result.get("checkpoints", [])]}
 
 
 class RunCodeIn(BaseModel):

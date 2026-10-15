@@ -1,24 +1,27 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Globe, Loader2, Play, RotateCcw, Square, SquareTerminal, Trash2 } from "lucide-react";
 import {
   ApiError,
   api,
   runInProject,
   type FileNode,
+  type FileChange,
   type RunCodeResult,
   type SandboxStatus,
   type ToolEvent,
 } from "@/lib/api";
 import { OutputPane, RunBadge, seconds } from "@/components/RunOutput";
 import { confirmAction } from "@/components/ConfirmDialog";
+import { FileDiff } from "@/components/FileDiff";
+import { ShellChangesPanel } from "@/components/ShellChangesPanel";
 
 /** Запуск, заказанный извне (кнопка «Запустить» у файла). */
 export type RunRequest = { id: number; path: string };
 
-type Entry = ToolEvent & { started: number };
+type Entry = ToolEvent & { started: number; changes?: FileChange[] };
 
 const TIMEOUTS = [30, 120, 300, 600, 900];
 const quote = (path: string) => `'${path.replace(/'/g, `'\\''`)}'`;
@@ -62,7 +65,8 @@ function suggestions(files: FileNode[]): string[] {
   return out;
 }
 
-export function ProjectTerminal({ projectId, request }: { projectId: string; request: RunRequest | null }) {
+export function ProjectTerminal({ projectId, request, onFileChange }: { projectId: string; request: RunRequest | null; onFileChange?: (change: FileChange) => void }) {
+  const qc = useQueryClient();
   const status = useQuery({ queryKey: ["sandbox-status"], queryFn: () => api.get<SandboxStatus>("/sandbox/status"), staleTime: 30_000 });
   const root = useQuery({
     queryKey: ["project-files", projectId, "."],
@@ -71,6 +75,8 @@ export function ProjectTerminal({ projectId, request }: { projectId: string; req
   const [entries, setEntries] = useState<Entry[]>([]);
   const [input, setInput] = useState("");
   const [timeout, setTimeoutValue] = useState(120);
+  const [shell, setShell] = useState("bash");
+  const [cwd, setCwd] = useState(".");
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [past, setPast] = useState<string[]>([]);
@@ -102,11 +108,13 @@ export function ProjectTerminal({ projectId, request }: { projectId: string; req
     abort.current = controller;
     setRunning(true);
     try {
-      await runInProject(projectId, { command: text, timeout }, event => {
+      await runInProject(projectId, { command: text, timeout, shell, cwd }, event => {
         if (event.type === "output") update(id, e => ({ output: ((e.output || "") + event.data).slice(-200_000) }));
         else if (event.type === "info") update(id, { note: event.data });
         else if (event.type === "error") update(id, { status: "error", error: event.data });
         else if (event.type === "exit") update(id, { status: "done", exit_code: event.code, duration_s: event.duration, timed_out: event.timed_out });
+        else if (event.type === "file_change") { update(id, e => ({ changes: [...(e.changes || []), event.change] })); onFileChange?.(event.change); }
+        else if (event.type === "files" && event.error) update(id, { status: "error", error: event.error });
       }, controller.signal);
       update(id, e => (e.status === "running" ? { status: "error", error: "Соединение прервалось" } : {}));
     } catch (e) {
@@ -115,6 +123,7 @@ export function ProjectTerminal({ projectId, request }: { projectId: string; req
     } finally {
       abort.current = null;
       setRunning(false);
+      await Promise.all([qc.invalidateQueries({ queryKey: ["shell-changes"] }), qc.invalidateQueries({ queryKey: ["shell-history"] }), qc.invalidateQueries({ queryKey: ["project-files", projectId] })]);
     }
   }
 
@@ -185,6 +194,10 @@ export function ProjectTerminal({ projectId, request }: { projectId: string; req
           <span className="flex items-center gap-1" title="Интернет из песочницы"><Globe className="h-3 w-3" />{box.network === "proxy" ? "реестры пакетов" : "без сети"}</span>
         </> : <span className="text-amber-300">недоступна</span>}
         <span className="flex-1" />
+        {!!box?.file_changes && <>
+          <select aria-label="Shell" value={shell} onChange={e => setShell(e.target.value)} disabled={running} className="rounded-md bg-ink-900 px-2 py-1">{(box.shells || ["bash"]).map(name => <option key={name}>{name}</option>)}</select>
+          <input aria-label="Рабочая папка" value={cwd} onChange={e => setCwd(e.target.value)} disabled={running} className="w-24 rounded-md bg-ink-900 px-2 py-1 font-mono" title="Путь внутри проекта" />
+        </>}
         <select aria-label="Предел времени команды" value={timeout} onChange={e => setTimeoutValue(Number(e.target.value))} className="rounded-md bg-ink-900 px-2 py-1">
           {TIMEOUTS.map(t => <option key={t} value={t}>до {t >= 60 ? `${t / 60} мин` : `${t} с`}</option>)}
         </select>
@@ -196,7 +209,7 @@ export function ProjectTerminal({ projectId, request }: { projectId: string; req
           Песочница не запущена. Она поднимается вместе с Layla (сервис <code>sandbox</code> в docker compose) — обновите установку по инструкции и перезапустите.
         </div>}
         {!entries.length && !unavailable && <div className="px-2 py-6 text-center text-xs leading-relaxed text-neutral-500">
-          Команды выполняются в копии проекта: можно ставить зависимости, запускать тесты и сборку. Изменения, которые делают команды, в проект не сохраняются.
+          Команды выполняются в песочнице: можно ставить зависимости, запускать тесты, генераторы и сборку. {box?.file_changes ? "Изменения файлов возвращаются в проект с дифами и откатом; конфликты сохраняются для решения." : "Пересоберите sandbox для возврата файлов в проект."}
         </div>}
         {entries.map(entry => <div key={entry.id} className={`overflow-hidden rounded-lg border text-xs ${entry.status === "error" || (entry.status === "done" && entry.exit_code !== 0) ? "border-red-500/30" : "border-ink-700"}`}>
           <div className="flex items-center gap-2 px-3 py-2">
@@ -207,7 +220,9 @@ export function ProjectTerminal({ projectId, request }: { projectId: string; req
           {entry.status === "running" && entry.note && !entry.output && <p className="border-t border-ink-700 px-3 py-2 text-neutral-500">{entry.note}</p>}
           {(entry.output || entry.status !== "running") && <div className="border-t border-ink-700"><OutputPane text={entry.output || ""} live={entry.status === "running"} className="max-h-[28rem]" /></div>}
           {entry.error && <p className="border-t border-red-500/20 px-3 py-2 text-red-300">{entry.error}</p>}
+          {entry.changes?.map(change => <FileDiff key={change.path} change={change} />)}
         </div>)}
+        {!!box?.file_changes && <ShellChangesPanel projectId={projectId} running={running} onFileChange={onFileChange} />}
       </div>
       {error && <p role="alert" className="mx-3 mb-2 text-xs text-red-300">{error}</p>}
       <div className="border-t border-ink-700 p-3">

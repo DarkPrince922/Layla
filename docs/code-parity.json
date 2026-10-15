@@ -4034,8 +4034,8 @@
     {
       "archive_tool": "BashTool",
       "status": "partial",
-      "layla": "run_command, command_start",
-      "notes": "Foreground/background sandbox commands with durable output, wait and cancellation. Shell writes do not sync to the project; no PTY or full archive shell lifecycle."
+      "layla": "run_command, command_start, command_input, command_changes, worker_command_changes",
+      "notes": "Foreground/background commands, project-relative cwd, persistent stdin for interactive processes, live output, timeout/stop, binary/text/mode file imports with diffs, CAS conflicts, durable pending results and rollback. Missing PTY, automatic in-place foreground promotion, full shell snapshot/profile and archive-specific permission semantics."
     },
     {
       "archive_tool": "BriefTool",
@@ -4071,7 +4071,7 @@
       "archive_tool": "ExitWorktreeTool",
       "status": "partial",
       "layla": "worker_apply, worker_discard",
-      "notes": "Retain private edits, import selected text diffs with optimistic hashes/checkpoints, or explicitly discard. No archive-compatible lead cwd transition or branch publication."
+      "notes": "Retain private edits, import selected text/binary/mode changes with optimistic hashes/checkpoints, or explicitly discard. No archive-compatible lead cwd transition or branch publication."
     },
     {
       "archive_tool": "FileEditTool",
@@ -4135,15 +4135,15 @@
     },
     {
       "archive_tool": "PowerShellTool",
-      "status": "missing",
-      "layla": "",
-      "notes": "Current execution backend is Linux/bash; no Windows PowerShell backend."
+      "status": "partial",
+      "layla": "run_command/command_start shell=powershell",
+      "notes": "Conditional pwsh backend probing, no-profile argv execution, cwd/stdin/background/output/stop and file imports. No Windows host, PTY, archive-specific CLM/parser/permission behavior. Default image has no pwsh; unavailable use fails explicitly."
     },
     {
       "archive_tool": "REPLTool",
-      "status": "missing",
-      "layla": "",
-      "notes": "No persistent interactive REPL state."
+      "status": "partial",
+      "layla": "command_start interactive=true, command_input, worker_output/stop",
+      "notes": "Persistent per-worker OS process stdin and state for Python/Node/bash REPLs, EOF, live output and stop; owner/chat/project isolation and file collection. No archive primitive-tools JS kernel API, PTY or restoration of in-memory variables after restart."
     },
     {
       "archive_tool": "ReadMcpResourceTool",
@@ -4374,7 +4374,7 @@
         "tasks/LocalShellTask/",
         "tasks/RemoteAgentTask/"
       ],
-      "notes": "Independent agent/sandbox command jobs, durable output, explicit detach, cancellation and retained-workspace resume. Commands restart from the beginning; shell writes do not sync to source and no persistent OS process survives restart."
+      "notes": "Independent agent/command jobs, project-scoped sandbox locks, live/durable output, detach, interactive stdin, EOF/stop, partial file recovery and text/binary/mode imports via worker_apply. Resume restarts a command; no OS process survives restart and no automatic in-place foreground promotion."
     },
     {
       "id": "git_worktrees",

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy import DateTime, ForeignKey, String, Text
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -57,4 +57,6 @@ class Checkpoint(UUIDPk, Base):
     message_id: Mapped[str] = mapped_column(ForeignKey("messages.id", ondelete="CASCADE"), index=True)
     path: Mapped[str] = mapped_column(String(4096), nullable=False)
     content: Mapped[str | None] = mapped_column(Text)
+    encoding: Mapped[str] = mapped_column(String(16), default="utf-8", server_default="utf-8")
+    mode: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)

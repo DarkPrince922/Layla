@@ -45,9 +45,10 @@ def write(root: Path, rel: str, data, mode: int) -> None:
     if final.exists() or final.is_symlink():
         _clear(final)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
-    fd = os.open(final, flags, 0o755 if mode & 0o111 else 0o644)
+    fd = os.open(final, flags, mode & 0o777)
     with os.fdopen(fd, "wb") as out:
         shutil.copyfileobj(data, out)
+        os.fchmod(out.fileno(), mode & 0o777)
 
 
 def remove(root: Path, rel: str) -> None:

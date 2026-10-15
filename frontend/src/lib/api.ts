@@ -285,7 +285,7 @@ export interface ToolEvent {
   signal?: string | number | null;
 }
 
-export const RUN_TOOLS = new Set(["run_command", "run_code", "start_preview", "check_preview", "stop_preview"]);
+export const RUN_TOOLS = new Set(["run_command", "run_code", "command_changes", "start_preview", "check_preview", "stop_preview"]);
 /** Превью приложения проекта: состояние процесса в песочнице и ссылка для браузера. */
 export type PreviewState = {
   state: "none" | "starting" | "running" | "no_port" | "exited" | "stopped" | "idle" | "lifetime" | "unavailable" | string;
@@ -353,6 +353,8 @@ export interface SandboxStatus {
   sandbox: {
     available: boolean;
     tools?: Record<string, string>;
+    shells?: ("bash" | "powershell")[];
+    file_changes?: number;
     network?: "proxy" | "off";
     limits?: { max_timeout: number; default_timeout: number; max_output: number; max_parallel: number };
   };
@@ -366,6 +368,8 @@ export interface PistonPackage {
 }
 
 export type RunEvent =
+  | { type: "file_change"; change: FileChange }
+  | { type: "files"; run_id: string; applied: FileChange[]; error?: string; pending_changes?: string }
   | { type: "info"; data: string }
   | { type: "output"; data: string }
   | { type: "error"; data: string }
@@ -374,7 +378,7 @@ export type RunEvent =
 /** Команда в песочнице проекта; события приходят по мере выполнения. */
 export async function runInProject(
   projectId: string,
-  body: { command: string; timeout?: number; stdin?: string },
+  body: { command: string; timeout?: number; stdin?: string; shell?: string; cwd?: string },
   onEvent: (event: RunEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
