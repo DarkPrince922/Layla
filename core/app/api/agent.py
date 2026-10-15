@@ -66,8 +66,19 @@ def _attack_box_runner(server: Server | None, worker_directory: str | None = Non
         result = await ssh_exec.run(cfg, command)
         pin["host_key"] = result.host_key
         if result.exit_code != 0:
-            raise ssh_exec.SSHError(f"Команда завершилась с кодом {result.exit_code}: {result.output[:1500]}")
-        return result.output
+            detail = result.output[:1500] if result.output.strip() else "stdout и stderr пусты"
+            raise ssh_exec.SSHError(f"Команда завершилась с кодом {result.exit_code}: {detail}")
+        output = result.output
+        if not output.strip():
+            # Успех без вывода — не отдаём агенту пустую строку: он принимает её за сбой
+            # или зависание. Объясняем, что произошло, и куда мог уйти вывод.
+            output = (f"[Команда завершилась успешно (код {result.exit_code}), но не вывела ни stdout, "
+                      "ни stderr. Это нормально для записи в файл, фонового запуска или команды без "
+                      "вывода. Если ожидался результат — прочитай целевой файл/лог отдельной командой "
+                      "(cat/tail/grep или read_remote_file).]")
+        elif result.truncated:
+            output += "\n[…вывод обрезан на пределе; дочитай нужные части через файл и grep/head/tail.]"
+        return output
 
     return runner, pin
 

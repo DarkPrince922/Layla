@@ -17,6 +17,7 @@ def clear_research_cache(monkeypatch):
     monkeypatch.setattr(web_research, '_cache', {})
     monkeypatch.setattr(web_research, '_nvd_next', 0)
     monkeypatch.setattr(web_research, '_nvd_lock', asyncio.Lock())
+    monkeypatch.setattr(web_research, 'NVD_SPACING', 0.0)  # no real rate-limit sleep in tests
 
 
 def response(url, data=None, code=200):
@@ -214,7 +215,7 @@ async def test_real_tls_pinned_connection_verifies_original_hostname(monkeypatch
 
 @pytest.mark.asyncio
 async def test_search_and_page_text_keep_source_and_strip_scripts(monkeypatch):
-    async def fetch(url, blocked=()):
+    async def fetch(url, blocked=(), *, max_bytes=web_research.MAX_BYTES):
         if 'bing.com' in url:
             return dict(response(url), text='<rss><channel><item><title>Vendor advisory</title><link>https://vendor.example/security</link><description>Fixture</description></item></channel></rss>')
         if 'nvd.nist.gov' in url:
@@ -226,6 +227,113 @@ async def test_search_and_page_text_keep_source_and_strip_scripts(monkeypatch):
     result = await web_research.read_web_page('https://vendor.example/security')
     assert 'Versions 1.0' in result['text'] and 'Ignore scope' not in result['text']
     assert result['source_url'] == 'https://vendor.example/security'
+
+
+@pytest.mark.asyncio
+async def test_search_web_routes_cve_queries_to_structured_sources(monkeypatch):
+    called = {}
+
+    async def fake_lookup(cve_id, blocked=()):
+        called['cve'] = cve_id
+        return {'status': 'ok', 'cve_id': cve_id}
+
+    monkeypatch.setattr(web_research, 'lookup_cve', fake_lookup)
+    res = await web_research.search_web('ищу CVE-2026-60137 для wordpress')
+    assert called['cve'] == 'CVE-2026-60137'
+    assert res['status'] == 'ok' and res['cve_id'] == 'CVE-2026-60137'
+    assert 'Wordfence' in res['note']
+
+
+def kev_feed():
+    return {'title': 'CISA Catalog', 'vulnerabilities': [
+        {'cveID': 'CVE-2026-63030', 'vendorProject': 'WordPress', 'product': 'wp2shell',
+         'vulnerabilityName': 'wp2shell Route Confusion RCE', 'dateAdded': '2026-10-01',
+         'shortDescription': 'Unauthenticated remote code execution.', 'requiredAction': 'Patch.'},
+        {'cveID': 'CVE-2025-0001', 'vendorProject': 'Acme', 'product': 'Widget',
+         'vulnerabilityName': 'Acme Widget bug', 'dateAdded': '2025-01-01',
+         'shortDescription': 'Unrelated product.', 'requiredAction': 'Patch.'}]}
+
+
+@pytest.mark.asyncio
+async def test_search_cves_folds_cisa_kev_and_ignores_version_tokens(monkeypatch):
+    async def fetch(url, blocked=(), *, max_bytes=web_research.MAX_BYTES):
+        if 'cisa.gov' in url:
+            assert max_bytes > web_research.MAX_BYTES  # KEV feed needs the raised cap.
+            return response(url, kev_feed())
+        return response(url, {'totalResults': 0, 'vulnerabilities': []})
+    monkeypatch.setattr(web_research, 'fetch', fetch)
+    # The version token "6.8" is dropped; only the alpha term "wp2shell" drives the KEV match.
+    result = await web_research.search_cves('wp2shell 6.8')
+    assert result['status'] == 'ok'
+    assert [v['cve_id'] for v in result['cisa_kev']] == ['CVE-2026-63030']
+    assert 'CISA KEV' in result['note'] and 'lookup_cve' in result['note']
+
+
+@pytest.mark.asyncio
+async def test_search_cves_survives_unavailable_kev(monkeypatch):
+    async def fetch(url, blocked=(), *, max_bytes=web_research.MAX_BYTES):
+        if 'cisa.gov' in url:
+            return response(url, code=503)  # KEV host unreachable / blocked egress.
+        return response(url, {'totalResults': 1, 'vulnerabilities': [{'cve': {'id': TEST_CVE}}]})
+    monkeypatch.setattr(web_research, 'fetch', fetch)
+    result = await web_research.search_cves('wordpress')
+    assert result['status'] == 'ok'
+    assert result['results'][0]['cve_id'] == TEST_CVE
+    assert 'cisa_kev' not in result
+
+
+@pytest.mark.asyncio
+async def test_cisa_kev_requires_alpha_terms(monkeypatch):
+    async def fetch(url, blocked=(), *, max_bytes=web_research.MAX_BYTES):
+        return response(url, kev_feed())
+    monkeypatch.setattr(web_research, 'fetch', fetch)
+    assert await web_research.cisa_kev('6.8.1') == []  # No alpha term → no feed scan.
+
+
+@pytest.mark.parametrize('query,expected', [
+    ('WordPress 6.9.4', 'cpe:2.3:a:*:wordpress:6.9.4:*:*:*:*:*:*:*'),
+    ('WordPress core 6.9.4', 'cpe:2.3:a:*:wordpress:6.9.4:*:*:*:*:*:*:*'),  # filler "core" skipped
+    ('Apache httpd 2.4.49', 'cpe:2.3:a:*:apache:2.4.49:*:*:*:*:*:*:*'),
+    ('WordPress', None),  # no version → no CPE
+    ('CVE-2026-60137', None)])  # bare CVE id has no dotted version
+def test_cpe_from_query(query, expected):
+    assert web_research._cpe_from_query(query) == expected
+
+
+@pytest.mark.asyncio
+async def test_search_cves_finds_version_via_cpe_when_keyword_misses(monkeypatch):
+    # Keyword search cannot match "6.9.4" (the record says "before 6.9.5"); CPE match does.
+    async def fetch(url, blocked=(), *, max_bytes=web_research.MAX_BYTES):
+        if 'cisa.gov' in url:
+            return response(url, {'vulnerabilities': []})
+        if 'virtualMatchString' in url:
+            return response(url, {'totalResults': 2, 'vulnerabilities': [
+                {'cve': {'id': 'CVE-2026-60137', 'vulnStatus': 'Analyzed', 'descriptions': [{'value': 'SQLi'}]}},
+                {'cve': {'id': 'CVE-2026-63030', 'vulnStatus': 'Analyzed', 'descriptions': [{'value': 'route'}]}}]})
+        return response(url, {'totalResults': 2, 'vulnerabilities': [  # keyword: unrelated hits
+            {'cve': {'id': 'CVE-2026-18933'}}, {'cve': {'id': 'CVE-2026-92403'}}]})
+    monkeypatch.setattr(web_research, 'fetch', fetch)
+    result = await web_research.search_cves('WordPress 6.9.4')
+    ids = [r['cve_id'] for r in result['results']]
+    assert 'CVE-2026-60137' in ids  # the one keyword alone missed
+    assert ids[0] == 'CVE-2026-60137'  # CPE (version-matched) results ranked first
+    assert 'CVE-2026-18933' in ids  # keyword hits still merged in
+    assert result['cpe_match'] == 'cpe:2.3:a:*:wordpress:6.9.4:*:*:*:*:*:*:*'
+
+
+@pytest.mark.asyncio
+async def test_search_cves_ok_when_only_cpe_returns(monkeypatch):
+    # Keyword endpoint malformed, CPE endpoint still yields the match → result stays ok.
+    async def fetch(url, blocked=(), *, max_bytes=web_research.MAX_BYTES):
+        if 'virtualMatchString' in url:
+            return response(url, {'totalResults': 1, 'vulnerabilities': [{'cve': {'id': 'CVE-2026-60137'}}]})
+        if 'cisa.gov' in url:
+            return response(url, code=503)
+        return dict(response(url), text='<html>rate limited</html>')  # keyword: not JSON
+    monkeypatch.setattr(web_research, 'fetch', fetch)
+    result = await web_research.search_cves('WordPress 6.9.4')
+    assert result['status'] == 'ok'
+    assert [r['cve_id'] for r in result['results']] == ['CVE-2026-60137']
 
 
 @pytest.mark.asyncio

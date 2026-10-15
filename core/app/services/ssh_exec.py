@@ -17,6 +17,7 @@ from dataclasses import dataclass
 import asyncssh
 
 CONNECT_TIMEOUT = 15
+COMMAND_TIMEOUT = 3600  # c: потолок на одну команду (долгие сканы/эксплойты); вывод буферизуется, не стримится
 MAX_OUTPUT = 200_000  # байт вывода команды, дальше обрезается
 
 
@@ -130,14 +131,21 @@ async def probe(cfg: SSHConfig) -> SSHResult:
         await conn.wait_closed()
 
 
-async def run(cfg: SSHConfig, command: str, timeout: int = 300) -> SSHResult:
+async def run(cfg: SSHConfig, command: str, timeout: int = COMMAND_TIMEOUT) -> SSHResult:
     """Выполнить команду на attack box и вернуть объединённый вывод (stdout+stderr)."""
     conn, host_key = await _connect(cfg)
     try:
         try:
             result = await conn.run(command, timeout=timeout, check=False)
         except asyncssh.TimeoutError as exc:
-            raise SSHError(f"Команда не завершилась за {timeout} c") from exc
+            # Отдаём частичный вывод, собранный до убийства по таймауту, чтобы долгая
+            # экстракция не теряла весь прогресс (asyncssh.TimeoutError несёт stdout/stderr).
+            out = str(getattr(exc, "stdout", "") or "")
+            err = str(getattr(exc, "stderr", "") or "")
+            partial = out if not err else (f"{out}\n{err}" if out else err)
+            tail = partial[-8000:]
+            suffix = f" Частичный вывод до остановки:\n{tail}" if tail.strip() else " Частичного вывода не получено."
+            raise SSHError(f"Команда не завершилась за {timeout} c.{suffix}") from exc
         stdout = result.stdout or ""
         stderr = result.stderr or ""
         combined = stdout if not stderr else f"{stdout}\n{stderr}" if stdout else stderr
