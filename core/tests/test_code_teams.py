@@ -236,3 +236,30 @@ async def test_mail_pagination_and_durable_order(client, db_sessionmaker, monkey
     async with db_sessionmaker() as session:
         messages = list(await session.scalars(select(CodeTeamMessage).order_by(CodeTeamMessage.sequence)))
         assert all(row.delivered for row in messages)
+
+
+@pytest.mark.parametrize("decision", ["approve", "reject"])
+async def test_team_tool_confirm_dispatch_is_reviewable_and_honours_rejection(client, db_sessionmaker, monkeypatch, decision):
+    manager, _chat, root = await setup(client, db_sessionmaker)
+    count = 0
+
+    async def turn(*_):
+        nonlocal count
+        count += 1
+        if count == 1:
+            yield "done", ([], [], {}, [{"id": "team", "type": "function", "function": {
+                "name": "team_create", "arguments": '{"team_name":"approved-team"}'}}])
+        else:
+            yield "done", (["Finished"], [], {}, [])
+
+    async def approve(pending):
+        assert pending["status"] == "pending"  # UI and job approval contract
+        assert pending["path"] == "approved-team"
+        assert (await manager.team.info())["team"] is None
+        return decision
+
+    monkeypatch.setattr(project_agent, "_turn", turn)
+    events = [event async for event in project_agent.run(SimpleNamespace(), "", "m",
+        [{"role": "user", "content": "Create a team"}], str(root), workers=manager, mode="confirm", approve=approve)]
+    assert any(event.get("tool", {}).get("status") == ("done" if decision == "approve" else "rejected") for event in events)
+    assert bool((await manager.team.info())["team"]) == (decision == "approve")

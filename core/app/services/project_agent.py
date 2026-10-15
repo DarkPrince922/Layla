@@ -1146,12 +1146,13 @@ async def run(
                     yield {"tool": final}
                     continue
                 if team is not None and name in code_teams.SCHEMAS and name in allowed_names:
-                    event = {"id": f"{round_number}:{call['id']}", "name": name, "path": "",
-                             "command": str(arguments.get("summary") or arguments.get("to") or arguments.get("team_name") or name),
+                    event = {"id": f"{round_number}:{call['id']}", "name": name,
+                             "path": str(arguments.get("to") or arguments.get("team_name") or ""),
+                             "command": str(arguments.get("message") or arguments.get("description") or arguments.get("team_name") or name)[:12000],
                              "status": "running"}
                     yield {"tool": event}
                     if ask is not None and name in ("team_create", "team_delete", "send_message"):
-                        pending = {**event, "status": "awaiting_approval"}
+                        pending = {**event, "status": "pending"}
                         yield {"tool": pending}
                         decision = await ask(pending)
                         if decision == "approve_all":
@@ -1161,7 +1162,7 @@ async def run(
                     result = await team.call(name, arguments) if decision != "reject" else {"error": "Отклонено пользователем"}
                     conversation.append({"role": "tool", "tool_call_id": call["id"],
                                          "content": json.dumps(result, ensure_ascii=False), "is_error": "error" in result})
-                    yield {"tool": {**event, "status": "error" if "error" in result else "done",
+                    yield {"tool": {**event, "status": "rejected" if decision == "reject" else "error" if "error" in result else "done",
                                     **({"error": result["error"]} if "error" in result else {"note": "Сохранено в команде"})}}
                     continue
                 if workers is not None and name in code_workers.SCHEMAS and name in allowed_names:
