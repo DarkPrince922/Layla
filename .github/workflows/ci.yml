@@ -61,6 +61,8 @@ jobs:
       - run: pytest -q
         env:
           LAYLA_TEST_TS_SERVER: ${{ runner.temp }}/layla-lsp/node_modules/.bin/typescript-language-server
+      - name: Verify shell lifecycle with isolated workspace UIDs
+        run: sudo env "PATH=$PATH" PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider tests/test_changes.py
 
   frontend:
     runs-on: ubuntu-latest
