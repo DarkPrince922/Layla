@@ -49,6 +49,7 @@ from app.schemas.job import JobOut
 from app.services import (
     agent_git,
     audit,
+    code_hooks,
     code_lsp,
     code_mcp,
     code_runner,
@@ -433,6 +434,8 @@ async def send_message(
                                                  root, permissions, provider_id=provider.id, model=model)
                     if chat.domain == Domain.code else None,
                     lsp=code_lsp.Client(user.id, chat.project_id, root) if chat.domain == Domain.code else None,
+                    workflow=code_hooks.Runtime(code_runner.Runner(user.id, chat.project_id, root), permissions,
+                                                session_id=chat.id) if chat.domain == Domain.code else None,
                 ):
                     yield event
             else:
@@ -851,7 +854,9 @@ async def run_chat(
             async for event in project_agent.run(prov, key, model, messages, root, permissions,
                                                  mode=mode, approve=approve, caps=caps, extra=extra,
                                                  runner=runner, git=git, mcp=mcp, runtime=runtime, workers=workers,
-                                                 lsp=code_lsp.Client(owner_id, project_id, root) if domain == "code" else None):
+                                                 lsp=code_lsp.Client(owner_id, project_id, root) if domain == "code" else None,
+                                                 workflow=code_hooks.Runtime(runner, permissions, mode=mode,
+                                                                             session_id=chat_id) if domain == "code" else None):
                 if "delta" in event:
                     full.append(event["delta"])
                 elif "retract" in event:
@@ -914,7 +919,7 @@ async def run_chat(
                         await persist(tool.get("change") if tool["status"] == "done" else None)
                         if tool.get("change") and tool["status"] == "done":
                             sandbox.preview_touch(owner_id, project_id)  # запущенное превью подхватит правку
-                        if ((tool["name"] in code_runner.RUN_TOOLS or tool["name"] in agent_git.GIT_MUTATING)
+                        if ((tool["name"] in code_runner.RUN_TOOLS or tool["name"] in agent_git.GIT_MUTATING or tool["name"] == "project_hook")
                                 and tool["status"] in ("done", "error")):
                             await _audit_run(maker, owner_id, project_id, tool)
                 if time.monotonic() - last_persist >= 0.7:

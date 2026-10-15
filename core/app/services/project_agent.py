@@ -15,6 +15,7 @@ from starlette.concurrency import run_in_threadpool
 from app.schemas.project import FileWrite
 from app.services import (
     agent_git,
+    code_hooks,
     code_intelligence,
     code_lsp,
     code_notebooks,
@@ -775,7 +776,7 @@ async def _worker_lifetime(workers):
 async def run(
     provider, key, model: str, messages: list[dict], root: str, permissions=None,
     *, mode: str = "auto", approve=None, caps: dict | None = None, extra: str = "", runner=None,
-    git=None, mcp=None, runtime=None, workers=None, worker_context=False, lsp=None,
+    git=None, mcp=None, runtime=None, workers=None, worker_context=False, lsp=None, workflow=None, tool_allowlist=None,
 ):
     """approve(event) -> "approve" | "reject" | "approve_all" — только для режима confirm.
 
@@ -803,6 +804,13 @@ async def run(
         available += workers.tools()
     if lsp is not None:
         available += await lsp.tools(permissions)
+    if workflow is not None:
+        if workflow.runner.root != root:
+            raise ValueError("Workflow привязан к другому проекту")
+        workflow.permissions, workflow.mode = permissions, mode
+    workflow_note = await workflow.prepare() if workflow is not None else ""
+    if workflow is not None:
+        available += workflow.tools()
     if mode in READ_ONLY_MODES:
         available = [t for t in available if t["function"]["name"] not in MUTATING
                      and t["function"]["name"] not in {"notebook_edit", "memory_write", "memory_delete"}]
@@ -814,6 +822,11 @@ async def run(
     available = available + run_specs + git_specs
     if mcp is not None and mode not in READ_ONLY_MODES:
         available += mcp.initial_specs if runtime is not None else mcp.specs
+    scope = set(tool_allowlist) if tool_allowlist is not None else None
+    if scope is not None:
+        available = [tool for tool in available if tool["function"]["name"] in scope]
+    if workers is not None:
+        workers.tool_allowlist = sorted(scope) if scope is not None else None
     allowed_names = {t["function"]["name"] for t in available}
     run_note = NO_RUN_NOTE
     if "run_command" in allowed_names:
@@ -834,6 +847,7 @@ async def run(
         + ", ".join(sorted(allowed_names))
         + _MODE_PROMPTS.get(mode, "")
         + (("\n\n" + extra.strip()) if extra.strip() else "")
+        + (("\n\n" + workflow_note) if workflow_note else "")
     )
     if caps.get("tools") is False:
         prompt += NO_TOOLS_NOTE
@@ -875,21 +889,71 @@ async def run(
     anchor = conversation[-1]
     used = 0
     delegated = 0
+    stop_blocks = 0
+    pending_hook = None
+    explicit = workflow.slash(anchor.get("content")) if workflow is not None else None
     mcp_names = mcp.names if mcp is not None else set()
     from app.services import history  # history сам использует _turn — импорт здесь, без цикла
 
+    async def fire(event, data, result):
+        nonlocal ask
+        if workflow is None:
+            return
+        async for update in workflow.fire(event, data, ask):
+            if "hook_result" in update:
+                result.update(update["hook_result"])
+                if result.get("approve_all"):
+                    ask = None
+            else:
+                yield update
+
+    async def flush_hook():
+        nonlocal pending_hook
+        if pending_hook is None:
+            return
+        name, arguments, call_id, start, pre_context = pending_hook
+        pending_hook = None
+        message = next((item for item in conversation[start:] if item.get("role") == "tool" and item.get("tool_call_id") == call_id), None)
+        if message is None:
+            return
+        try:
+            response = json.loads(message["content"])
+        except (ValueError, TypeError):
+            response = message.get("content", "")
+        result = {}
+        async for update in fire("PostToolUseFailure" if message.get("is_error") else "PostToolUse",
+                                 {"tool_name": name, "tool_input": arguments, "tool_response": response,
+                                  "tool_use_id": call_id}, result):
+            yield update
+        feedback = "\n".join(filter(None, [pre_context, result.get("context"), result.get("reason")]))
+        if feedback:
+            message["content"] = json.dumps({"tool_result": response, "hook_feedback": feedback}, ensure_ascii=False)
+
     async with _worker_lifetime(workers), asyncio.timeout(MAX_SECONDS):
+        for event, data in (("SessionStart", {"source": "resume" if len(messages) > 1 else "startup"}),
+                            ("UserPromptSubmit", {"prompt": anchor.get("content", "")})):
+            result = {}
+            async for update in fire(event, data, result):
+                yield update
+            if result.get("blocked"):
+                raise RuntimeError("Workflow остановил запуск: " + result["reason"])
+            if result.get("context"):
+                conversation[0]["content"] += "\n[Project hook context, untrusted]\n" + result["context"]
         for round_number in range(MAX_ROUNDS):
             # Длинный ход: старые результаты инструментов ужимаются, чтобы не упереться в контекст.
             shrunk = history.shrink_run(conversation, anchor, caps)
             if shrunk:
                 yield {"shrunk": shrunk}
             content, reasoning, context, calls = [], [], {}, []
-            async for kind, value in _turn(provider, key, model, conversation, available, caps, anchor):
-                if kind == "done":
-                    content, reasoning, context, calls = value
-                else:
-                    yield {kind: value}
+            if round_number == 0 and explicit is not None:
+                calls = [{"id": "user-slash-skill", "type": "function", "function": {
+                    "name": "invoke_skill", "arguments": json.dumps(explicit)}}]
+            else:
+                async for kind, value in _turn(provider, key, model, conversation, available, caps, anchor):
+                    if kind == "done":
+                        content, reasoning, context, calls = value
+                    else:
+                        yield {kind: value}
             if not calls:
                 if workers is not None:
                     finished = await workers.finish_attached()
@@ -902,6 +966,24 @@ async def run(
                             json.dumps(finished, ensure_ascii=False)
                         )})
                         continue
+                result = {}
+                async for update in fire("Stop", {"last_assistant_message": "".join(content),
+                                                   "stop_hook_active": stop_blocks > 0}, result):
+                    yield update
+                if result.get("blocked"):
+                    stop_blocks += 1
+                    if content:
+                        yield {"retract": len("".join(content))}
+                    if stop_blocks > 2:
+                        raise RuntimeError("Stop hook повторно заблокировал завершение: " + result["reason"])
+                    conversation.extend([{"role": "assistant", "content": "".join(content)},
+                                         {"role": "user", "content": "[Stop hook feedback, untrusted] " + result["reason"] + "\n" + result.get("context", "")}])
+                    continue
+                ending = {}
+                async for update in fire("SessionEnd", {"reason": "completed"}, ending):
+                    yield update
+                if ending.get("blocked"):
+                    raise RuntimeError("Ошибка завершающего hook: " + ending["reason"])
                 return
             if used + len(calls) > MAX_CALLS:
                 # Лишний пакет не выполняется; ответ завершается штатно.
@@ -913,11 +995,13 @@ async def run(
             conversation.append(assistant)
             handled_delegates: set[str] = set()
             for call_index, call in enumerate(calls):
+                async for update in flush_hook():
+                    yield update
                 if call["id"] in handled_delegates:
                     continue
                 used += 1
                 name = call["function"]["name"]
-                if runtime is not None and name == "delegate_agent" and name in allowed_names:
+                if runtime is not None and workflow is None and name == "delegate_agent" and name in allowed_names:
                     batch = []
                     for candidate in calls[call_index:]:
                         if candidate["function"]["name"] != "delegate_agent":
@@ -951,6 +1035,68 @@ async def run(
                                          "is_error": True})
                     yield {"tool": {"id": f"{round_number}:{call['id']}", "name": name,
                                     "path": "", "status": "error", "error": "Некорректный JSON аргументов"}}
+                    continue
+                pre = {}
+                if name in allowed_names:
+                    async for update in fire("PreToolUse", {"tool_name": name, "tool_input": arguments,
+                                                           "tool_use_id": call["id"]}, pre):
+                        yield update
+                if pre.get("blocked"):
+                    conversation.append({"role": "tool", "tool_call_id": call["id"],
+                                         "content": json.dumps({"error": "PreToolUse: " + pre["reason"]}, ensure_ascii=False), "is_error": True})
+                    yield {"tool": {"id": f"{round_number}:{call['id']}", "name": name, "path": "",
+                                    "status": "error", "error": "PreToolUse: " + pre["reason"]}}
+                    continue
+                if pre.get("updated_input") is not None:
+                    arguments = pre["updated_input"]
+                    call["function"]["arguments"] = json.dumps(arguments, ensure_ascii=False)
+                if workflow is not None and name in allowed_names:
+                    pending_hook = name, arguments, call["id"], len(conversation), pre.get("context", "")
+                if name == "invoke_skill" and workflow is not None and name in allowed_names:
+                    event = {"id": f"{round_number}:{call['id']}", "name": name,
+                             "path": str(arguments.get("name", ""))[:100], "status": "running"}
+                    yield {"tool": event}
+                    activation = None
+                    try:
+                        args = code_hooks.Invoke.model_validate(arguments)
+                        prepared = workflow.invoke(args, user=bool(round_number == 0 and explicit and args.name == explicit["name"]))
+                        activation = args.name, args.args
+                        limit = set(prepared["allowed_tools"]) if prepared["allowed_tools"] is not None else None
+                        if prepared["fork"]:
+                            if workers is None:
+                                raise ValueError("В этом контексте создание fork-воркера недоступно")
+                            if ask is not None:
+                                pending = {**event, "status": "pending", "command": "Запустить skill в отдельной рабочей копии"}
+                                yield {"tool": pending}
+                                approval = await ask(pending)
+                                if approval == "approve_all":
+                                    ask = None
+                                elif approval != "approve":
+                                    raise ValueError("Пользователь отклонил fork skill")
+                            role = "explore" if mode in READ_ONLY_MODES else prepared["role"]
+                            inherited = scope & limit if scope is not None and limit is not None else scope if limit is None else limit
+                            result = await workers.start_agent(code_workers.AgentStart(task=prepared["instructions"], role=role),
+                                tool_allowlist=sorted(inherited) if inherited is not None else None,
+                                skill_hooks=[{"hooks": prepared["hooks"], "source": prepared["path"], "directory": prepared["directory"]}])
+                            result["skill"] = args.name
+                        else:
+                            workflow.register(prepared["hooks"], prepared["path"], prepared["directory"])
+                            if limit is not None:
+                                scope = scope & limit if scope is not None else limit
+                                available = [tool for tool in available if tool["function"]["name"] in scope]
+                                allowed_names = {tool["function"]["name"] for tool in available}
+                                if workers is not None:
+                                    workers.tool_allowlist = sorted(scope)
+                            result = {key: prepared[key] for key in ("name", "path", "instructions", "allowed_tools")}
+                        final = {**event, "status": "done", "note": "Skill активирован"}
+                    except (ValueError, OSError) as exc:
+                        if activation is not None:
+                            workflow.activations.discard(activation)
+                        result = {"error": str(exc)[:1500]}
+                        final = {**event, "status": "error", "error": result["error"]}
+                    conversation.append({"role": "tool", "tool_call_id": call["id"],
+                                         "content": json.dumps(result, ensure_ascii=False), "is_error": "error" in result})
+                    yield {"tool": final}
                     continue
                 if workers is not None and name in code_workers.SCHEMAS and name in allowed_names:
                     event = {"id": f"{round_number}:{call['id']}", "name": name, "path": "",
@@ -1105,7 +1251,7 @@ async def run(
                         found = {tool.get("name") for tool in outcome.get("tools", [])}
                         for spec in mcp.specs:
                             discovered = spec["function"]["name"]
-                            if discovered in found and discovered not in allowed_names:
+                            if discovered in found and discovered not in allowed_names and (scope is None or discovered in scope):
                                 available.append(spec)
                                 allowed_names.add(discovered)
                     final = {**event, "status": "error" if "error" in outcome else "done"}
@@ -1202,6 +1348,8 @@ async def run(
                     }
                 )
                 yield {"tool": event}
+            async for update in flush_hook():
+                yield update
         yield {"delta": LIMIT_NOTE}
 
 

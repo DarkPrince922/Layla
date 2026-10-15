@@ -4172,8 +4172,8 @@
     {
       "archive_tool": "SkillTool",
       "status": "partial",
-      "layla": "list_skills, read_skill",
-      "notes": "Project Markdown and SKILL.md discovery; missing frontmatter execution policy, argument expansion and hooks."
+      "layla": "list_skills, read_skill, invoke_skill, /name",
+      "notes": "Bounded project YAML metadata, literal positional/named arguments, user/model invocation flags, narrowing tool scopes, run-scoped hooks and context=fork through isolated workers. Missing model overrides, dynamic shell substitution, plugin/bundled/remote skills and full archive permission-grant semantics."
     },
     {
       "archive_tool": "SleepTool",
@@ -4324,13 +4324,13 @@
     },
     {
       "id": "hooks",
-      "status": "missing",
+      "status": "partial",
       "archive_paths": [
         "utils/hooks.ts",
         "utils/hooks/",
         "query/stopHooks.ts"
       ],
-      "notes": "Need event registry, sandbox execution and result handling for session/tool/task lifecycle hooks."
+      "notes": "Code-only sandbox command hooks: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse/Failure, Stop and SessionEnd. Snapshot config, once, matchers, disableAllHooks, deny/update/context, confirmation, stop retry limits and audit. Missing prompt/agent/http/async hooks, remaining events, full regex matching and session persistence."
     },
     {
       "id": "plugins",
@@ -4355,7 +4355,7 @@
       "archive_paths": [
         "skills/"
       ],
-      "notes": "Basic project skills supported; bundled workflows, invocation policies, hooks and package integration remain."
+      "notes": "Project SKILL.md/Markdown metadata, flags, literal args, run-scoped hooks, narrowed tools and fork workers; snapshot catalogue and Code picker. Bundled workflows, nested conditional discovery, dynamic shell substitution, model overrides and plugin/package lifecycle remain."
     },
     {
       "id": "project_instructions",
@@ -4490,14 +4490,14 @@
     },
     {
       "id": "commands",
-      "status": "missing",
+      "status": "partial",
       "archive_paths": [
         "commands/",
         "commands.ts",
         "entrypoints/",
         "replLauncher.tsx"
       ],
-      "notes": "Need compatible slash-command registry and entrypoint behavior."
+      "notes": "Project /skill commands and legacy .layla/.claude commands directories, user-invocable checks and Code picker. Built-in command suite, namespaces and CLI/remote entrypoints remain."
     },
     {
       "id": "output_styles",
