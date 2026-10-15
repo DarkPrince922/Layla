@@ -15,8 +15,10 @@ from app.schemas.project import FileWrite
 from app.services import (
     agent_git,
     code_intelligence,
+    code_notebooks,
     code_research,
     code_runner,
+    code_state,
     files,
     provider_client,
     provider_errors,
@@ -213,6 +215,8 @@ DELEGATE_PROMPTS = {
 
 def _new_content(root: str, name: str, args) -> tuple[str | None, str | None]:
     """Содержимое файла после вызова и версия, от которой оно посчитано (для записи)."""
+    if name == "notebook_edit":
+        return code_notebooks.new_content(root, args)
     if name == "write_file":
         return args.content, args.expected_sha256
     if name == "delete_file":
@@ -239,6 +243,11 @@ def execute(root: str, name: str, arguments: dict, allowed_names: set[str] | Non
     """Validate every argument; the model cannot supply/override a project root."""
     if allowed_names is not None and name not in allowed_names:
         return {"error": "Инструмент недоступен выбранной персоне"}
+    if name in code_notebooks.SCHEMAS:
+        try:
+            return code_notebooks.execute(root, name, arguments)
+        except (ValueError, OSError) as exc:
+            return {"error": str(exc)[:1500]}
     schema = _ARGUMENTS.get(name)
     if schema is None:
         return {"error": "Неизвестный инструмент"}
@@ -345,7 +354,8 @@ def permitted_tools(permissions: list[str] | None) -> list[dict]:
 def preview(root: str, name: str, arguments: dict) -> dict | None:
     """Diff будущего изменения — показать пользователю до применения."""
     try:
-        args = _ARGUMENTS[name].model_validate(arguments)
+        schema = code_notebooks.SCHEMAS.get(name) or _ARGUMENTS[name]
+        args = schema.model_validate(arguments)
         content, _ = _new_content(root, name, args)
         return files.preview_change(root, args.path, content)
     except Exception:  # noqa: BLE001 — нет превью, но решение всё равно за пользователем
@@ -627,7 +637,7 @@ async def _turn(provider, key, model, conversation, available, caps, anchor=None
 
 
 async def _delegate_agent(provider, key, model: str, root: str, request: DelegateAgent,
-                          caps: dict, extra: str) -> dict:
+                          caps: dict, extra: str, progress=None) -> dict:
     """Run an isolated read-only specialist and return its final report to the lead."""
     names = {"list_files", "read_file", "glob_files", "grep_files", "repo_map",
              "list_skills", "read_skill", *code_research.SCHEMAS}
@@ -666,8 +676,12 @@ async def _delegate_agent(provider, key, model: str, root: str, request: Delegat
         for call in calls:
             used += 1
             name = call["function"]["name"]
+            if progress is not None:
+                await progress({"tool": name, "round": round_number + 1, "tool_calls": used})
             try:
                 arguments = json.loads(call["function"]["arguments"])
+                if not isinstance(arguments, dict):
+                    raise TypeError("Expected a JSON object")
                 if name in code_research.SCHEMAS:
                     result = await code_research.execute(name, arguments)
                 else:
@@ -681,10 +695,74 @@ async def _delegate_agent(provider, key, model: str, root: str, request: Delegat
             "rounds": DELEGATE_ROUNDS, "tool_calls": used, "truncated": True}
 
 
+async def _parallel_delegates(calls: list[dict], remaining: int, round_number: int,
+                              provider, key, model, root, caps, extra):
+    """Run an adjacent batch concurrently; cancel children when the parent stops.
+
+    A queue keeps progress visible while the model calls are running. Results are
+    consumed in completion order and later appended to the model in request order.
+    Children are read-only, so the batch cannot race project mutations.
+    """
+    queue: asyncio.Queue = asyncio.Queue()
+    tasks: list[asyncio.Task] = []
+
+    async def worker(call: dict, slot: int):
+        name = "delegate_agent"
+        event = {"id": f"{round_number}:{call['id']}", "name": name, "path": "explore",
+                 "status": "running", "command": ""}
+        try:
+            arguments = json.loads(call["function"]["arguments"])
+            request = DelegateAgent.model_validate(arguments)
+            event.update(path=request.role, command=request.task[:2000])
+            await queue.put({"tool": dict(event)})
+            if slot >= remaining:
+                outcome = {"error": "За один запрос можно запустить не более 3 специалистов."}
+            else:
+                async def progress(update):
+                    await queue.put({"tool": {**event, "note": (
+                        f"Ход {update['round']} · {update['tool']} · "
+                        f"{update['tool_calls']} инструментов"
+                    )}})
+
+                outcome = await _delegate_agent(
+                    provider, key, model, root, request, caps, extra, progress=progress,
+                )
+        except (ValueError, TypeError) as exc:
+            outcome = {"error": str(exc)[:1000]}
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — isolate provider failures, never cancellation
+            # Provider errors must not take down other independent specialists
+            # or expose authentication details in the chat.
+            outcome = {"error": "Специалист завершился с ошибкой провайдера. Остальные результаты сохранены."}
+        final = {**event, "status": "error" if "error" in outcome or outcome.get("truncated") else "done"}
+        if "error" in outcome:
+            final["error"] = outcome["error"]
+        else:
+            final.update(output=outcome.get("report", "")[:40000], note=(
+                f"{outcome.get('rounds', 0)} ходов · {outcome.get('tool_calls', 0)} инструментов"
+            ))
+        await queue.put({"tool": final})
+        await queue.put({"delegate_result": (call["id"], outcome)})
+
+    try:
+        tasks = [asyncio.create_task(worker(call, slot)) for slot, call in enumerate(calls)]
+        completed = 0
+        while completed < len(tasks):
+            event = await queue.get()
+            completed += "delegate_result" in event
+            yield event
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def run(
     provider, key, model: str, messages: list[dict], root: str, permissions=None,
     *, mode: str = "auto", approve=None, caps: dict | None = None, extra: str = "", runner=None,
-    git=None, mcp=None,
+    git=None, mcp=None, runtime=None,
 ):
     """approve(event) -> "approve" | "reject" | "approve_all" — только для режима confirm.
 
@@ -696,9 +774,15 @@ async def run(
     инструменты не обязаны корректно объявлять побочные эффекты.
     """
     caps = caps if caps is not None else {}
-    available = permitted_tools(permissions)
+    available = list(permitted_tools(permissions))
+    if runtime is not None and (permissions is None or "files.read" in permissions):
+        available += code_state.TOOLS
+        available += [tool for tool in code_notebooks.TOOLS
+                      if tool["function"]["name"] != "notebook_edit"
+                      or permissions is None or "files.write" in permissions]
     if mode in READ_ONLY_MODES:
-        available = [t for t in available if t["function"]["name"] not in MUTATING]
+        available = [t for t in available if t["function"]["name"] not in MUTATING
+                     and t["function"]["name"] not in {"notebook_edit", "memory_write", "memory_delete"}]
     # Запуск кода: только если песочница/Piston работают, роль это разрешает и режим не «План».
     run_specs = []
     if runner is not None and code_runner.can_run(permissions) and mode != "plan":
@@ -706,7 +790,7 @@ async def run(
     git_specs = agent_git.specs(mode) if git is not None and agent_git.can_use(permissions) else []
     available = available + run_specs + git_specs
     if mcp is not None and mode not in READ_ONLY_MODES:
-        available += mcp.specs
+        available += mcp.initial_specs if runtime is not None else mcp.specs
     allowed_names = {t["function"]["name"] for t in available}
     run_note = NO_RUN_NOTE
     if "run_command" in allowed_names:
@@ -730,6 +814,16 @@ async def run(
     )
     if caps.get("tools") is False:
         prompt += NO_TOOLS_NOTE
+    if runtime is not None:
+        prompt += (
+            "\nCode runtime: use task_list to resume durable work. For multi-step work create tasks "
+            "with task_create, record prerequisites, update progress and verified results with "
+            "task_update. Do not recreate existing tasks. Use notebook_read/notebook_edit for .ipynb. "
+            "Store concise decisions or unfinished work with memory_write; search memory when needed."
+        )
+        prompt += "\n" + await runtime.context()
+        prompt += ("\nFor independent read-only investigations issue multiple delegate_agent calls "
+                   "in the same response: they run concurrently, up to three total specialists.")
     ask = approve if mode == "confirm" else None
     taken: set[str] = set()  # файлы, чьё исходное состояние уже сохранено в контрольной точке
     conversation = [{"role": "system", "content": prompt}, *messages]
@@ -737,7 +831,7 @@ async def run(
     anchor = conversation[-1]
     used = 0
     delegated = 0
-    mcp_names = set(mcp.routes) if mcp is not None else set()
+    mcp_names = mcp.names if mcp is not None else set()
     from app.services import history  # history сам использует _turn — импорт здесь, без цикла
 
     async with asyncio.timeout(MAX_SECONDS):
@@ -762,10 +856,68 @@ async def run(
             if reasoning:
                 assistant["reasoning_content"] = "".join(reasoning)
             conversation.append(assistant)
-            for call in calls:
+            handled_delegates: set[str] = set()
+            for call_index, call in enumerate(calls):
+                if call["id"] in handled_delegates:
+                    continue
                 used += 1
                 name = call["function"]["name"]
-                arguments = json.loads(call["function"]["arguments"])
+                if runtime is not None and name == "delegate_agent" and name in allowed_names:
+                    batch = []
+                    for candidate in calls[call_index:]:
+                        if candidate["function"]["name"] != "delegate_agent":
+                            break
+                        batch.append(candidate)
+                    results = {}
+                    async for update in _parallel_delegates(
+                        batch, max(0, 3 - delegated), round_number, provider, key, model, root, caps, extra,
+                    ):
+                        if "delegate_result" in update:
+                            call_id, outcome = update["delegate_result"]
+                            results[call_id] = outcome
+                        else:
+                            yield update
+                    for candidate in batch:
+                        result = results[candidate["id"]]
+                        conversation.append({"role": "tool", "tool_call_id": candidate["id"],
+                                             "content": json.dumps(result, ensure_ascii=False),
+                                             "is_error": "error" in result})
+                        handled_delegates.add(candidate["id"])
+                    used += len(batch) - 1
+                    delegated += len(batch)
+                    continue
+                try:
+                    arguments = json.loads(call["function"]["arguments"])
+                    if not isinstance(arguments, dict):
+                        raise TypeError("Expected a JSON object")
+                except (ValueError, TypeError):
+                    conversation.append({"role": "tool", "tool_call_id": call["id"],
+                                         "content": json.dumps({"error": "Аргументы должны быть JSON-объектом"}),
+                                         "is_error": True})
+                    yield {"tool": {"id": f"{round_number}:{call['id']}", "name": name,
+                                    "path": "", "status": "error", "error": "Некорректный JSON аргументов"}}
+                    continue
+                if runtime is not None and name in code_state.SCHEMAS and name in allowed_names:
+                    result = await runtime.call(name, arguments)
+                    event = {"id": f"{round_number}:{call['id']}", "name": name, "path": "",
+                             "status": "error" if "error" in result else "done"}
+                    if name == "ask_user" and "question" in result:
+                        yield {"tool": {**event, "status": "running", "note": "Ожидает ответа на вопросы"}}
+                        result = await runtime.wait_for_answer(result["question"]["id"])
+                        event["status"] = "error" if "error" in result else "done"
+                    if "error" in result:
+                        event["error"] = result["error"]
+                    if "tasks" in result:
+                        yield {"todos": [
+                            {"content": ("⏳ " if task["blocked"] else "") + task["subject"],
+                             "status": "done" if task["status"] == "completed" else task["status"]}
+                            for task in result["tasks"]
+                        ]}
+                    yield {"tool": event}
+                    conversation.append({"role": "tool", "tool_call_id": call["id"],
+                                         "content": json.dumps(result, ensure_ascii=False),
+                                         "is_error": "error" in result})
+                    continue
                 if name == "update_todos" and name in allowed_names:
                     # План — не действие с файлами: показываем чеклистом, модели — краткое «принято».
                     result = execute(root, name, arguments, allowed_names)
@@ -844,6 +996,13 @@ async def run(
                         outcome = await mcp.call(name, arguments)
                     except (RuntimeError, ValueError) as exc:
                         outcome = {"error": str(exc)[:1500]}
+                    if runtime is not None and name == "mcp_search_tools" and "error" not in outcome:
+                        found = {tool.get("name") for tool in outcome.get("tools", [])}
+                        for spec in mcp.specs:
+                            discovered = spec["function"]["name"]
+                            if discovered in found and discovered not in allowed_names:
+                                available.append(spec)
+                                allowed_names.add(discovered)
                     final = {**event, "status": "error" if "error" in outcome else "done"}
                     if "error" in outcome:
                         final["error"] = str(outcome["error"])
@@ -889,7 +1048,7 @@ async def run(
                                          "is_error": "error" in outcome})
                     continue
                 yield {"tool": event}
-                if ask is not None and name in MUTATING and name in allowed_names:
+                if ask is not None and name in (MUTATING | {"notebook_edit"}) and name in allowed_names:
                     change = await run_in_threadpool(preview, root, name, arguments)
                     pending = {**event, "status": "pending"}
                     if change:
@@ -912,7 +1071,7 @@ async def run(
                         })
                         yield {"tool": rejected}
                         continue
-                if name in MUTATING and name in allowed_names:
+                if name in (MUTATING | {"notebook_edit"}) and name in allowed_names:
                     # Контрольная точка: исходный файл сохраняется до изменения (для отката).
                     saved = await run_in_threadpool(snapshot, root, arguments.get("path"), taken)
                     if saved is not None:

@@ -382,6 +382,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
       <button aria-label="Новый чат" onClick={() => select(null)} disabled={sending || !ready} className="icon-button"><Plus className="h-5 w-5" /></button>
     </div>
     <div ref={scroll} className="chat-scroll min-h-0 flex-1 space-y-5 overflow-y-auto p-5">
+      {domain === "code" && chatId && ready && <CodeWorkState key={`${scope}:${chatId}`} chatId={chatId} scope={scope} running={running} onResume={text => send({ text, mode })} />}
       {history.isError || detail.isError ? <p role="alert" className="text-red-300">Не удалось загрузить историю. <button onClick={() => { history.refetch(); detail.refetch(); }} className="underline">Повторить</button></p> : !ready || (chatId && detail.isPending) ? <p className="text-sm text-neutral-500">Загрузка истории…</p> : !messages.length && <div className="chat-welcome mx-auto my-12 max-w-sm text-center"><div className="empty-orb mx-auto mb-5"><Bot className="h-7 w-7" /></div><h2 className="text-xl font-semibold">Что сделаем сегодня?</h2><p className="mt-3 text-sm leading-relaxed text-neutral-400">Опишите задачу. Можно переключаться между разделами и создавать новые чаты — работа продолжится, история и файлы сохранятся.</p></div>}
       {messages.map(m => m.meta?.kind === "summary" ? <details key={m.id} className="rounded-xl border border-dashed border-ink-600 px-4 py-2 text-xs text-neutral-400">
         <summary className="flex cursor-pointer list-none items-center gap-2 [&::-webkit-details-marker]:hidden"><FoldVertical className="h-3.5 w-3.5 shrink-0 text-accent-300" /><span className="flex-1">Контекст сжат · {m.meta.count || "старые"} сообщений выше модель видит как сводку</span><ChevronDown className="h-3.5 w-3.5" /></summary>
@@ -431,6 +432,88 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
 }
 
 /** План агента (update_todos): что сделано, что в работе, что впереди. */
+type DurableTask = { id: string; subject: string; description: string; status: "pending" | "in_progress" | "completed"; blocked: boolean; blocked_by: string[]; owner?: string | null; result: string };
+type CodeQuestion = { id: string; status: "pending" | "answered"; questions: { header: string; question: string; options: { label: string; description: string }[]; multi_select: boolean }[]; answers: Record<string, string[]> };
+
+function CodeWorkState({ chatId, scope, running, onResume }: { chatId: string; scope: string; running: boolean; onResume: (text: string) => Promise<void> }) {
+  const state = useQuery({
+    queryKey: ["code-state", scope, chatId, running],
+    queryFn: () => api.get<{ tasks: DurableTask[]; memory: Record<string, { content: string }>; questions?: CodeQuestion[] }>(`/chats/${chatId}/code-state`),
+    refetchInterval: running ? 1500 : false,
+    retry: false,
+  });
+  const tasks = state.data?.tasks || [];
+  const notes = Object.entries(state.data?.memory || {});
+  const questions = state.data?.questions || [];
+  if (!tasks.length && !notes.length && !questions.length) return null;
+  const done = tasks.filter(task => task.status === "completed").length;
+  const working = tasks.filter(task => task.status === "in_progress").length;
+  const subjects = new Map(tasks.map(task => [task.id, task.subject]));
+  return <div className="space-y-3">
+    {questions.slice(-3).map(group => <CodeQuestionForm key={group.id} chatId={chatId} group={group} onSaved={() => state.refetch()} onResume={onResume} />)}
+    {(tasks.length > 0 || notes.length > 0) && <details className="rounded-xl border border-accent-500/20 bg-accent-500/5 p-3 text-xs">
+    <summary className="flex cursor-pointer list-none items-center gap-2 [&::-webkit-details-marker]:hidden">
+      {running && working ? <Loader2 className="h-4 w-4 animate-spin text-accent-300" /> : <ListChecks className="h-4 w-4 text-accent-300" />}
+      <span className="flex-1 text-neutral-300">Задачи чата · {done}/{tasks.length}{working > 0 ? ` · в работе: ${working}` : ""}{notes.length > 0 ? ` · заметок: ${notes.length}` : ""}</span>
+      <ChevronDown className="h-3.5 w-3.5 text-neutral-500" />
+    </summary>
+    <div className="mt-3 max-h-96 space-y-2 overflow-y-auto border-t border-ink-700 pt-3">
+      {tasks.map(task => <details key={task.id} className="rounded-lg bg-ink-950/40 px-3 py-2">
+        <summary className="cursor-pointer text-neutral-300">{task.status === "completed" ? "✓" : task.status === "in_progress" ? "◉" : task.blocked ? "⏳" : "○"} {task.subject}{task.owner ? ` · ${task.owner}` : ""}</summary>
+        {task.description && <p className="mt-2 whitespace-pre-wrap text-neutral-400">{task.description}</p>}
+        {!!task.blocked_by.length && <p className="mt-2 text-neutral-500">После: {task.blocked_by.map(id => subjects.get(id) || id).join(", ")}</p>}
+        {task.result && <p className="mt-2 whitespace-pre-wrap text-emerald-300/80">{task.result}</p>}
+      </details>)}
+      {notes.map(([key, note]) => <details key={key} className="rounded-lg bg-ink-950/40 px-3 py-2 text-neutral-400"><summary className="cursor-pointer">Память · {key}</summary><p className="mt-2 whitespace-pre-wrap">{note.content}</p></details>)}
+    </div>
+    </details>}
+  </div>;
+}
+
+function CodeQuestionForm({ chatId, group, onSaved, onResume }: { chatId: string; group: CodeQuestion; onSaved: () => Promise<unknown>; onResume: (text: string) => Promise<void> }) {
+  const [selected, setSelected] = useState<Record<string, string[]>>({});
+  const [custom, setCustom] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const answers = Object.fromEntries(group.questions.map((question, index) => {
+    const key = String(index);
+    const text = (custom[key] || "").trim();
+    return [key, text ? question.multi_select ? [...(selected[key] || []), text] : [text] : selected[key] || []];
+  }));
+  async function submit() {
+    if (saving || !Object.values(answers).every(value => value.length)) return;
+    setSaving(true); setError(null);
+    try {
+      const response = await api.post<{ resume_needed: boolean }>(`/chats/${chatId}/code-state/answer`, { question_id: group.id, answers });
+      await onSaved();
+      if (response.resume_needed) {
+        await onResume("Ответы на вопросы:\n" + group.questions.map((question, index) => `${question.question}: ${answers[String(index)].join(", ")}`).join("\n") + "\nПродолжи исходную задачу с учётом этих ответов.");
+      }
+    } catch (e) { setError(e instanceof Error ? e.message : "Не удалось передать ответ"); }
+    finally { setSaving(false); }
+  }
+  if (group.status === "answered") return <details className="rounded-xl border border-ink-700 p-3 text-xs text-neutral-400"><summary className="cursor-pointer">✓ Ответы на вопросы сохранены</summary>{group.questions.map((question, index) => <p key={index} className="mt-2 whitespace-pre-wrap">{question.question}: {group.answers[String(index)]?.join(", ")}</p>)}</details>;
+  return <form onSubmit={event => { event.preventDefault(); void submit(); }} className="rounded-xl border border-accent-400/30 bg-accent-500/5 p-4 text-sm">
+    <p className="mb-3 font-medium text-accent-200">Агент ждёт вашего ответа</p>
+    <div className="space-y-4">{group.questions.map((question, index) => {
+      const key = String(index);
+      return <fieldset key={index} disabled={saving} className="space-y-2">
+        <legend className="mb-2 text-neutral-200">{question.question}</legend>
+        {question.options.map(option => <label key={option.label} className="flex cursor-pointer items-start gap-2 rounded-lg border border-ink-700 px-3 py-2 text-xs text-neutral-300">
+          <input type={question.multi_select ? "checkbox" : "radio"} name={`${group.id}:${key}`} checked={(selected[key] || []).includes(option.label)} onChange={event => {
+            setSelected(previous => ({ ...previous, [key]: question.multi_select ? event.target.checked ? [...(previous[key] || []), option.label] : (previous[key] || []).filter(label => label !== option.label) : [option.label] }));
+            if (!question.multi_select) setCustom(previous => ({ ...previous, [key]: "" }));
+          }} className="mt-0.5 accent-violet-400" />
+          <span>{option.label}{option.description && <span className="mt-0.5 block text-neutral-500">{option.description}</span>}</span>
+        </label>)}
+        <input aria-label={`Свой ответ: ${question.header}`} value={custom[key] || ""} maxLength={8000} onChange={event => setCustom(previous => ({ ...previous, [key]: event.target.value }))} placeholder="Свой ответ…" className="w-full rounded-lg border border-ink-700 bg-ink-950/50 px-3 py-2 text-xs outline-none focus:border-accent-400/50" />
+      </fieldset>;
+    })}</div>
+    {error && <p role="alert" className="mt-3 text-xs text-red-300">{error}</p>}
+    <button type="submit" disabled={saving || !Object.values(answers).every(value => value.length)} className="primary-button mt-4 !px-4 !py-2 text-xs">{saving ? "Сохраняю…" : "Ответить и продолжить"}</button>
+  </form>;
+}
+
 function Todos({ items }: { items: { content: string; status: "pending" | "in_progress" | "done" }[] }) {
   const done = items.filter(t => t.status === "done").length;
   return <div className="mb-3 rounded-lg border border-ink-700 p-3">
@@ -490,7 +573,7 @@ function AgentCard({ tool }: { tool: ToolEvent }) {
     <summary className="flex cursor-pointer list-none items-center gap-2 [&::-webkit-details-marker]:hidden">
       {tool.status === "running" ? <Loader2 className="h-4 w-4 animate-spin text-accent-300" /> : <Users className="h-4 w-4 text-accent-300" />}
       <span className="font-medium text-neutral-200">Подагент · {role}</span>
-      <span className="min-w-0 flex-1 truncate text-neutral-500">{tool.status === "running" ? "работает" : tool.status === "done" ? tool.note || "готов" : "ошибка"}</span>
+      <span className="min-w-0 flex-1 truncate text-neutral-500">{tool.status === "running" ? tool.note || "работает" : tool.status === "done" ? tool.note || "готов" : "ошибка"}</span>
       <ChevronDown className="h-3.5 w-3.5 text-neutral-500" />
     </summary>
     <div className="mt-3 border-t border-ink-700 pt-3">

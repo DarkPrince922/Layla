@@ -50,6 +50,7 @@ from app.services import (
     audit,
     code_mcp,
     code_runner,
+    code_state,
     design_gen,
     files,
     history,
@@ -101,6 +102,43 @@ async def _owned_chat(session: AsyncSession, user: User, chat_id: str) -> Chat:
     if chat is None or chat.owner_id != user.id or chat.deleted_at is not None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Чат не найден")
     return chat
+
+
+@router.get("/{chat_id}/code-state")
+async def get_code_state(
+    chat_id: str,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+    maker: async_sessionmaker[AsyncSession] = Depends(get_sessionmaker),
+) -> dict:
+    chat = await _owned_chat(session, user, chat_id)
+    if chat.domain != Domain.code or not chat.project_id:
+        raise HTTPException(status_code=404, detail="Состояние Code не найдено")
+    try:
+        state = await code_state.Runtime(maker, user.id, chat.id, chat.project_id).read()
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Состояние Code не найдено") from exc
+    return {**state, "tasks": code_state.visible_tasks(state)}
+
+
+@router.post("/{chat_id}/code-state/answer")
+async def answer_code_question(
+    chat_id: str,
+    body: code_state.QuestionAnswer,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+    maker: async_sessionmaker[AsyncSession] = Depends(get_sessionmaker),
+) -> dict:
+    chat = await _owned_chat(session, user, chat_id)
+    if chat.domain != Domain.code or not chat.project_id:
+        raise HTTPException(status_code=404, detail="Вопросы Code не найдены")
+    active = await session.scalar(select(Job).where(Job.chat_id == chat_id, Job.status.in_(jobs.ACTIVE)))
+    had_worker = active is not None and jobs.has_worker(active.id)
+    runtime = code_state.Runtime(maker, user.id, chat.id, chat.project_id)
+    outcome = await runtime.call("_question_answer", body.model_dump())
+    if "error" in outcome:
+        raise HTTPException(status_code=422, detail=outcome["error"])
+    return {**outcome, "resume_needed": not had_worker}
 
 
 @router.get("", response_model=list[ChatOut])
@@ -334,6 +372,8 @@ async def send_message(
                     runner=code_runner.Runner(user.id, chat.project_id, root),
                     git=await _git_agent(maker, user.id, root),
                     mcp=mcp,
+                    runtime=code_state.Runtime(maker, user.id, chat.id, chat.project_id)
+                    if chat.domain == Domain.code else None,
                 ):
                     yield event
             else:
@@ -746,9 +786,10 @@ async def run_chat(
             runner = code_runner.Runner(owner_id, project_id, root)
             git = await _git_agent(maker, owner_id, root)
             mcp = await _code_mcp(h.session, owner_id, persona_id) if domain == "code" else None
+            runtime = code_state.Runtime(maker, owner_id, chat_id, project_id) if domain == "code" else None
             async for event in project_agent.run(prov, key, model, messages, root, permissions,
                                                  mode=mode, approve=approve, caps=caps, extra=extra,
-                                                 runner=runner, git=git, mcp=mcp):
+                                                 runner=runner, git=git, mcp=mcp, runtime=runtime):
                 if "delta" in event:
                     full.append(event["delta"])
                 elif "retract" in event:

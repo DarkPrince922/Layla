@@ -94,7 +94,7 @@ async def test_answer_already_started_is_not_cut(client, monkeypatch):
     await _settings(client, provider_id, reasoning_budget=1000)
     calls: list = []
     _script(monkeypatch, [[("content", "Начал отвечать. "), ("reasoning", "z" * 5000), ("content", "Дописал")]], calls)
-    chat, state = await _run(client)
+    _chat, state = await _run(client)
     assert state["status"] == "done" and len(calls) == 1
 
 
@@ -260,6 +260,8 @@ async def test_review_mode_is_read_only(client, monkeypatch):
         "list_files", "read_file", "update_todos", "glob_files", "grep_files", "repo_map",
         "list_skills", "read_skill", "delegate_agent", "web_search", "web_fetch", "github_search",
         "git_status", "git_log", "git_diff", "git_conflicts",
+        "task_create", "task_get", "task_list", "task_update", "memory_search", "notebook_read",
+        "ask_user",
     }
     assert "REVIEW MODE" in calls[0]["conversation"][0]["content"]
 
