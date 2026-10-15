@@ -14,10 +14,48 @@ from app.db import get_session, get_sessionmaker
 from app.models.job import Job
 from app.models.user import User
 from app.schemas.job import JobOut
-from app.services import audit, code_runner, jobs, preview, sandbox
+from app.services import audit, code_lsp, code_runner, jobs, preview, sandbox
 from app.services.auth import get_current_user, require_admin
 
 router = APIRouter(tags=["sandbox"])
+
+
+@router.get("/projects/{project_id}/lsp")
+async def lsp_status(project_id: str, user: User = Depends(get_current_user),
+                     session: AsyncSession = Depends(get_session)) -> dict:
+    project = await _owned_project(session, user, project_id)
+    try:
+        return await code_lsp.Client(user.id, project_id, _project_root(project)).transport("GET")
+    except sandbox.SandboxError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/projects/{project_id}/lsp")
+async def lsp_query(project_id: str, body: code_lsp.EditorQuery,
+                    user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session)) -> dict:
+    project = await _owned_project(session, user, project_id)
+    try:
+        result = await code_lsp.Client(user.id, project_id, _project_root(project)).call(
+            code_lsp.Query(**body.model_dump(exclude={"content"})), body.content,
+        )
+    except sandbox.SandboxError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    await audit.record(session, actor=user.id, action="project.lsp", target=project_id,
+                       meta={"operation": body.operation, "path": body.path})
+    await session.commit()
+    return result
+
+
+@router.delete("/projects/{project_id}/lsp")
+async def lsp_stop(project_id: str, user: User = Depends(get_current_user),
+                   session: AsyncSession = Depends(get_session)) -> dict:
+    project = await _owned_project(session, user, project_id)
+    try:
+        return await code_lsp.Client(user.id, project_id, _project_root(project)).transport("DELETE")
+    except sandbox.SandboxError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.get("/sandbox/status")

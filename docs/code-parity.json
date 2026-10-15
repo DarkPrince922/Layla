@@ -4105,9 +4105,9 @@
     },
     {
       "archive_tool": "LSPTool",
-      "status": "missing",
-      "layla": "",
-      "notes": "Need actual language-server lifecycle, definition/references/diagnostics and symbol operations."
+      "status": "partial",
+      "layla": "lsp",
+      "notes": "Managed sandbox stdio servers for Python and JS/TS; all 9 archive operations plus diagnostics, capability checks, UTF-16 positions, source-only locations, change invalidation, cancel/restart and editor navigation. Missing plugin-provided/custom server registration and automatic cross-turn passive diagnostic attachments."
     },
     {
       "archive_tool": "ListMcpResourcesTool",
@@ -4343,11 +4343,11 @@
     },
     {
       "id": "lsp",
-      "status": "missing",
+      "status": "partial",
       "archive_paths": [
         "services/lsp/"
       ],
-      "notes": "Need language servers and editor diagnostics integration."
+      "notes": "Per-owner/project/worker sandbox servers with bounded JSON-RPC, push/pull diagnostics, changes/deletions, limits, idle reaping and crash recovery. Editor supports draft analysis and source navigation. Plugin configuration, arbitrary language packs and automatic cross-turn diagnostic delivery remain."
     },
     {
       "id": "skills",
@@ -4425,12 +4425,12 @@
     },
     {
       "id": "ide_integration",
-      "status": "missing",
+      "status": "partial",
       "archive_paths": [
         "hooks/useIDEIntegration.tsx",
         "hooks/useIdeConnectionStatus.tsx"
       ],
-      "notes": "Need IDE bridge, selections, diagnostics, diffs and editor operations."
+      "notes": "Web editor cursor, source navigation, symbols/diagnostics and unsaved-buffer LSP analysis. Missing external IDE connection/bridge and full archive editor event model."
     },
     {
       "id": "remote_sessions",

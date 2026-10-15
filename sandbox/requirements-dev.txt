@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest
+pytest-asyncio
+python-lsp-server[pyflakes,pycodestyle]==1.12.2
