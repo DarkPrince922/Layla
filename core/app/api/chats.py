@@ -28,6 +28,7 @@ from app.api.projects import _default_workspace, _owned_project, _project_root
 from app.config import get_settings
 from app.db import get_session, get_sessionmaker
 from app.models.chat import Chat, Checkpoint, Message
+from app.models.code_worker import CodeWorker
 from app.models.enums import Domain
 from app.models.job import Job
 from app.models.mcp import McpServer
@@ -51,6 +52,7 @@ from app.services import (
     code_mcp,
     code_runner,
     code_state,
+    code_workers,
     design_gen,
     files,
     history,
@@ -104,6 +106,48 @@ async def _owned_chat(session: AsyncSession, user: User, chat_id: str) -> Chat:
     return chat
 
 
+async def _worker_manager(session, maker, user, chat_id):
+    chat = await _owned_chat(session, user, chat_id)
+    if chat.domain != Domain.code or not chat.project_id:
+        raise HTTPException(status_code=404, detail="Воркеры Code не найдены")
+    project = await _owned_project(session, user, chat.project_id)
+    permissions = None
+    if chat.persona_id:
+        persona = await session.get(Persona, chat.persona_id)
+        permissions = persona.allowed_tools if persona is not None else []
+    return code_workers.Manager(code_state.Runtime(maker, user.id, chat_id, chat.project_id),
+                                _project_root(project), permissions, provider_id=chat.provider_id, model=chat.model)
+
+
+@router.get("/{chat_id}/workers/{worker_id}")
+async def get_code_worker(chat_id: str, worker_id: str, offset: int = Query(0, ge=0),
+                          limit: int = Query(12000, ge=1, le=40000), path: str | None = None,
+                          user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session),
+                          maker=Depends(get_sessionmaker)) -> dict:
+    manager = await _worker_manager(session, maker, user, chat_id)
+    try:
+        return await manager.output(code_workers.WorkerOutput(worker_id=worker_id, offset=offset, limit=limit, path=path))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/{chat_id}/workers/{worker_id}/{action}")
+async def control_code_worker(chat_id: str, worker_id: str, action: str,
+                              discard_changes: bool = False, user: User = Depends(get_current_user),
+                              session: AsyncSession = Depends(get_session), maker=Depends(get_sessionmaker)) -> dict:
+    manager = await _worker_manager(session, maker, user, chat_id)
+    try:
+        if action == "stop":
+            return await manager.stop(worker_id)
+        if action == "resume":
+            return await manager.resume(worker_id)
+        if action == "discard":
+            return await manager.discard(code_workers.WorkerDiscard(worker_id=worker_id, discard_changes=discard_changes))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    raise HTTPException(status_code=404, detail="Неизвестное действие воркера")
+
+
 @router.get("/{chat_id}/code-state")
 async def get_code_state(
     chat_id: str,
@@ -118,7 +162,8 @@ async def get_code_state(
         state = await code_state.Runtime(maker, user.id, chat.id, chat.project_id).read()
     except ValueError as exc:
         raise HTTPException(status_code=404, detail="Состояние Code не найдено") from exc
-    return {**state, "tasks": code_state.visible_tasks(state)}
+    manager = await _worker_manager(session, maker, user, chat_id)
+    return {**state, "tasks": code_state.visible_tasks(state), "workers": await manager.list()}
 
 
 @router.post("/{chat_id}/code-state/answer")
@@ -243,7 +288,9 @@ async def delete_chat(
     maker: async_sessionmaker[AsyncSession] = Depends(get_sessionmaker),
 ) -> None:
     chat = await _owned_chat(session, user, chat_id)
-    active = list(await session.scalars(select(Job).where(Job.chat_id == chat_id, Job.status.in_(jobs.ACTIVE))))
+    worker_jobs = select(CodeWorker.job_id).where(CodeWorker.chat_id == chat_id)
+    active = list(await session.scalars(select(Job).where(
+        or_(Job.chat_id == chat_id, Job.id.in_(worker_jobs)), Job.status.in_(jobs.ACTIVE))))
     # Зависшую задачу (воркер умер) удаление освобождает само, а не упирается в 409.
     if await jobs.live_jobs(maker, active):
         raise HTTPException(status_code=409, detail="Сначала остановите задачу этого чата")
@@ -269,6 +316,13 @@ async def clear_chats(
         select(Job).where(Job.owner_id == user.id, Job.chat_id.is_not(None), Job.status.in_(jobs.ACTIVE))
     ))
     busy = {job.chat_id for job in await jobs.live_jobs(maker, active)}
+    child_rows = list(await session.scalars(select(CodeWorker).where(
+        CodeWorker.owner_id == user.id, CodeWorker.status.in_(code_workers.ACTIVE))))
+    if child_rows:
+        children = list(await session.scalars(select(Job).where(
+            Job.id.in_([row.job_id for row in child_rows]), Job.status.in_(jobs.ACTIVE))))
+        live = {job.id for job in await jobs.live_jobs(maker, children)}
+        busy |= {row.chat_id for row in child_rows if row.job_id in live}
     deleted, skipped, when = 0, 0, trash.now()
     for chat in list(await session.scalars(query)):
         if chat.id in busy:
@@ -373,6 +427,9 @@ async def send_message(
                     git=await _git_agent(maker, user.id, root),
                     mcp=mcp,
                     runtime=code_state.Runtime(maker, user.id, chat.id, chat.project_id)
+                    if chat.domain == Domain.code else None,
+                    workers=code_workers.Manager(code_state.Runtime(maker, user.id, chat.id, chat.project_id),
+                                                 root, permissions, provider_id=provider.id, model=model)
                     if chat.domain == Domain.code else None,
                 ):
                     yield event
@@ -787,9 +844,11 @@ async def run_chat(
             git = await _git_agent(maker, owner_id, root)
             mcp = await _code_mcp(h.session, owner_id, persona_id) if domain == "code" else None
             runtime = code_state.Runtime(maker, owner_id, chat_id, project_id) if domain == "code" else None
+            workers = code_workers.Manager(runtime, root, permissions, provider_id=prov.id, model=model,
+                                           mode=mode, caps=caps) if runtime is not None else None
             async for event in project_agent.run(prov, key, model, messages, root, permissions,
                                                  mode=mode, approve=approve, caps=caps, extra=extra,
-                                                 runner=runner, git=git, mcp=mcp, runtime=runtime):
+                                                 runner=runner, git=git, mcp=mcp, runtime=runtime, workers=workers):
                 if "delta" in event:
                     full.append(event["delta"])
                 elif "retract" in event:

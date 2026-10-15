@@ -4022,8 +4022,8 @@
     {
       "archive_tool": "AgentTool",
       "status": "partial",
-      "layla": "delegate_agent",
-      "notes": "Read-only explore/plan/review specialists; concurrent batches, progress and parent cancellation. Missing implementing agents, isolated worktrees, resume and detached workers."
+      "layla": "agent_start, worker_list/output/wait/resume/apply/discard",
+      "notes": "Up to 3 concurrent implement/explore/review agents in private snapshot worktrees, durable output, progress, resume and explicit detach. Lead collects attached results before finishing. Missing teams, messaging and full archive transcript/session replay."
     },
     {
       "archive_tool": "AskUserQuestionTool",
@@ -4034,8 +4034,8 @@
     {
       "archive_tool": "BashTool",
       "status": "partial",
-      "layla": "run_command",
-      "notes": "Sandbox execution exists; shell writes do not sync to the project, no general background shell tasks or PTY."
+      "layla": "run_command, command_start",
+      "notes": "Foreground/background sandbox commands with durable output, wait and cancellation. Shell writes do not sync to the project; no PTY or full archive shell lifecycle."
     },
     {
       "archive_tool": "BriefTool",
@@ -4057,9 +4057,9 @@
     },
     {
       "archive_tool": "EnterWorktreeTool",
-      "status": "missing",
-      "layla": "",
-      "notes": "Need isolated managed Git worktrees and workspace switching."
+      "status": "partial",
+      "layla": "agent_start",
+      "notes": "Workers receive managed detached Git worktrees from actual project snapshots, including dirty/untracked files. Main repository/index remain untouched. No lead workspace switching or user-selected branches."
     },
     {
       "archive_tool": "ExitPlanModeTool",
@@ -4069,9 +4069,9 @@
     },
     {
       "archive_tool": "ExitWorktreeTool",
-      "status": "missing",
-      "layla": "",
-      "notes": "Need finish/retain/discard worktree lifecycle."
+      "status": "partial",
+      "layla": "worker_apply, worker_discard",
+      "notes": "Retain private edits, import selected text diffs with optimistic hashes/checkpoints, or explicitly discard. No archive-compatible lead cwd transition or branch publication."
     },
     {
       "archive_tool": "FileEditTool",
@@ -4207,15 +4207,15 @@
     },
     {
       "archive_tool": "TaskOutputTool",
-      "status": "missing",
-      "layla": "",
-      "notes": "Need independent background worker output and wait/poll operations."
+      "status": "equivalent",
+      "layla": "worker_output, worker_wait",
+      "notes": "Independently addressed agent/command output, character pagination, bounded diffs, persistent reports and wait/poll operations; scoped to owner/chat/project."
     },
     {
       "archive_tool": "TaskStopTool",
-      "status": "partial",
-      "layla": "job cancellation",
-      "notes": "Parent cancellation stops specialists; no independently addressable specialist task stop tool."
+      "status": "equivalent",
+      "layla": "worker_stop",
+      "notes": "Independently stop one agent or background sandbox command while retaining output and completed edits. Parent cancellation stops attached workers; explicit detached workers continue."
     },
     {
       "archive_tool": "TaskUpdateTool",
@@ -4320,7 +4320,7 @@
         "utils/teammateMailbox.ts",
         "utils/tasks.ts"
       ],
-      "notes": "Concurrent read-only specialists and durable task graph; missing independent implementing agents and teams."
+      "notes": "Durable task graph and 3 independent implement/explore/review workers with progress, stop/resume, detach and reviewed imports. Missing teams, messaging and full session replay."
     },
     {
       "id": "hooks",
@@ -4374,16 +4374,16 @@
         "tasks/LocalShellTask/",
         "tasks/RemoteAgentTask/"
       ],
-      "notes": "Server-owned parent chat jobs persist output; independent shell/agent task lifecycle remains."
+      "notes": "Independent agent/sandbox command jobs, durable output, explicit detach, cancellation and retained-workspace resume. Commands restart from the beginning; shell writes do not sync to source and no persistent OS process survives restart."
     },
     {
       "id": "git_worktrees",
-      "status": "missing",
+      "status": "partial",
       "archive_paths": [
         "utils/worktree.ts",
         "utils/worktreeModeEnabled.ts"
       ],
-      "notes": "Need branch isolation and worktree lifecycle."
+      "notes": "Private snapshot repositories and detached worktrees, selected CAS imports/checkpoints, retain/discard and trash cleanup. No lead cwd switching, custom branches or publication lifecycle."
     },
     {
       "id": "permissions",

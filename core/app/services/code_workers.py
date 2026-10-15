@@ -1,0 +1,520 @@
+"""Durable, independently addressable Code agents and sandbox commands."""
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+from pathlib import Path
+from typing import Literal
+from uuid import uuid4
+
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import load_only
+from starlette.concurrency import run_in_threadpool
+
+from app.models.code_worker import CodeWorker
+from app.models.job import Job
+from app.models.provider import Provider
+from app.models.user import Project
+from app.services import code_runner, code_worktrees, jobs, provider_client, sandbox
+
+ACTIVE = frozenset({"queued", "running"})
+OUTPUT_LIMIT = 80000
+
+
+class NoArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class AgentStart(NoArgs):
+    task: str = Field(min_length=10, max_length=12000)
+    role: Literal["implement", "explore", "review"] = "implement"
+    detached: bool = False
+
+
+class CommandStart(NoArgs):
+    command: str = Field(min_length=1, max_length=8000)
+    timeout: int = Field(default=120, ge=1, le=sandbox.MAX_TIMEOUT)
+    stdin: str | None = Field(default=None, max_length=100000)
+    detached: bool = False
+
+
+class WorkerId(NoArgs):
+    worker_id: str = Field(pattern=r"^[0-9a-f-]{36}$")
+
+
+class WorkerOutput(WorkerId):
+    offset: int = Field(default=0, ge=0)
+    limit: int = Field(default=12000, ge=1, le=40000)
+    path: str | None = Field(default=None, max_length=4096)
+    include_diff: bool = True
+
+
+class WorkerWait(WorkerId):
+    timeout: int = Field(default=30, ge=0, le=60)
+
+
+class WorkerApply(WorkerId):
+    paths: list[str] | None = Field(default=None, min_length=1, max_length=200)
+
+
+class WorkerDiscard(WorkerId):
+    discard_changes: bool = False
+
+
+SCHEMAS = {
+    "agent_start": AgentStart, "command_start": CommandStart,
+    "worker_list": NoArgs, "worker_output": WorkerOutput, "worker_wait": WorkerWait,
+    "worker_stop": WorkerId, "worker_resume": WorkerId, "worker_apply": WorkerApply,
+    "worker_discard": WorkerDiscard,
+}
+DESCRIPTIONS = {
+    "agent_start": "Start an independent Code agent in a private Git worktree snapshot of current project files (uncommitted files included). role=implement may edit its copy; explore/review inspect it. Returns worker_id immediately. At most 3 active workers per chat. No recursive delegation. Use worker_wait/output, then worker_apply to import reviewed changes. Attached workers are awaited before the lead finishes and stopped if it is cancelled; detached=true explicitly allows work to outlive the lead.",
+    "command_start": "Start a background sandbox command with isolated files/dependencies and durable output. Returns worker_id immediately. Commands do not execute on the API host or change main project files. Use worker_output/wait/stop. Changes made inside the sandbox are not imported by this tool.",
+    "worker_list": "List this Code chat's workers, progress, reports, changed files and whether their changes were applied. Other chats/users/projects are inaccessible.",
+    "worker_output": "Read a worker's persisted output using character offset/limit, recent tool events, report and diffs. Works after navigation or restart.",
+    "worker_wait": "Wait up to 60 seconds for one worker; return status, output and changed files. May be called repeatedly. It does not restart the worker or consume additional model calls internally.",
+    "worker_stop": "Stop one worker and its sandbox execution. Preserve the worktree, output and completed edits for review or resume.",
+    "worker_resume": "Resume an interrupted/cancelled/failed Code agent in its existing private worktree using saved progress. For a command, explicitly reruns the command from its beginning. Rechecks permissions and reserves one of the 3 slots.",
+    "worker_apply": "Import all or selected reviewed text changes from a finished implementing worker into the main project. Preserves concurrent edits: every file must still match its snapshot hash (or already match the result). Returns diffs and creates normal rollback checkpoints. Conflicts retain the worker copy; inspect its diff and resolve with regular file tools.",
+    "worker_discard": "Remove a finished worker's private worktree and sandbox cache; keep its persisted report/output. Unapplied changes require discard_changes=true. Never deletes main project files.",
+}
+TOOLS = [{"type": "function", "function": {
+    "name": name, "description": DESCRIPTIONS[name], "parameters": schema.model_json_schema(),
+}} for name, schema in SCHEMAS.items()]
+
+
+def public(row: CodeWorker, *, detail=False) -> dict:
+    if row.summary and not detail:
+        return {**row.summary, "id": row.id, "job_id": row.job_id, "status": row.status, "error": row.error}
+    data = {"id": row.id, "job_id": row.job_id, "kind": row.kind, "role": row.role,
+            "task": row.task, "status": row.status, "report": row.report, "error": row.error,
+            "changes": [code_worktrees.public_change(change) for change in row.changes],
+            "applied": row.applied, "events": [
+                {key: value for key, value in event.items() if key not in ("output", "command")}
+                for event in row.events[-8:]
+            ],
+            "detached": row.payload.get("detached", False),
+            "workspace_removed": row.payload.get("workspace_removed", False)}
+    if detail:
+        data["changes"] = row.changes
+    return data
+
+
+def summarize(summary: dict, values: dict) -> dict:
+    summary = dict(summary)
+    for key in ("kind", "role", "task", "status", "error", "applied"):
+        if key in values:
+            summary[key] = values[key]
+    if "report" in values:
+        summary["report"] = values["report"][:1000]
+    if "events" in values:
+        summary["events"] = [{key: value for key, value in event.items() if key not in ("output", "command")}
+                             for event in values["events"][-8:]]
+    if "changes" in values:
+        summary["changes"] = [code_worktrees.public_change(change) for change in values["changes"]]
+    if "payload" in values:
+        for key in ("detached", "workspace_removed"):
+            summary[key] = values["payload"].get(key, False)
+    return summary
+
+
+class Manager:
+    def __init__(self, runtime, root: str, permissions=None, *, provider_id=None, model=None,
+                 mode="auto", caps=None):
+        self.runtime, self.root, self.permissions = runtime, root, permissions
+        self.maker = runtime.maker
+        self.owner_id, self.chat_id, self.project_id = runtime.owner_id, runtime.chat_id, runtime.project_id
+        self.provider_id, self.model, self.mode = provider_id, model, mode
+        self.caps = dict(caps or {})
+        self.attached: set[str] = set()
+
+    async def authorize(self, session):
+        await self.runtime._authorize(session)
+        project = await session.get(Project, self.project_id)
+        if project.path != self.root:
+            raise ValueError("Каталог проекта изменился; откройте чат заново")
+
+    def tools(self) -> list[dict]:
+        if self.permissions is not None and "files.read" not in self.permissions:
+            return []
+        names = {"worker_list", "worker_output", "worker_wait", "agent_start"}
+        if self.mode not in ("plan", "review"):
+            names |= {"worker_stop", "worker_resume", "worker_discard"}
+            if self.permissions is None or "files.write" in self.permissions:
+                names.add("worker_apply")
+        if self.mode != "plan" and code_runner.can_run(self.permissions):
+            names.add("command_start")
+        return [tool for tool in TOOLS if tool["function"]["name"] in names]
+
+    async def owned(self, session, worker_id: str) -> CodeWorker:
+        await self.authorize(session)
+        row = await session.scalar(select(CodeWorker).where(
+            CodeWorker.id == worker_id, CodeWorker.owner_id == self.owner_id,
+            CodeWorker.chat_id == self.chat_id, CodeWorker.project_id == self.project_id,
+        ))
+        if row is None:
+            raise ValueError("Воркер не найден в этом Code-чате")
+        return row
+
+    async def list(self) -> list[dict]:
+        async with self.maker() as session:
+            await self.authorize(session)
+            rows = list(await session.scalars(select(CodeWorker).where(
+                CodeWorker.chat_id == self.chat_id, CodeWorker.owner_id == self.owner_id,
+                CodeWorker.project_id == self.project_id,
+            ).options(load_only(CodeWorker.id, CodeWorker.job_id, CodeWorker.status,
+                                CodeWorker.error, CodeWorker.summary)).order_by(CodeWorker.created_at)))
+            for row in rows:
+                if not row.summary:
+                    await session.refresh(row)
+                if row.status in ACTIVE:
+                    job = await session.get(Job, row.job_id) if row.job_id else None
+                    if job is None or job.status not in jobs.ACTIVE or jobs.is_orphaned(job):
+                        row.status, row.slot = "interrupted", None
+                        row.error = "Работа прервалась. Вывод и рабочая копия сохранены; можно продолжить."
+                        row.summary = {**row.summary, "status": row.status, "error": row.error}
+            await session.commit()
+            return [public(row) for row in rows]
+
+    async def _reserve(self, kind: str, task: str, role: str, payload: dict, existing=None) -> CodeWorker:
+        await self.list()  # release slots held by terminal/interrupted jobs
+        for slot in range(3):
+            try:
+                async with self.maker() as session:
+                    await self.authorize(session)
+                    worker_id, job_id = existing or str(uuid4()), str(uuid4())
+                    job = Job(id=job_id, owner_id=self.owner_id, domain="code", kind="code.worker",
+                              title=("Агент: " if kind == "agent" else "Команда: ") + task[:230],
+                              status="queued", result={"code_chat_id": self.chat_id, "worker_id": worker_id})
+                    session.add(job)
+                    await session.flush()
+                    if existing:
+                        row = await self.owned(session, existing)
+                        if row.status in ACTIVE or row.status == "done":
+                            raise ValueError("Этот воркер уже работает или завершён")
+                        changed = await session.execute(update(CodeWorker).where(
+                            CodeWorker.id == existing, CodeWorker.status == row.status,
+                        ).values(slot=slot, status="queued", job_id=job_id, error=None,
+                                 payload={**row.payload, **payload},
+                                 summary={**row.summary, "status": "queued", "error": None}))
+                        if changed.rowcount != 1:
+                            raise ValueError("Воркер уже запущен параллельным запросом")
+                        await session.refresh(row)
+                    else:
+                        row = CodeWorker(id=worker_id, owner_id=self.owner_id, chat_id=self.chat_id,
+                                         project_id=self.project_id, job_id=job_id, slot=slot,
+                                         kind=kind, role=role, task=task, status="queued", payload=payload,
+                                         output="", report="", events=[], changes=[], applied={})
+                        row.summary = {"kind": kind, "role": role, "task": task, "status": "queued",
+                                       "report": "", "error": None, "changes": [], "applied": {}, "events": [],
+                                       "detached": payload.get("detached", False), "workspace_removed": False}
+                        session.add(row)
+                    await session.commit()
+                jobs.launch(self.maker, job_id, lambda handle, wid=worker_id: self._execute(wid, handle))
+                if not payload.get("detached"):
+                    self.attached.add(worker_id)
+                return row
+            except IntegrityError:
+                continue
+        raise ValueError("В этом чате уже работают 3 воркера. Дождитесь результата или остановите один.")
+
+    def _allow_implement(self, role: str):
+        if role == "implement" and (self.mode in ("plan", "review") or
+                                    self.permissions is not None and "files.write" not in self.permissions):
+            raise ValueError("Режим или персона разрешает только исследование/ревью, без реализации")
+
+    async def start_agent(self, args: AgentStart) -> dict:
+        self._allow_implement(args.role)
+        if not self.provider_id or not self.model:
+            raise ValueError("Для воркера нужен провайдер и модель Code-чата")
+        row = await self._reserve("agent", args.task, args.role, {
+            "provider_id": self.provider_id, "model": self.model, "caps": self.caps,
+            "permissions": self.permissions, "detached": args.detached, "mode": self.mode,
+        })
+        return {"worker": public(row)}
+
+    async def start_command(self, args: CommandStart) -> dict:
+        if self.mode == "plan" or not code_runner.can_run(self.permissions):
+            raise ValueError("Запуск команд недоступен в этом режиме или персоне")
+        if await sandbox.info() is None:
+            raise ValueError("Песочница не подключена; команда не запущена")
+        row = await self._reserve("command", args.command, "command", {
+            **args.model_dump(), "permissions": self.permissions, "mode": self.mode,
+        })
+        return {"worker": public(row)}
+
+    async def output(self, args: WorkerOutput) -> dict:
+        await self.list()
+        async with self.maker() as session:
+            row = await self.owned(session, args.worker_id)
+            worker = public(row)
+            worker["report"] = row.report
+            worker["events"] = row.events
+            if args.include_diff:
+                worker["changes"] = [{**change, "diff": change["diff"][:20000],
+                                      "diff_truncated": len(change["diff"]) > 20000}
+                                     for change in row.changes if args.path is None or change["path"] == args.path][:20]
+            return {"worker": worker, "output": row.output[args.offset:args.offset + args.limit],
+                    "offset": args.offset, "total_chars": len(row.output),
+                    "truncated": args.offset + args.limit < len(row.output)}
+
+    async def wait(self, args: WorkerWait) -> dict:
+        deadline = asyncio.get_running_loop().time() + args.timeout
+        while True:
+            result = await self.output(WorkerOutput(worker_id=args.worker_id))
+            if result["worker"]["status"] not in ACTIVE or asyncio.get_running_loop().time() >= deadline:
+                return result
+            await asyncio.sleep(0.5)
+
+    async def stop(self, worker_id: str) -> dict:
+        async with self.maker() as session:
+            row = await self.owned(session, worker_id)
+            job_id = row.job_id
+        if job_id:
+            await jobs.cancel(job_id, self.maker)
+        async with self.maker() as session:
+            row = await self.owned(session, worker_id)
+            if row.status in ACTIVE or row.status == "interrupted":
+                row.status, row.slot = "cancelled", None
+                row.error = "Воркер остановлен; рабочая копия сохранена"
+                row.summary = {**row.summary, "status": row.status, "error": row.error}
+                await session.commit()
+        return await self.output(WorkerOutput(worker_id=worker_id))
+
+    async def resume(self, worker_id: str) -> dict:
+        async with self.maker() as session:
+            row = await self.owned(session, worker_id)
+            self._allow_implement(row.role)
+            if row.payload.get("workspace_removed"):
+                raise ValueError("Рабочая копия удалена; запустите нового воркера")
+            payload = {**row.payload, "permissions": self.permissions, "mode": self.mode}
+            if row.kind == "command" and (self.mode == "plan" or not code_runner.can_run(self.permissions)):
+                raise ValueError("Нет права на запуск команды")
+            kind, role, task = row.kind, row.role, row.task
+        row = await self._reserve(kind, task, role, payload, existing=worker_id)
+        return {"worker": public(row)}
+
+    async def discard(self, args: WorkerDiscard) -> dict:
+        async with self.maker() as session:
+            row = await self.owned(session, args.worker_id)
+            if row.status in ACTIVE:
+                raise ValueError("Сначала остановите воркера")
+            if any(change["path"] not in row.applied or row.applied[change["path"]] != change["after_sha256"]
+                   for change in row.changes) and not args.discard_changes:
+                raise ValueError("Есть неприменённые правки; для удаления укажите discard_changes=true")
+            await code_worktrees.remove(self.root, self.project_id, row.id)
+            try:
+                await sandbox.reset(self.owner_id, row.id)
+            except sandbox.SandboxError:
+                pass
+            row.payload = {**row.payload, "workspace_removed": True}
+            row.summary = {**row.summary, "workspace_removed": True}
+            await session.commit()
+        return {"discarded": args.worker_id}
+
+    async def proposals(self, args: WorkerApply) -> list[dict]:
+        if self.mode in ("plan", "review") or self.permissions is not None and "files.write" not in self.permissions:
+            raise ValueError("Нет права применять изменения проекта")
+        async with self.maker() as session:
+            row = await self.owned(session, args.worker_id)
+            if row.status in ACTIVE or row.role != "implement":
+                raise ValueError("Применять можно только завершённого реализующего воркера")
+            if row.payload.get("workspace_removed"):
+                raise ValueError("Рабочая копия удалена")
+            selected = set(args.paths) if args.paths is not None else {change["path"] for change in row.changes}
+            if not selected <= {change["path"] for change in row.changes}:
+                raise ValueError("Указанный файл не входит в изменения воркера")
+            changes = [{**change, "before_sha256": row.applied.get(change["path"], change["before_sha256"])}
+                       for change in row.changes if change["path"] in selected]
+        # Preflight every selected file before the first write. Per-file CAS is
+        # repeated at application, so an editor race cannot overwrite new work.
+        return [await run_in_threadpool(code_worktrees.proposal, self.root, self.project_id, args.worker_id, change)
+                for change in changes]
+
+    async def mark_applied(self, worker_id: str, path: str, sha: str | None):
+        async with self.maker() as session:
+            row = await self.owned(session, worker_id)
+            await run_in_threadpool(code_worktrees.advance_baseline, self.root, self.project_id, worker_id, path, sha)
+            row.applied = {**row.applied, path: sha}
+            row.summary = {**row.summary, "applied": row.applied}
+            baseline = dict(row.payload["baseline"])
+            if sha is None:
+                baseline.pop(path, None)
+            else:
+                baseline[path] = sha
+            row.payload = {**row.payload, "baseline": baseline}
+            await session.commit()
+
+    async def call(self, name: str, arguments: dict) -> dict:
+        try:
+            if name not in {tool["function"]["name"] for tool in self.tools()}:
+                raise ValueError("Инструмент недоступен в текущем режиме или персоне")
+            args = SCHEMAS[name].model_validate(arguments)
+            if name == "agent_start":
+                return await self.start_agent(args)
+            if name == "command_start":
+                return await self.start_command(args)
+            if name == "worker_list":
+                return {"workers": await self.list()}
+            if name == "worker_output":
+                return await self.output(args)
+            if name == "worker_wait":
+                return await self.wait(args)
+            if name == "worker_stop":
+                return await self.stop(args.worker_id)
+            if name == "worker_resume":
+                return await self.resume(args.worker_id)
+            if name == "worker_discard":
+                return await self.discard(args)
+            raise ValueError("Применение правок выполняется через checkpoint-aware обработчик")
+        except (ValueError, OSError) as exc:
+            return {"error": str(exc)[:1500]}
+
+    async def finish_attached(self) -> dict | None:
+        if not self.attached:
+            return None
+        ids = set(self.attached)
+        results = []
+        for worker_id in sorted(ids):
+            while True:
+                result = await self.wait(WorkerWait(worker_id=worker_id, timeout=30))
+                if result["worker"]["status"] not in ACTIVE:
+                    summary = {**result["worker"], "changes": [code_worktrees.public_change(change)
+                                                               for change in result["worker"]["changes"]]}
+                    summary["events"] = [{key: value for key, value in event.items()
+                                          if key not in ("output", "command")}
+                                         for event in result["worker"]["events"][-8:]]
+                    results.append({"worker": summary, "output_tail": result["output"][-6000:]})
+                    self.attached.discard(worker_id)
+                    break
+        return {"workers_completed": results}
+
+    async def cancel_attached(self):
+        for worker_id in list(self.attached):
+            try:
+                await self.stop(worker_id)
+            except ValueError:
+                pass
+        self.attached.clear()
+
+    async def _save(self, worker_id: str, **values):
+        async with self.maker() as session:
+            await self.authorize(session)
+            summary = await session.scalar(select(CodeWorker.summary).where(CodeWorker.id == worker_id))
+            values["summary"] = summarize(summary or {}, values)
+            await session.execute(update(CodeWorker).where(
+                CodeWorker.id == worker_id, CodeWorker.owner_id == self.owner_id,
+            ).values(**values))
+            await session.commit()
+
+    async def _execute(self, worker_id: str, handle):
+        from app.services import project_agent
+
+        output, report, events, changes = "", "", [], []
+        payload = {}
+        status, error = "done", None
+        initialized = False
+        saved_at = 0.0
+        try:
+            async with self.maker() as session:
+                row = await self.owned(session, worker_id)
+                payload, kind, task, role = dict(row.payload), row.kind, row.task, row.role
+                output, events = row.output, list(row.events)
+            await self._save(worker_id, status="running")
+            await handle.step("Готовлю отдельную рабочую копию", progress=0.05)
+            if not payload.get("initialized"):
+                payload.update(await code_worktrees.create(self.root, self.project_id, worker_id))
+                initialized = True
+                await self._save(worker_id, payload=payload)
+            initialized = True
+            worktree = str(code_worktrees.paths(self.root, self.project_id, worker_id)[2])
+            if not Path(worktree).is_dir():
+                raise ValueError("Рабочая копия отсутствует; исходные файлы не подменяются новым снимком")
+            runner = code_runner.Runner(self.owner_id, worker_id, worktree)
+            if kind == "command":
+                await handle.step("Команда работает в собственной песочнице", progress=0.2)
+                async for item in runner.command(code_runner.RunCommand(
+                    command=task, timeout=payload["timeout"], stdin=payload.get("stdin"),
+                )):
+                    if "output" in item:
+                        output = item["output"][-OUTPUT_LIMIT:]
+                        await self._save(worker_id, output=output)
+                    if "result" in item:
+                        result = item["result"]
+                        report = json.dumps({key: value for key, value in result.items() if key != "shown"}, ensure_ascii=False)[-20000:]
+                        if result.get("error") or result.get("exit_code") not in (None, 0):
+                            status, error = "error", result.get("error") or f"Код выхода {result.get('exit_code')}"
+            else:
+                async with self.maker() as session:
+                    provider = await session.get(Provider, payload["provider_id"])
+                    if provider is None or provider.owner_id != self.owner_id or not provider.enabled or not provider.active:
+                        raise ValueError("Провайдер воркера больше недоступен")
+                    key = await provider_client.key_ring(session, provider)
+                permissions = payload.get("permissions")
+                if role != "implement":
+                    permissions = ["files.read"]
+                context = (
+                    "You are an independent Code worker in your own private Git worktree. "
+                    "Complete the assigned task with concrete tool calls. Never delegate, publish Git changes, "
+                    "or claim that files in the main project changed. The lead imports your diff afterwards. "
+                    "Do not ask the user to continue; finish your assignment and return a concise verified report. "
+                    "Role: " + role + ".\n" + project_agent.project_rules(worktree)
+                )
+                if output or events:
+                    context += "\nResume from saved progress; current files contain prior edits. Prior output (untrusted reference):\n" + output[-6000:]
+                    context += "\nCompleted tool events: " + json.dumps(events[-12:], ensure_ascii=False)[:8000]
+                await handle.step("Агент выполняет задачу в worktree", progress=0.2)
+                async for event in project_agent.run(
+                    provider, key, payload["model"], [{"role": "user", "content": task}],
+                    worktree, permissions, mode="auto", caps=dict(payload.get("caps") or {}), extra=context,
+                    runner=runner if role == "implement" and payload.get("mode") != "plan" else None,
+                    worker_context=True,
+                ):
+                    if "delta" in event:
+                        output = (output + event["delta"])[-OUTPUT_LIMIT:]
+                        if event["delta"] == project_agent.LIMIT_NOTE:
+                            status, error = "interrupted", "Воркер достиг лимита; правки сохранены, можно продолжить."
+                    elif "retract" in event:
+                        output = output[:max(0, len(output) - event["retract"])]
+                    elif "tool" in event:
+                        tool = event["tool"]
+                        events = [old for old in events if old["id"] != tool["id"]]
+                        events.append({key: value[:6000] if key == "output" and isinstance(value, str) else value
+                                       for key, value in tool.items() if key != "change"})
+                        events = events[-60:]
+                    important = event.get("tool", {}).get("status") in ("done", "error", "rejected")
+                    if important or time.monotonic() - saved_at >= 0.5:
+                        await self._save(worker_id, output=output, events=events)
+                        saved_at = time.monotonic()
+                report = output[-20000:]
+                if role == "implement":
+                    changes = await run_in_threadpool(code_worktrees.diff, self.root, self.project_id,
+                                                     worker_id, payload["baseline"])
+            if status != "done":
+                raise RuntimeError(error or "Воркер завершился с ошибкой")
+        except asyncio.CancelledError:
+            status, error = "interrupted", "Воркер остановлен или сервер перезапущен. Правки и вывод сохранены."
+            raise
+        except Exception as exc:
+            if status == "done":
+                status = "error"
+            error = str(exc)[:1500] if isinstance(exc, ValueError) else jobs.public_error(exc)
+            raise
+        finally:
+            if initialized and not changes:
+                try:
+                    changes = await run_in_threadpool(code_worktrees.diff, self.root, self.project_id,
+                                                     worker_id, payload["baseline"])
+                except (ValueError, OSError):
+                    pass
+            try:
+                await self._save(worker_id, status=status, slot=None, output=output, report=report,
+                                 events=events, changes=changes, error=error, payload=payload)
+                await handle.set_result({"worker_id": worker_id, "code_chat_id": self.chat_id,
+                                         "status": status, "changed_files": len(changes)})
+            except ValueError:
+                # The owner deleted the chat/project while it was running.
+                await code_worktrees.remove(self.root, self.project_id, worker_id)

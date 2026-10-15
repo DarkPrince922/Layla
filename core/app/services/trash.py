@@ -22,6 +22,7 @@ from app.config import get_settings
 from app.models.chat import Chat
 from app.models.design import Design
 from app.models.user import Project, Workspace
+from app.services import code_worker_cleanup
 
 TRASH_DAYS = 7
 PURGE_EVERY = 3600
@@ -110,12 +111,14 @@ async def remove_project(session: AsyncSession, project: Project) -> Path | None
     workspace = await session.get(Workspace, project.workspace_id)
     folder = _disposable_dir(project, workspace)
     for chat in list(await session.scalars(select(Chat).where(Chat.project_id == project.id))):
+        await code_worker_cleanup.queue(session, chat)
         await session.delete(chat)
     await session.delete(project)
     return folder
 
 
 async def remove_chat(session: AsyncSession, chat: Chat) -> Path | None:
+    await code_worker_cleanup.queue(session, chat)
     workspace = await _own_workspace(session, chat, live_only=False)
     if workspace is not None:
         return await remove_project(session, workspace)
@@ -145,6 +148,7 @@ async def purge(maker, older_than: timedelta = timedelta(days=TRASH_DAYS)) -> in
             if folder:
                 folders.append(folder)
         await session.commit()
+        folders.extend(code_worker_cleanup.take(session))
     await purge_dirs(folders)
     return removed
 
@@ -156,6 +160,6 @@ async def purge_forever(maker) -> None:
             removed = await purge(maker)
             if removed:
                 logger.info("Корзина: окончательно удалено записей: %s", removed)
-        except Exception:  # noqa: BLE001 — очистка не должна ронять сервер
+        except Exception:  # Очистка не должна ронять сервер.
             logger.exception("Не удалось очистить корзину")
         await asyncio.sleep(PURGE_EVERY)

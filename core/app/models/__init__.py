@@ -5,6 +5,7 @@ from app.models.agent import AgentConfig, AgentRun, AgentStep, AgentWorker
 from app.models.audit import AuditLog
 from app.models.chat import Chat, Checkpoint, Message
 from app.models.code_state import CodeState
+from app.models.code_worker import CodeWorker
 from app.models.combo import Combo
 from app.models.design import Design
 from app.models.git import GitCredential
@@ -40,6 +41,7 @@ __all__ = [
     "Chat",
     "Checkpoint",
     "CodeState",
+    "CodeWorker",
     "Combo",
     "Design",
     "Engagement",

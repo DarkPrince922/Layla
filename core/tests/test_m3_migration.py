@@ -41,7 +41,7 @@ def test_fresh_migration(tmp_path):
     expected_head = ScriptDirectory.from_config(config).get_current_head()
     with sqlite3.connect(path) as db:
         assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == expected_head
-        assert {"osint_artifacts", "osint_lookups", "grok_logins", "telegram_bot_states", "telegram_notifications", "code_states"} <= {
+        assert {"osint_artifacts", "osint_lookups", "grok_logins", "telegram_bot_states", "telegram_notifications", "code_states", "code_workers"} <= {
             r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
 

@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
@@ -17,6 +17,7 @@ from starlette.concurrency import run_in_threadpool
 from app.config import get_settings
 from app.db import get_session, get_sessionmaker
 from app.models.chat import Chat
+from app.models.code_worker import CodeWorker
 from app.models.job import Job
 from app.models.user import Project, User, Workspace
 from app.schemas.project import (
@@ -319,8 +320,9 @@ async def delete_project(
 ) -> None:
     project = await _owned_project(session, user, project_id)
     active = list(await session.scalars(
-        select(Job).join(Chat, Job.chat_id == Chat.id).where(
-            Chat.project_id == project_id, Job.status.in_(("queued", "running"))
+        select(Job).outerjoin(Chat, Job.chat_id == Chat.id).where(
+            or_(Chat.project_id == project_id, Job.id.in_(select(CodeWorker.job_id).where(CodeWorker.project_id == project_id))),
+            Job.status.in_(("queued", "running"))
         )
     ))
     # Зависшую задачу удаление освобождает само; 409 только при реально живой.
