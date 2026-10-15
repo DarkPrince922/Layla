@@ -4023,7 +4023,7 @@
       "archive_tool": "AgentTool",
       "status": "partial",
       "layla": "agent_start, worker_list/output/wait/resume/apply/discard",
-      "notes": "Up to 3 concurrent implement/explore/review agents in private snapshot worktrees, durable output, progress, resume and explicit detach. Named durable teams, direct/broadcast mail and append-only worker protocol history with resume are implemented. Lead collects attached results and receives peer mail while waiting. Lead and worker protocol replay, rollback/compact-aware context and lead worktree switching are implemented. Archive import/fork/attribution and structured approval/shutdown protocols remain."
+      "notes": "Up to 3 concurrent implement/explore/review agents in private snapshot worktrees, durable output, progress, resume and explicit detach. Named durable teams, direct/broadcast mail and append-only worker protocol history with resume are implemented. Lead collects attached results and receives peer mail while waiting. Lead and worker protocol replay, rollback/compact-aware context and lead worktree switching are implemented. Import/fork of a selected JSON/JSONL branch and structured approval/shutdown are implemented. Full attribution, all attachments and archive protocol parity remain."
     },
     {
       "archive_tool": "AskUserQuestionTool",
@@ -4035,7 +4035,7 @@
       "archive_tool": "BashTool",
       "status": "partial",
       "layla": "run_command, command_start, command_input, command_changes, worker_command_changes",
-      "notes": "Foreground/background commands, project-relative cwd, persistent stdin for interactive processes, live output, timeout/stop, binary/text/mode file imports with diffs, CAS conflicts, durable pending results and rollback. Missing PTY, automatic in-place foreground promotion, full shell snapshot/profile and archive-specific permission semantics."
+      "notes": "Foreground/background commands, project-relative cwd, persistent stdin for interactive processes, live output, timeout/stop, binary/text/mode file imports with diffs, CAS conflicts, durable pending results and rollback. PTY and resizing are implemented; missing automatic in-place foreground promotion, full shell snapshot/profile and archive-specific permission semantics."
     },
     {
       "archive_tool": "BriefTool",
@@ -4059,7 +4059,7 @@
       "archive_tool": "EnterWorktreeTool",
       "status": "partial",
       "layla": "enter_worktree, resume_worktree, worktree_list",
-      "notes": "Lead switches tools mid-turn into durable private Git worktrees with source history/current dirty files, separate cache IDs and worker scopes; original source/index/branch preserved. Missing hook-created worktrees, arbitrary ref selection and global editor/terminal switching."
+      "notes": "Lead switches tools mid-turn into durable private Git worktrees with source history/current dirty files, separate cache IDs and worker scopes; original source/index/branch preserved. Ref selection and explicit editor/terminal binding are implemented; hook-created worktrees remain."
     },
     {
       "archive_tool": "ExitPlanModeTool",
@@ -4071,7 +4071,7 @@
       "archive_tool": "ExitWorktreeTool",
       "status": "partial",
       "layla": "exit_worktree, worktree_diff/read/publish, worker_apply/discard",
-      "notes": "Lead returns to source, keeps/resumes or explicitly discards its copy. Complete since-entry diff, ZIP and fixed generated branch publication using owner credentials; scoped rollback cannot overwrite source. Missing archive hooks/tmux and automated PR/merge lifecycle."
+      "notes": "Lead returns to source, keeps/resumes or explicitly discards its copy. Complete since-entry diff, ZIP and fixed generated branch publication using owner credentials; scoped rollback cannot overwrite source. Draft GitHub PR creation is implemented; archive hooks/tmux and merge lifecycle remain."
     },
     {
       "archive_tool": "FileEditTool",
@@ -4137,13 +4137,13 @@
       "archive_tool": "PowerShellTool",
       "status": "partial",
       "layla": "run_command/command_start shell=powershell",
-      "notes": "Conditional pwsh backend probing, no-profile argv execution, cwd/stdin/background/output/stop and file imports. No Windows host, PTY, archive-specific CLM/parser/permission behavior. Default image has no pwsh; unavailable use fails explicitly."
+      "notes": "Conditional pwsh backend probing, no-profile argv execution, cwd/stdin/background/output/stop and file imports. PTY on the Linux sandbox is available; no Windows host or archive-specific CLM/parser/permission behavior. Default image has no pwsh; unavailable use fails explicitly."
     },
     {
       "archive_tool": "REPLTool",
       "status": "partial",
       "layla": "command_start interactive=true, command_input, worker_output/stop",
-      "notes": "Persistent per-worker OS process stdin and state for Python/Node/bash REPLs, EOF, live output and stop; owner/chat/project isolation and file collection. No archive primitive-tools JS kernel API, PTY or restoration of in-memory variables after restart."
+      "notes": "Persistent per-worker OS process stdin and state for Python/Node/bash REPLs, EOF, live output and stop; owner/chat/project isolation and file collection. PTY is available; no archive primitive-tools JS kernel API or restoration of in-memory variables after restart."
     },
     {
       "archive_tool": "ReadMcpResourceTool",
@@ -4167,7 +4167,7 @@
       "archive_tool": "SendMessageTool",
       "status": "partial",
       "layla": "send_message, team_info",
-      "notes": "Durable named direct/broadcast mail, automatic between-turn delivery, transactional worker transcript acknowledgement, bounded mailboxes and archived UI. Missing structured shutdown/plan approval and cross-session UDS/bridge peers."
+      "notes": "Durable named direct/broadcast mail, automatic between-turn delivery, transactional worker transcript acknowledgement, bounded mailboxes and archived UI. Structured shutdown/plan decisions and same-project cross-chat lead mail are available; cross-session UDS/bridge peers remain."
     },
     {
       "archive_tool": "SkillTool",
@@ -4233,7 +4233,7 @@
       "archive_tool": "TeamDeleteTool",
       "status": "partial",
       "layla": "team_delete",
-      "notes": "Refuse cleanup while members run, serialize close/member reservation, retain mail/reports/transcripts/worktrees in archive and cascade on chat deletion. Structured graceful shutdown responses remain."
+      "notes": "Refuse cleanup while members run, serialize close/member reservation, retain mail/reports/transcripts/worktrees in archive and cascade on chat deletion. Structured graceful shutdown responses are available; archive team backend compatibility remains."
     },
     {
       "archive_tool": "TodoWriteTool",
@@ -4279,7 +4279,7 @@
         "utils/conversationRecovery.ts",
         "utils/crossProjectResume.ts"
       ],
-      "notes": "Durable chats and append-only worker messages/tool results, independent of compaction; resume repairs unknown tool outcomes and preserves worktrees. Lead journal replay, fresh persona/provider adaptation, atomic mail acknowledgement, rollback invalidation, full-tool compaction and atomic protocol trimming are implemented. Archive import/fork, attribution and complete compact/hook state remain."
+      "notes": "Durable chats and append-only worker messages/tool results, independent of compaction; resume repairs unknown tool outcomes and preserves worktrees. Lead journal replay, fresh persona/provider adaptation, atomic mail acknowledgement, rollback invalidation, full-tool compaction and atomic protocol trimming are implemented. JSON/JSONL selected-branch import, isolated fork and export are implemented; full attribution and compact/hook state remain."
     },
     {
       "id": "context_compaction",
@@ -4320,7 +4320,7 @@
         "utils/teammateMailbox.ts",
         "utils/tasks.ts"
       ],
-      "notes": "Durable task graph and 3 independent implement/explore/review workers with progress, stop/resume, detach and reviewed imports. Named teams, direct/broadcast durable mail and worker transcript resume are implemented. Missing structured approval/shutdown, cross-session peers and archive session import/fork/attribution compatibility."
+      "notes": "Durable task graph and 3 independent implement/explore/review workers with progress, stop/resume, detach and reviewed imports. Named teams, direct/broadcast durable mail and worker transcript resume are implemented. Structured plan/shutdown, same-project cross-chat mail and JSON/JSONL import/fork are implemented; UDS peers and full attribution remain."
     },
     {
       "id": "hooks",
@@ -4383,7 +4383,7 @@
         "utils/worktree.ts",
         "utils/worktreeModeEnabled.ts"
       ],
-      "notes": "Private snapshot repositories and detached worktrees, selected CAS imports/checkpoints, retain/discard and trash cleanup. Lead cwd switching, private source history, retain/resume/remove, scoped rollback and own-branch publication are implemented. Custom refs, hook worktrees and unified editor/terminal switching remain."
+      "notes": "Private snapshot repositories and detached worktrees, selected CAS imports/checkpoints, retain/discard and trash cleanup. Lead cwd switching, private source history, retain/resume/remove, scoped rollback and own-branch publication are implemented. Ref selection, draft GitHub PR and unified editor/terminal switching are implemented; hook-created worktrees remain."
     },
     {
       "id": "permissions",

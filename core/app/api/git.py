@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.projects import _owned_project, _project_root
+from app.api.projects import _bound_project, _owned_project, _project_root
 from app.db import get_session
 from app.models.git import GitCredential
 from app.models.user import User
@@ -45,14 +45,17 @@ async def _state(session: AsyncSession, user: User, root: str) -> dict:
     return state
 
 
+@router.get("/projects/{project_id}/chats/{chat_id}/workspaces/{workspace_id}/git")
 @router.get("/projects/{project_id}/git")
 async def git_status(project_id: str, user: User = Depends(get_current_user),
-                     session: AsyncSession = Depends(get_session)) -> dict:
-    root = await _root(session, user, project_id)
+                     session: AsyncSession = Depends(get_session), workspace_id: str | None = None, chat_id: str | None = None) -> dict:
+    project = await _bound_project(session, user, project_id, workspace_id, chat_id)
+    root = _project_root(project)
     try:
         return await _state(session, user, root)
     except gitops.GitError as exc:
         raise _fail(exc) from exc
+
 
 
 @router.post("/projects/{project_id}/git/init")
@@ -72,10 +75,12 @@ class CommitIn(BaseModel):
     message: str = Field(min_length=1, max_length=5000)
 
 
+@router.post("/projects/{project_id}/chats/{chat_id}/workspaces/{workspace_id}/git/commit")
 @router.post("/projects/{project_id}/git/commit")
 async def git_commit(project_id: str, body: CommitIn, user: User = Depends(get_current_user),
-                     session: AsyncSession = Depends(get_session)) -> dict:
-    root = await _root(session, user, project_id)
+                     session: AsyncSession = Depends(get_session), workspace_id: str | None = None, chat_id: str | None = None) -> dict:
+    project = await _bound_project(session, user, project_id, workspace_id, chat_id)
+    root = _project_root(project)
     try:
         done = await gitops.commit(root, body.message, user.display_name or user.email.split("@")[0], user.email)
     except gitops.GitError as exc:
@@ -86,34 +91,44 @@ async def git_commit(project_id: str, body: CommitIn, user: User = Depends(get_c
     return {"commit": done, "status": await _state(session, user, root)}
 
 
+
+@router.get("/projects/{project_id}/chats/{chat_id}/workspaces/{workspace_id}/git/log")
 @router.get("/projects/{project_id}/git/log")
 async def git_log(project_id: str, limit: int = Query(default=50, ge=1, le=200),
-                  user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session)) -> list[dict]:
-    root = await _root(session, user, project_id)
+                  user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session), workspace_id: str | None = None, chat_id: str | None = None) -> list[dict]:
+    project = await _bound_project(session, user, project_id, workspace_id, chat_id)
+    root = _project_root(project)
     try:
         return await gitops.log(root, limit)
     except gitops.GitError as exc:
         raise _fail(exc) from exc
 
 
+
+@router.get("/projects/{project_id}/chats/{chat_id}/workspaces/{workspace_id}/git/diff")
 @router.get("/projects/{project_id}/git/diff")
 async def git_diff(project_id: str, user: User = Depends(get_current_user),
-                   session: AsyncSession = Depends(get_session)) -> dict:
-    root = await _root(session, user, project_id)
+                   session: AsyncSession = Depends(get_session), workspace_id: str | None = None, chat_id: str | None = None) -> dict:
+    project = await _bound_project(session, user, project_id, workspace_id, chat_id)
+    root = _project_root(project)
     try:
         return await gitops.diff(root)
     except gitops.GitError as exc:
         raise _fail(exc) from exc
 
 
+
+@router.get("/projects/{project_id}/chats/{chat_id}/workspaces/{workspace_id}/git/commits/{sha}")
 @router.get("/projects/{project_id}/git/commits/{sha}")
 async def git_show(project_id: str, sha: str, user: User = Depends(get_current_user),
-                   session: AsyncSession = Depends(get_session)) -> dict:
-    root = await _root(session, user, project_id)
+                   session: AsyncSession = Depends(get_session), workspace_id: str | None = None, chat_id: str | None = None) -> dict:
+    project = await _bound_project(session, user, project_id, workspace_id, chat_id)
+    root = _project_root(project)
     try:
         return await gitops.show(root, sha)
     except gitops.GitError as exc:
         raise _fail(exc) from exc
+
 
 
 class RemoteIn(BaseModel):
@@ -140,10 +155,18 @@ class PushIn(BaseModel):
     branch: str | None = Field(default=None, max_length=200)
 
 
+@router.post("/projects/{project_id}/chats/{chat_id}/workspaces/{workspace_id}/git/push")
 @router.post("/projects/{project_id}/git/push")
 async def git_push(project_id: str, body: PushIn | None = None, user: User = Depends(get_current_user),
-                   session: AsyncSession = Depends(get_session)) -> dict:
-    root = await _root(session, user, project_id)
+                   session: AsyncSession = Depends(get_session), workspace_id: str | None = None, chat_id: str | None = None) -> dict:
+    project = await _bound_project(session, user, project_id, workspace_id, chat_id)
+    root = _project_root(project)
+    if workspace_id:
+        if body and body.branch and body.branch != project.branch:
+            raise HTTPException(status_code=409, detail="Рабочая копия публикуется только в собственную ветку")
+        body = PushIn(branch=project.branch)
+        if (await gitops.status(root)).get("branch") != project.branch:
+            raise HTTPException(status_code=409, detail="Ветка рабочей копии изменилась")
     try:
         remote = (await gitops.status(root)).get("remote")
         username, token = await credential(session, user.id, remote)
@@ -155,6 +178,7 @@ async def git_push(project_id: str, body: PushIn | None = None, user: User = Dep
                        meta={"branch": done["branch"], "remote": remote})
     await session.commit()
     return {**done, "status": await _state(session, user, root)}
+
 
 
 @router.post("/projects/{project_id}/git/pull")

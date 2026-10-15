@@ -166,12 +166,14 @@ async def sync(owner_id: str, project_id: str, root: str) -> None:
 
 async def run(owner_id: str, project_id: str, root: str, command: str, *,
               timeout: int = DEFAULT_TIMEOUT, stdin: str | None = None, collect_changes=False,
-              shell="bash", cwd=".", interactive=False) -> AsyncIterator[dict]:
+              shell="bash", cwd=".", interactive=False, tty=False, rows=24, cols=80) -> AsyncIterator[dict]:
     """Выполнить команду в копии проекта. События: info / output / exit / error."""
     timeout = max(1, min(int(timeout or DEFAULT_TIMEOUT), MAX_TIMEOUT))
     yield {"type": "info", "data": "Синхронизирую файлы проекта…"}
     await sync(owner_id, project_id, root)
     body = {"command": command, "timeout": timeout, "stdin": stdin}
+    if tty:
+        body.update(tty=True, rows=rows, cols=cols)
     if collect_changes or shell != "bash" or cwd != "." or interactive:
         body.update(collect_changes=collect_changes, shell=shell, cwd=cwd, interactive=interactive)
     url = f"/workspaces/{_owner_key(owner_id)}/{project_id}/run"

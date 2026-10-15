@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import json
+from typing import Literal
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
-from app.models.code_team import CodeTeam, CodeTeamMessage
+from app.models.code_team import CodeTeam, CodeTeamMessage, CodeTeamRequest
 from app.models.code_worker import CodeWorker
 
 NAME = r"^[a-zA-Z][a-zA-Z0-9_-]{0,59}$"
@@ -23,17 +25,37 @@ class Create(Empty):
 
 
 class Send(Empty):
+    chat_id: str | None = Field(default=None, pattern=r"^[0-9a-f-]{36}$")
     to: str = Field(min_length=1, max_length=80)
     message: str = Field(min_length=1, max_length=12000)
     summary: str = Field(default="", max_length=200)
 
 
-SCHEMAS = {"team_create": Create, "team_info": Empty, "team_delete": Empty, "send_message": Send}
+class Request(Empty):
+    kind: Literal["plan", "shutdown"]
+    to: str = Field(min_length=1, max_length=80)
+    content: str = Field(min_length=1, max_length=12000)
+
+
+class Respond(Empty):
+    request_id: str = Field(pattern=r"^[0-9a-f-]{36}$")
+    approve: bool
+    response: str = Field(default="", max_length=12000)
+
+
+def request_public(row):
+    return {"id": row.id, "kind": row.kind, "from": row.sender, "to": row.recipient,
+            "content": row.content, "status": row.status, "response": row.response}
+
+
+SCHEMAS = {"team_create": Create, "team_info": Empty, "team_delete": Empty, "send_message": Send, "team_request": Request, "team_respond": Respond}
 DESCRIPTIONS = {
+    "team_request": "Submit a durable plan to lead (worker only), or request graceful shutdown of a named worker (lead only). Returns request_id; use team_info to track the decision. A requested plan must be approved before a plan-first worker can resume implementation. Shutdown waits for the worker to accept at a tool boundary.",
+    "team_respond": "Accept or reject a pending request addressed to you. Decisions are durable and cannot be changed. Approving shutdown makes the worker finish at the next tool boundary; files and output remain. Plan approval never grants permissions beyond the current persona/mode.",
     "team_create": "Create this Code chat's durable team, with you as lead. Only one active team per chat. agent_start(name=...) joins it; at most 3 active workers. Tasks/worktrees remain isolated. No external messaging.",
     "team_info": "Inspect this chat's team, named members, status and recent durable messages. Messages are automatically delivered between model turns. Failed/stopped agents keep their mailbox until resumed.",
     "team_delete": "Close the current team only after all member workers have stopped. Retain reports, mail and private worktrees; never discard edits or stop workers implicitly.",
-    "send_message": "Send an internal message to a teammate by name, lead, or * for broadcast. Delivered at the receiver's next model turn, with a durable mailbox. Does not interrupt a running tool or automatically restart a finished worker. Use worker_resume to continue a stopped agent. Never grants additional tools or permissions.",
+    "send_message": "Send an internal message to a teammate by name, lead, or * for broadcast. Delivered at the receiver's next model turn, with a durable mailbox. Does not interrupt a running tool or automatically restart a finished worker. Use worker_resume to continue a stopped agent. Never grants additional tools or permissions. Lead may set chat_id to send to lead of another owned Code chat in the same project, with an active team; it does not automatically start that session.",
 }
 TOOLS = [{"type": "function", "function": {"name": name, "description": DESCRIPTIONS[name],
           "parameters": schema.model_json_schema()}} for name, schema in SCHEMAS.items()]
@@ -53,7 +75,7 @@ class Runtime:
             return []
         names = {"team_info"}
         if self.manager.mode not in ("plan", "review"):
-            names.add("send_message")
+            names |= {"send_message", "team_request", "team_respond"}
             if not self.worker_id:
                 names |= {"team_create", "team_delete"}
         return [tool for tool in TOOLS if tool["function"]["name"] in names]
@@ -91,6 +113,10 @@ class Runtime:
                 return {"team": None, "messages": [], "teams": history}
             members = list(await session.scalars(select(CodeWorker).where(CodeWorker.team_id == team.id)
                                                  .order_by(CodeWorker.created_at, CodeWorker.id)))
+            requests = list(await session.scalars(select(CodeTeamRequest).where(CodeTeamRequest.team_id == team.id)
+                .order_by(CodeTeamRequest.created_at.desc()).limit(100)))
+            if self.worker_id:
+                requests = [row for row in requests if actor in (row.sender, row.recipient)]
             query = select(CodeTeamMessage).where(CodeTeamMessage.team_id == team.id)
             if before is not None:
                 query = query.where(CodeTeamMessage.sequence < before)
@@ -105,7 +131,7 @@ class Runtime:
                         {"id": row.id, "name": row.member_name, "role": row.role,
                          "status": row.status, "workspace_removed": row.payload.get("workspace_removed", False)}
                         for row in members]}, "messages": [mail(row) for row in reversed(rows)], "teams": history,
-                    "before": rows[-1].sequence if has_more else None}
+                    "before": rows[-1].sequence if has_more else None, "requests": [request_public(row) for row in requests]}
 
     async def create(self, args):
         if self.worker_id:
@@ -140,7 +166,99 @@ class Runtime:
             await session.commit()
         return {"closed": team.id, "retained": "messages, reports, transcripts and worktrees"}
 
+    async def request(self, args):
+        async with self.manager.maker() as session:
+            team, actor = await self.identity(session)
+            if not team or team.active_slot != 1:
+                raise ValueError("Активная команда не найдена")
+            await session.scalar(select(CodeTeam).where(CodeTeam.id == team.id).with_for_update())
+            if args.kind == "plan":
+                if not self.worker_id or args.to != "lead":
+                    raise ValueError("План отправляет участник ведущему")
+            elif self.worker_id or args.to == "lead":
+                raise ValueError("Завершение участника запрашивает ведущий")
+            target = actor if args.kind == "plan" else args.to
+            worker = await session.scalar(select(CodeWorker).where(CodeWorker.team_id == team.id, CodeWorker.member_name == target))
+            if worker is None or worker.payload.get("workspace_removed"):
+                raise ValueError("Участник не найден")
+            existing = await session.scalar(select(CodeTeamRequest).where(CodeTeamRequest.team_id == team.id,
+                CodeTeamRequest.kind == args.kind, CodeTeamRequest.sender == actor,
+                CodeTeamRequest.recipient == args.to, CodeTeamRequest.status == "pending"))
+            if existing:
+                return {"request": request_public(existing)}
+            row = CodeTeamRequest(id=str(uuid4()), team_id=team.id, sender=actor, recipient=args.to,
+                                  kind=args.kind, content=args.content)
+            session.add(row)
+            if args.kind == "plan":
+                worker.payload = {**worker.payload, "plan_request_id": row.id}
+            await self._notice(session, team.id, actor, args.to, {"request_id": row.id, "kind": args.kind, "content": args.content})
+            await session.commit()
+            return {"request": request_public(row)}
+
+    async def _notice(self, session, team_id, sender, recipient, content):
+        pending = await session.scalar(select(func.count()).select_from(CodeTeamMessage).where(
+            CodeTeamMessage.team_id == team_id, CodeTeamMessage.delivered.is_(False)))
+        if pending >= 500:
+            raise ValueError("Почта команды переполнена")
+        sequence = (await session.scalar(select(func.max(CodeTeamMessage.sequence)).where(CodeTeamMessage.team_id == team_id)) or 0) + 1
+        session.add(CodeTeamMessage(team_id=team_id, sequence=sequence, sender=sender, recipient=recipient,
+                                   content=json.dumps(content, ensure_ascii=False), summary="Запрос команды"))
+
+    async def respond(self, args):
+        async with self.manager.maker() as session:
+            team, actor = await self.identity(session)
+            if not team or team.active_slot != 1:
+                raise ValueError("Активная команда не найдена")
+            await session.scalar(select(CodeTeam).where(CodeTeam.id == team.id).with_for_update())
+            row = await session.scalar(select(CodeTeamRequest).where(CodeTeamRequest.id == args.request_id,
+                CodeTeamRequest.team_id == team.id).with_for_update())
+            if row is None or row.recipient != actor:
+                raise ValueError("Запрос адресован другому участнику")
+            decision = "approved" if args.approve else "rejected"
+            if row.status != "pending":
+                if row.status != decision:
+                    raise ValueError("Решение уже принято")
+                return {"request": request_public(row)}
+            row.status, row.response = decision, args.response
+            await self._notice(session, team.id, actor, row.sender, {"request_id": row.id, "status": decision, "response": args.response})
+            await session.commit()
+            return {"request": request_public(row)}
+
+    async def should_stop(self):
+        if not self.worker_id:
+            return False
+        async with self.manager.maker() as session:
+            team, actor = await self.identity(session)
+            return bool(team and await session.scalar(select(CodeTeamRequest.id).where(
+                CodeTeamRequest.team_id == team.id, CodeTeamRequest.recipient == actor,
+                CodeTeamRequest.kind == "shutdown", CodeTeamRequest.status == "approved").limit(1)))
+
+    async def send_peer(self, args):
+        # Cross-chat peers share only explicit messages, never files/tools/credentials.
+        from app.models.chat import Chat
+        from app.models.enums import Domain
+        async with self.manager.maker() as session:
+            team, _actor = await self.identity(session)
+            if self.worker_id or args.to != "lead":
+                raise ValueError("Между чатами могут общаться только ведущие")
+            if team is None or team.active_slot != 1:
+                raise ValueError("В чате отправителя нет активной команды")
+            chat = await session.get(Chat, args.chat_id)
+            if (chat is None or chat.owner_id != self.manager.owner_id or chat.domain != Domain.code or
+                    chat.deleted_at is not None or chat.project_id != self.manager.project_id):
+                raise ValueError("Нужен доступный Code-чат того же проекта и владельца")
+            target = await session.scalar(select(CodeTeam).where(CodeTeam.chat_id == chat.id,
+                CodeTeam.active_slot == 1).with_for_update())
+            if target is None:
+                raise ValueError("В чате получателя нет активной команды")
+            await self._notice(session, target.id, "lead@" + self.manager.chat_id, "lead",
+                               {"source_chat_id": self.manager.chat_id, "message": args.message, "summary": args.summary})
+            await session.commit()
+            return {"sent_to_chat": chat.id, "note": "Доставка при следующем ходе; новый запуск не создаётся"}
+
     async def send(self, args):
+        if args.chat_id and args.chat_id != self.manager.chat_id:
+            return await self.send_peer(args)
         async with self.manager.maker() as session:
             team, actor = await self.identity(session)
             if not team or team.active_slot != 1:
@@ -198,6 +316,10 @@ class Runtime:
                 return await self.create(args)
             if name == "team_delete":
                 return await self.delete()
+            if name == "team_request":
+                return await self.request(args)
+            if name == "team_respond":
+                return await self.respond(args)
             if name == "send_message":
                 return await self.send(args)
             return await self.info()

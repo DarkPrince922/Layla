@@ -6,6 +6,7 @@ import io
 import zipfile
 from pathlib import Path
 
+import httpx
 import pytest
 from sqlalchemy import select
 
@@ -57,6 +58,45 @@ async def test_worktree_keeps_dirty_files_history_index_and_context(client, db_s
     assert not Path(copy).exists() and (root / "a.txt").read_text() == "dirty\n"
     with pytest.raises(ValueError, match="нельзя"):
         await fresh.resume(code_workspace.WorkspaceId(workspace_id=ident))
+
+
+async def test_worktree_ref_and_draft_pr_use_selected_revision_and_own_branch(client, db_sessionmaker, monkeypatch):
+    workspace, _manager, _chat, root = await controller(client, db_sessionmaker)
+    (root / "a.txt").write_text("initial")
+    await gitops.init(str(root), "main")
+    await gitops.commit(str(root), "initial", "Owner", "owner@example.com")
+    old = (await gitops._git(str(root), "rev-parse", "HEAD"))[1].strip()
+    (root / "a.txt").write_text("latest")
+    await gitops.commit(str(root), "latest", "Owner", "owner@example.com")
+    (root / "a.txt").write_text("dirty source")
+    await gitops.set_remote(str(root), "https://github.com/example/repository.git")
+    created = await workspace.enter(code_workspace.Enter(name="ref", base_ref=old))
+    branch, ident = created["workspace"]["branch"], created["workspace"]["id"]
+    assert Path(created["workspace"]["path"], "a.txt").read_text() == "initial"
+    assert (root / "a.txt").read_text() == "dirty source"
+    calls = []
+    def reply(request):
+        calls.append(request)
+        assert request.headers["authorization"] == "Bearer secret-test-token"
+        if request.url.path.endswith("/pulls") and request.method == "GET":
+            assert request.url.params["head"] == "example:" + branch
+            return httpx.Response(200, json=[])
+        if request.url.path.endswith("/pulls"):
+            assert request.method == "POST"
+            assert request.content.count(b'"draft":true') == 1
+            return httpx.Response(201, json={"html_url": "https://github.com/example/repository/pull/12", "number": 12, "draft": True})
+        return httpx.Response(200, json={"default_branch": "main"})
+    original = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original(transport=httpx.MockTransport(reply), **kwargs))
+    async def credential(_url):
+        return "example", "secret-test-token"
+    async def publish(_args):
+        return {"published": True}
+    workspace.git.credential = credential
+    monkeypatch.setattr(workspace, "publish", publish)
+    result = await workspace.call("worktree_pr", {"workspace_id": ident, "title": "Ref draft"})
+    assert result["pull_request"]["url"].endswith("/pull/12") and len(calls) == 3
+    assert (await workspace.list())["workspaces"][0]["pull_request"]["number"] == 12
 
 
 async def test_code_run_switches_mid_turn_and_rollback_targets_its_workspace(client, db_sessionmaker, monkeypatch):

@@ -17,6 +17,7 @@ import codecs
 import io
 import json
 import os
+import pty
 import re
 import signal
 import sys
@@ -207,8 +208,25 @@ class Workspace:
                 "prlimit", f"--nproc={config.NPROC}", f"--fsize={config.FSIZE}",
                 f"--nofile={config.NOFILE}", "--core=0", "--", *argv]
 
-    async def spawn(self, argv: list[str], stdin: bool, extra_env: dict[str, str] | None = None
+    async def spawn(self, argv: list[str], stdin: bool, extra_env: dict[str, str] | None = None, *, tty=False, rows=24, cols=80
                     ) -> asyncio.subprocess.Process:
+        if tty:
+            from layla_sandbox.terminal import Terminal
+            master, slave = pty.openpty()
+            try:
+                # setsid runs before exec; acquiring the controlling terminal is done as the sandbox user.
+                wrapper = [PYTHON, "-I", "-c", "import fcntl,termios,os,sys;fcntl.ioctl(0,termios.TIOCSCTTY,0);os.execvp(sys.argv[1],sys.argv[1:])", *self._wrap(argv)]
+                proc = await asyncio.create_subprocess_exec(*wrapper, cwd=str(self.path),
+                    env={**self.env(), "TERM": "xterm-256color", **(extra_env or {})},
+                    stdin=slave, stdout=slave, stderr=slave, start_new_session=True, **self._as_user())
+                terminal = Terminal(master, proc)
+                terminal.resize(rows, cols)
+                return terminal
+            except BaseException:
+                os.close(master)
+                raise
+            finally:
+                os.close(slave)
         return await asyncio.create_subprocess_exec(
             *self._wrap(argv), cwd=str(self.path), env={**self.env(), **(extra_env or {})},
             stdin=asyncio.subprocess.PIPE if stdin else asyncio.subprocess.DEVNULL,
@@ -268,7 +286,7 @@ class Workspace:
 
     async def run(self, command: str, timeout: int, stdin: str | None = None, *,
                   cleanup_all: bool = True, shell: str = "bash", cwd: str = ".",
-                  interactive: bool = False, processes: dict | None = None) -> AsyncIterator[dict]:
+                  interactive: bool = False, processes: dict | None = None, tty=False, rows=24, cols=80) -> AsyncIterator[dict]:
         """Выполнить команду bash в рабочей копии: события output (по мере вывода) и exit.
 
         По окончании добиваются процессы сеанса команды; cleanup_all=False — только они, а не
@@ -283,7 +301,7 @@ class Workspace:
         argv = ["/bin/bash", "-c", command] if shell == "bash" else ["pwsh", "-NoLogo", "-NoProfile", "-Command", command]
         # The relative cwd is passed as data, never interpolated into shell code.
         wrapper = [PYTHON, "-I", "-c", "import os,sys;os.chdir(sys.argv[1]);os.execvp(sys.argv[2],sys.argv[2:])", cwd, *argv]
-        proc = await self.spawn(wrapper, stdin=stdin is not None or interactive)
+        proc = await self.spawn(wrapper, stdin=stdin is not None or interactive, **({"tty": True, "rows": rows, "cols": cols} if tty else {}))
         if processes is not None:
             processes[(self.owner, self.project)] = proc
         feeder = asyncio.create_task(_feed(proc, stdin, close=not interactive)) if stdin is not None else None
@@ -338,6 +356,8 @@ class Workspace:
                 kill_session(proc.pid)
                 if cleanup_all:
                     await self.kill_all()
+                if tty:
+                    proc.dispose()
         tail = decoder.decode(b"", final=True)
         if tail:
             yield {"type": "output", "data": tail}

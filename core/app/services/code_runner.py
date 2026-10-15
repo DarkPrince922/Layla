@@ -42,6 +42,9 @@ class RunCommand(BaseModel):
     cwd: str = Field(default=".", max_length=4096)
     run_in_background: bool = False
     interactive: bool = False
+    tty: bool = False
+    rows: int = Field(default=24, ge=2, le=300)
+    cols: int = Field(default=80, ge=10, le=500)
 
 
 class CommandChanges(BaseModel):
@@ -117,7 +120,7 @@ def command_tool(box: dict) -> dict:
         ).replace("so do not start servers or watchers; run one-shot commands.",
                   "use run_in_background=true or command_start for long-running commands. interactive=true keeps stdin open for REPLs (python -u -i, node -i, bash); use command_input and worker_output/stop. Interactive commands outlive this turn.")
         description = description.replace("Non-interactive: no TTY, pass input via stdin.",
-                                          "No PTY. Foreground input uses stdin; interactive background commands accept command_input.")
+                                          "Use tty=true for a real PTY. Foreground input uses stdin; interactive background commands accept command_input and terminal resizing.")
         description += " cwd is relative to project root (default .); shells available: " + ", ".join(box.get("shells", ["bash"])) + "."
     return _spec("run_command", description, RunCommand)
 
@@ -224,8 +227,10 @@ class Runner:
             box = await sandbox.info()
             options = {}
             if box and box.get("file_changes"):
-                options = {"collect_changes": True, "shell": args.shell, "cwd": args.cwd, "interactive": args.interactive}
-            elif args.shell != "bash" or args.cwd != "." or args.interactive:
+                if args.tty and not box.get("pty"):
+                    raise sandbox.SandboxError("Пересоберите sandbox для PTY")
+                options = {"collect_changes": True, "shell": args.shell, "cwd": args.cwd, "interactive": args.interactive, **({"tty": True, "rows": args.rows, "cols": args.cols} if args.tty else {})}
+            elif args.shell != "bash" or args.cwd != "." or args.interactive or args.tty:
                 raise sandbox.SandboxError("Для shell/cwd/REPL пересоберите sandbox: текущий backend не поддерживает shell lifecycle")
             self._active_stream = sandbox.run(self.owner_id, self.project_id, self.root, args.command,
                                               timeout=args.timeout, stdin=args.stdin, **options)

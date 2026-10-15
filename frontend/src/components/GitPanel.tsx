@@ -26,6 +26,7 @@ function when(iso: string) {
 const card = "rounded-2xl border border-ink-700/70 bg-ink-800/25 p-4";
 
 export function GitPanel({ projectId, onOpenFile }: { projectId: string; onOpenFile?: (path: string) => void }) {
+  const privateCopy = projectId.includes("/workspaces/");
   const qc = useQueryClient();
   const key = ["git", projectId];
   const status = useQuery({ queryKey: key, queryFn: () => api.get<GitStatus>(`/projects/${projectId}/git`) });
@@ -108,12 +109,12 @@ export function GitPanel({ projectId, onOpenFile }: { projectId: string; onOpenF
         <span className="min-w-0 flex-1 truncate text-neutral-500" title={state.remote || ""}>{state.remote ? state.remote.replace(/^https:\/\//, "") : "без удалённого репозитория"}</span>
         <button onClick={() => { status.refetch(); history.refetch(); }} className="icon-button !h-8 !w-8" aria-label="Обновить"><RefreshCw className={`h-3.5 w-3.5 ${status.isFetching ? "animate-spin" : ""}`} /></button>
         {state.remote && <>
-          <button className="secondary-button !px-3 !py-1.5 text-xs" disabled={!!busy} onClick={() => act("pull", async () => {
+          {!privateCopy && <button className="secondary-button !px-3 !py-1.5 text-xs" disabled={!!busy} onClick={() => act("pull", async () => {
             const result = await api.post<{ state: string; conflicts?: string[] }>(`/projects/${projectId}/git/pull`);
             if (result.state === "conflicts" || result.state === "needs_commit") throw new Error("Слияние требует завершения. Попросите агента разрешить конфликты и отправить изменения: " + (result.conflicts || []).join(", "));
           }, "Ветки синхронизированы")}>
             {busy === "pull" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowDownToLine className="h-3.5 w-3.5" />}Pull
-          </button>
+          </button>}
           <button className="primary-button !px-3 !py-1.5 text-xs" disabled={!!busy || !state.last_commit} onClick={async () => {
             if (await confirmAction(`Отправить коммиты ветки ${state.branch || "main"} в ${state.remote}?`, "Отправить")) act("push", () => api.post(`/projects/${projectId}/git/push`, {}), "Коммиты отправлены");
           }}>
@@ -181,7 +182,7 @@ export function GitPanel({ projectId, onOpenFile }: { projectId: string; onOpenF
         )}
       </section>
 
-      <section className={card}>
+      {!privateCopy && <section className={card}>
         <h3 className="flex items-center gap-2 text-sm font-semibold"><Link2 className="h-4 w-4 text-accent-300" />Удалённый репозиторий</h3>
         <p className="mt-1 text-xs text-neutral-500">Адрес https, например https://github.com/user/repo.git. Репозиторий на GitHub создаётся заранее (можно пустой).</p>
         <p className="mt-1 text-xs text-neutral-500">Layla можно открыть через HTTP: отправку кода выполняет сервер. Для GitHub укажите HTTPS-адрес и токен с правом записи.</p>
@@ -213,7 +214,7 @@ export function GitPanel({ projectId, onOpenFile }: { projectId: string; onOpenF
             </div>
           </>}
         </div>}
-      </section>
+      </section>}
     </div>
   );
 }

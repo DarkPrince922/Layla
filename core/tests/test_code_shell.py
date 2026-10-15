@@ -11,9 +11,18 @@ from uuid import uuid4
 import httpx
 import pytest
 
-from app.services import code_runner, code_shell, code_workers, files, project_agent, sandbox
+from app.services import (
+    code_runner,
+    code_shell,
+    code_workers,
+    code_workspace,
+    files,
+    project_agent,
+    sandbox,
+)
 from tests.test_code_runner import _script, _wait
 from tests.test_code_workers import setup, terminal
+from tests.test_code_workspaces import controller
 
 
 class StreamingASGI(httpx.AsyncBaseTransport):
@@ -109,7 +118,7 @@ def bridge(monkeypatch, tmp_path):
         return True
 
     async def info(**_kwargs):
-        return {"file_changes": 1, "interactive_stdin": True, "shells": ["bash"], "tools": {}}
+        return {"file_changes": 1, "interactive_stdin": True, "pty": True, "shells": ["bash"], "tools": {}}
 
     async def runtimes(**_kwargs):
         return []
@@ -313,6 +322,52 @@ async def test_interactive_process_retains_variables_does_not_block_sibling_and_
     assert (manager.owner_id, ident) not in bridge.processes
     assert (await client.post(f"/api/chats/{chat['id']}/workers/{ident}/input", json={"text": "print(0)\n"})).status_code == 409
     assert not (root / "repl.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_chat_terminal_pty_retains_input_and_dimensions_after_reconnect(client, db_sessionmaker, bridge):
+    manager, chat, root = await setup(client, db_sessionmaker)
+    started = await client.post(f"/api/chats/{chat['id']}/workers/command", json={
+        "command": "python3 -u -i", "interactive": True, "detached": True, "tty": True,
+        "timeout": 120, "rows": 31, "cols": 93,
+    })
+    assert started.status_code == 200, started.text
+    ident = started.json()["worker"]["id"]
+    for _ in range(500):
+        if (manager.owner_id, ident) in bridge.processes:
+            break
+        await asyncio.sleep(0.01)
+    sent = await client.post(f"/api/chats/{chat['id']}/workers/{ident}/input", json={
+        "text": "import os; print('tty', os.isatty(0), os.get_terminal_size().columns, flush=True)\n", "cols": 107, "rows": 33,
+    })
+    assert sent.status_code == 200, sent.text
+    for _ in range(500):
+        detail = await client.get(f"/api/chats/{chat['id']}/workers/{ident}")
+        if "tty True 107" in detail.json().get("output", ""):
+            break
+        await asyncio.sleep(0.01)
+    assert "tty True 107" in detail.json()["output"]
+    assert not (root / "anything").exists()
+    assert (await client.post(f"/api/chats/{chat['id']}/workers/{ident}/stop", json={})).status_code == 200
+    assert (manager.owner_id, ident) not in bridge.processes
+
+
+@pytest.mark.asyncio
+async def test_project_terminal_history_and_rollback_are_scoped_to_chat_worktree(client, db_sessionmaker, bridge):
+    space, _manager, chat, root = await controller(client, db_sessionmaker)
+    created = await space.enter(code_workspace.Enter(name="terminal"))
+    copy = Path(created["workspace"]["path"])
+    endpoint = f"/api/projects/{space.runtime.project_id}/chats/{chat['id']}/workspaces/{created['workspace']['id']}"
+    response = await client.post(endpoint + "/run", json={"command": "printf private > written.txt"})
+    assert response.status_code == 200 and '"type": "files"' in response.text, response.text
+    assert (copy / "written.txt").read_text() == "private"
+    assert not (root / "written.txt").exists()
+    history = (await client.get(endpoint + "/shell-history")).json()
+    assert len(history) == 1
+    assert (await client.get(f"/api/projects/{space.runtime.project_id}/shell-history")).json() == []
+    rollback = await client.post(endpoint + f"/shell-history/{history[0]['id']}/rollback")
+    assert rollback.status_code == 200, rollback.text
+    assert not (copy / "written.txt").exists()
 
 
 @pytest.mark.asyncio

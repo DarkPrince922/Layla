@@ -28,3 +28,9 @@ class CodeLeadEntry(UUIDPk, Timestamps, Base):
     turn_id: Mapped[str] = mapped_column(ForeignKey("code_lead_turns.id", ondelete="CASCADE"), index=True)
     sequence: Mapped[int] = mapped_column(Integer)
     message: Mapped[dict] = mapped_column(JSONList)
+
+
+class CodeSessionArchive(UUIDPk, Timestamps, Base):
+    __tablename__ = "code_session_archives"
+    chat_id: Mapped[str] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"), unique=True)
+    entries: Mapped[list] = mapped_column(JSONList, default=list)

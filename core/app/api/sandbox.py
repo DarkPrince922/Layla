@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.concurrency import run_in_threadpool
 
-from app.api.projects import _owned_project, _project_root
+from app.api.projects import _bound_project, _cache_id, _owned_project, _project_root
 from app.db import get_session, get_sessionmaker
 from app.models.code_shell import CodeShellRun
 from app.models.job import Job
@@ -27,22 +27,25 @@ router = APIRouter(tags=["sandbox"])
 _shell_imports: set[str] = set()
 
 
+@router.get("/projects/{project_id}/chats/{chat_id}/workspaces/{workspace_id}/lsp")
 @router.get("/projects/{project_id}/lsp")
 async def lsp_status(project_id: str, user: User = Depends(get_current_user),
-                     session: AsyncSession = Depends(get_session)) -> dict:
-    project = await _owned_project(session, user, project_id)
+                     session: AsyncSession = Depends(get_session), workspace_id: str | None = None, chat_id: str | None = None) -> dict:
+    project = await _bound_project(session, user, project_id, workspace_id, chat_id)
     try:
-        return await code_lsp.Client(user.id, project_id, _project_root(project)).transport("GET")
+        return await code_lsp.Client(user.id, _cache_id(project), _project_root(project)).transport("GET")
     except sandbox.SandboxError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+
+@router.post("/projects/{project_id}/chats/{chat_id}/workspaces/{workspace_id}/lsp")
 @router.post("/projects/{project_id}/lsp")
 async def lsp_query(project_id: str, body: code_lsp.EditorQuery,
-                    user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session)) -> dict:
-    project = await _owned_project(session, user, project_id)
+                    user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session), workspace_id: str | None = None, chat_id: str | None = None) -> dict:
+    project = await _bound_project(session, user, project_id, workspace_id, chat_id)
     try:
-        result = await code_lsp.Client(user.id, project_id, _project_root(project)).call(
+        result = await code_lsp.Client(user.id, _cache_id(project), _project_root(project)).call(
             code_lsp.Query(**body.model_dump(exclude={"content"})), body.content,
         )
     except sandbox.SandboxError as exc:
@@ -55,14 +58,17 @@ async def lsp_query(project_id: str, body: code_lsp.EditorQuery,
     return result
 
 
+
+@router.delete("/projects/{project_id}/chats/{chat_id}/workspaces/{workspace_id}/lsp")
 @router.delete("/projects/{project_id}/lsp")
 async def lsp_stop(project_id: str, user: User = Depends(get_current_user),
-                   session: AsyncSession = Depends(get_session)) -> dict:
-    project = await _owned_project(session, user, project_id)
+                   session: AsyncSession = Depends(get_session), workspace_id: str | None = None, chat_id: str | None = None) -> dict:
+    project = await _bound_project(session, user, project_id, workspace_id, chat_id)
     try:
-        return await code_lsp.Client(user.id, project_id, _project_root(project)).transport("DELETE")
+        return await code_lsp.Client(user.id, _cache_id(project), _project_root(project)).transport("DELETE")
     except sandbox.SandboxError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
 
 
 @router.get("/sandbox/status")
@@ -144,16 +150,16 @@ def _sse(event: dict) -> bytes:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode()
 
 
+@router.post("/projects/{project_id}/chats/{chat_id}/workspaces/{workspace_id}/run")
 @router.post("/projects/{project_id}/run")
 async def run_in_project(
     project_id: str,
     body: RunIn,
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
-    maker=Depends(get_sessionmaker),
-) -> StreamingResponse:
+    maker=Depends(get_sessionmaker), workspace_id: str | None = None, chat_id: str | None = None) -> StreamingResponse:
     """Терминал проекта: команда в песочнице, вывод — потоком (SSE)."""
-    project = await _owned_project(session, user, project_id)
+    project = await _bound_project(session, user, project_id, workspace_id, chat_id)
     root = _project_root(project)
     await audit.record(session, actor=user.id, action="project.run", target=project_id,
                        meta={"command": body.command[:500]})
@@ -165,11 +171,11 @@ async def run_in_project(
             options = {"collect_changes": True, "shell": body.shell, "cwd": body.cwd} if box and box.get("file_changes") else {}
             if not options and (body.shell != "bash" or body.cwd != "."):
                 raise sandbox.SandboxError("Пересоберите sandbox для shell/cwd")
-            async with aclosing(sandbox.run(user.id, project_id, root, body.command,
+            async with aclosing(sandbox.run(user.id, _cache_id(project), root, body.command,
                                            timeout=body.timeout, stdin=body.stdin, **options)) as events:
                 async for event in events:
                     if event.get("type") == "changes":
-                        async for imported in _import_shell(maker, user, project_id, root, event):
+                        async for imported in _import_shell(maker, user, project_id, root, event, workspace_id, chat_id):
                             yield _sse(imported)
                     else:
                         if event.get("type") == "output":
@@ -182,11 +188,12 @@ async def run_in_project(
                              headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"})
 
 
-async def _import_shell(maker, user, project_id, root, packet):
-    runner = code_runner.Runner(user.id, project_id, root)
+
+async def _import_shell(maker, user, project_id, root, packet, workspace_id=None, chat_id=None):
+    runner = code_runner.Runner(user.id, workspace_id or project_id, root)
     async with maker() as session:
-        await _owned_project(session, user, project_id)
-        job = CodeShellRun(owner_id=user.id, project_id=project_id, status="running", result={"checkpoints": [],
+        await _bound_project(session, user, project_id, workspace_id, chat_id)
+        job = CodeShellRun(owner_id=user.id, project_id=project_id, workspace_id=workspace_id, status="running", result={"checkpoints": [],
                             "expected": {item["path"]: item["after_sha256"] for item in packet.get("changes", [])},
                             "expected_modes": {item["path"]: item.get("mode") for item in packet.get("changes", [])}})
         session.add(job)
@@ -196,7 +203,7 @@ async def _import_shell(maker, user, project_id, root, packet):
         try:
             async for item in code_shell.apply(runner, packet, {"id": job.id, "name": "shell_file"}):
                 if "checkpoint" in item:
-                    await _owned_project(session, user, project_id)
+                    await _bound_project(session, user, project_id, workspace_id, chat_id)
                     job.result = {**job.result, "checkpoints": [*job.result["checkpoints"], item["checkpoint"]]}
                     await session.commit()
                 elif "tool" in item:
@@ -209,7 +216,7 @@ async def _import_shell(maker, user, project_id, root, packet):
                                        meta={"run_id": job.id, "paths": [change["path"] for change in result.get("applied", [])]})
                     await session.commit()
                     finished = True
-                    sandbox.preview_touch(user.id, project_id)
+                    sandbox.preview_touch(user.id, workspace_id or project_id)
                     yield {"type": "files", "run_id": job.id, **result}
         finally:
             _shell_imports.discard(job.id)
@@ -219,22 +226,25 @@ async def _import_shell(maker, user, project_id, root, packet):
                     await session.commit()
 
 
+@router.get("/projects/{project_id}/chats/{chat_id}/workspaces/{workspace_id}/command-changes")
 @router.get("/projects/{project_id}/command-changes")
 async def pending_shell(project_id: str, user: User = Depends(get_current_user),
-                         session: AsyncSession = Depends(get_session)) -> dict:
-    project = await _owned_project(session, user, project_id)
+                         session: AsyncSession = Depends(get_session), workspace_id: str | None = None, chat_id: str | None = None) -> dict:
+    project = await _bound_project(session, user, project_id, workspace_id, chat_id)
     try:
-        packet = await code_shell.fetch(code_runner.Runner(user.id, project_id, _project_root(project)))
+        packet = await code_shell.fetch(code_runner.Runner(user.id, _cache_id(project), _project_root(project)))
         return await run_in_threadpool(code_shell.describe, packet, _project_root(project))
     except (ValueError, OSError, sandbox.SandboxError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+
+@router.post("/projects/{project_id}/chats/{chat_id}/workspaces/{workspace_id}/command-changes")
 @router.post("/projects/{project_id}/command-changes")
 async def resolve_shell(project_id: str, body: code_runner.CommandChanges, user: User = Depends(get_current_user),
-                         session: AsyncSession = Depends(get_session), maker=Depends(get_sessionmaker)) -> dict:
-    project = await _owned_project(session, user, project_id)
-    runner = code_runner.Runner(user.id, project_id, _project_root(project))
+                         session: AsyncSession = Depends(get_session), maker=Depends(get_sessionmaker), workspace_id: str | None = None, chat_id: str | None = None) -> dict:
+    project = await _bound_project(session, user, project_id, workspace_id, chat_id)
+    runner = code_runner.Runner(user.id, _cache_id(project), _project_root(project))
     try:
         packet = await code_shell.fetch(runner)
         if not body.change_id or body.change_id != packet.get("id"):
@@ -248,7 +258,7 @@ async def resolve_shell(project_id: str, body: code_runner.CommandChanges, user:
         if body.action != "apply":
             raise ValueError("Нужно apply или discard")
         result = {"changes": []}
-        async for event in _import_shell(maker, user, project_id, runner.root, packet):
+        async for event in _import_shell(maker, user, project_id, runner.root, packet, workspace_id, chat_id):
             if event["type"] == "file_change":
                 result["changes"].append(event["change"])
             else:
@@ -258,12 +268,14 @@ async def resolve_shell(project_id: str, body: code_runner.CommandChanges, user:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+
+@router.get("/projects/{project_id}/chats/{chat_id}/workspaces/{workspace_id}/shell-history")
 @router.get("/projects/{project_id}/shell-history")
 async def shell_history(project_id: str, user: User = Depends(get_current_user),
-                          session: AsyncSession = Depends(get_session)) -> list[dict]:
-    await _owned_project(session, user, project_id)
+                          session: AsyncSession = Depends(get_session), workspace_id: str | None = None, chat_id: str | None = None) -> list[dict]:
+    await _bound_project(session, user, project_id, workspace_id, chat_id)
     rows = list(await session.scalars(select(CodeShellRun).where(CodeShellRun.owner_id == user.id,
-                                     CodeShellRun.project_id == project_id).order_by(CodeShellRun.created_at.desc()).limit(100)))
+                                     CodeShellRun.project_id == project_id, CodeShellRun.workspace_id == workspace_id).order_by(CodeShellRun.created_at.desc()).limit(100)))
     for row in rows:
         if row.status == "running" and row.id not in _shell_imports:
             row.status = "interrupted"
@@ -273,12 +285,14 @@ async def shell_history(project_id: str, user: User = Depends(get_current_user),
             for row in rows if row.result.get("checkpoints")]
 
 
+
+@router.post("/projects/{project_id}/chats/{chat_id}/workspaces/{workspace_id}/shell-history/{run_id}/rollback")
 @router.post("/projects/{project_id}/shell-history/{run_id}/rollback")
 async def rollback_shell(project_id: str, run_id: str, user: User = Depends(get_current_user),
-                           session: AsyncSession = Depends(get_session)) -> dict:
-    project = await _owned_project(session, user, project_id)
+                           session: AsyncSession = Depends(get_session), workspace_id: str | None = None, chat_id: str | None = None) -> dict:
+    project = await _bound_project(session, user, project_id, workspace_id, chat_id)
     row = await session.get(CodeShellRun, run_id)
-    if row is None or row.owner_id != user.id or row.project_id != project_id:
+    if row is None or row.owner_id != user.id or row.project_id != project_id or row.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail="Запуск не найден")
     if row.id in _shell_imports or row.result.get("rolled_back"):
         raise HTTPException(status_code=409, detail="Запуск работает или уже отменён")
@@ -301,8 +315,9 @@ async def rollback_shell(project_id: str, run_id: str, user: User = Depends(get_
     row.result = {**row.result, "rolled_back": True}
     await audit.record(session, actor=user.id, action="project.shell.rollback", target=project_id, meta={"run_id": run_id})
     await session.commit()
-    sandbox.preview_touch(user.id, project_id)
+    sandbox.preview_touch(user.id, _cache_id(project))
     return {"restored": [point["path"] for point in row.result.get("checkpoints", [])]}
+
 
 
 class RunCodeIn(BaseModel):
@@ -314,19 +329,19 @@ class RunCodeIn(BaseModel):
     args: list[str] = Field(default_factory=list, max_length=50)
 
 
+@router.post("/projects/{project_id}/chats/{chat_id}/workspaces/{workspace_id}/run-code")
 @router.post("/projects/{project_id}/run-code")
 async def run_code_in_project(
     project_id: str,
     body: RunCodeIn,
     user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-) -> dict:
+    session: AsyncSession = Depends(get_session), workspace_id: str | None = None, chat_id: str | None = None) -> dict:
     """Запустить файл проекта (или фрагмент) в Piston."""
-    project = await _owned_project(session, user, project_id)
+    project = await _bound_project(session, user, project_id, workspace_id, chat_id)
     args, problem = code_runner.validate("run_code", body.model_dump())
     if problem:
         raise HTTPException(status_code=422, detail=problem)
-    result = await code_runner.Runner(user.id, project_id, _project_root(project)).code(args)
+    result = await code_runner.Runner(user.id, _cache_id(project), _project_root(project)).code(args)
     await audit.record(session, actor=user.id, action="project.run_code", target=project_id,
                        meta={"language": body.language, "paths": body.paths[:10]})
     await session.commit()
@@ -335,21 +350,23 @@ async def run_code_in_project(
     return result
 
 
+
+@router.delete("/projects/{project_id}/chats/{chat_id}/workspaces/{workspace_id}/sandbox", status_code=status.HTTP_200_OK)
 @router.delete("/projects/{project_id}/sandbox", status_code=status.HTTP_200_OK)
 async def reset_project_sandbox(
     project_id: str,
     user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-) -> dict:
+    session: AsyncSession = Depends(get_session), workspace_id: str | None = None, chat_id: str | None = None) -> dict:
     """Сбросить рабочую копию проекта в песочнице: зависимости и сборки поставятся заново."""
-    await _owned_project(session, user, project_id)
+    project = await _bound_project(session, user, project_id, workspace_id, chat_id)
     try:
-        await sandbox.reset(user.id, project_id)
+        await sandbox.reset(user.id, _cache_id(project))
     except sandbox.SandboxError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     await audit.record(session, actor=user.id, action="project.sandbox.reset", target=project_id)
     await session.commit()
     return {"ok": True}
+
 
 
 # --- превью приложения -----------------------------------------------------------

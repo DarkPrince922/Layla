@@ -57,9 +57,11 @@ from app.services import (
     code_lsp,
     code_mcp,
     code_runner,
+    code_session_transfer,
     code_sessions,
     code_state,
     code_teams,
+    code_worker_cleanup,
     code_workers,
     code_workspace,
     design_gen,
@@ -154,7 +156,7 @@ async def get_code_workspaces(chat_id: str, user: User = Depends(get_current_use
 @router.post("/{chat_id}/workspaces/{action}")
 async def control_code_workspace(chat_id: str, action: str, body: dict, user: User = Depends(get_current_user),
                                  session: AsyncSession = Depends(get_session), maker=Depends(get_sessionmaker)) -> dict:
-    name = {"enter": "enter_worktree", "resume": "resume_worktree", "exit": "exit_worktree", "publish": "worktree_publish"}.get(action)
+    name = {"enter": "enter_worktree", "resume": "resume_worktree", "exit": "exit_worktree", "publish": "worktree_publish", "pr": "worktree_pr"}.get(action)
     if not name:
         raise HTTPException(status_code=404, detail="Действие не найдено")
     workspace = await _lead_workspace(session, maker, user, chat_id)
@@ -227,6 +229,77 @@ async def get_code_team(chat_id: str, team_id: str | None = None, before: int | 
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.post("/{chat_id}/team/protocol/{action}")
+async def team_protocol(chat_id: str, action: str, body: dict, user: User = Depends(get_current_user),
+                         session: AsyncSession = Depends(get_session), maker=Depends(get_sessionmaker)):
+    manager = await _worker_manager(session, maker, user, chat_id)
+    name = {"request": "team_request", "respond": "team_respond"}.get(action)
+    if name is None:
+        raise HTTPException(status_code=404, detail="Действие не найдено")
+    result = await manager.team.call(name, body)
+    if "error" in result:
+        raise HTTPException(status_code=409, detail=result["error"])
+    return result
+
+
+@router.post("/{chat_id}/session/import", response_model=ChatOut)
+async def import_code_session(chat_id: str, body: code_session_transfer.Import,
+                              user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session),
+                              maker=Depends(get_sessionmaker)):
+    await _worker_manager(session, maker, user, chat_id, active=False)
+    source = await _owned_chat(session, user, chat_id)
+    try:
+        return await code_session_transfer.import_session(session, source, body)
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)[:1000]) from exc
+
+
+@router.post("/{chat_id}/session/fork", response_model=ChatOut)
+async def fork_code_session(chat_id: str, body: code_session_transfer.Fork,
+                            user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session),
+                            maker=Depends(get_sessionmaker)):
+    source = await _owned_chat(session, user, chat_id)
+    workspace = await _lead_workspace(session, maker, user, chat_id)
+    chat = None
+    try:
+        await workspace._idle()
+        source_root, _copy = await workspace.current()
+        chat = await code_session_transfer.fork_session(session, source, body.title)
+        target = code_workspace.Runtime(code_state.Runtime(maker, user.id, chat.id, chat.project_id), workspace.root)
+        created = await target.enter(code_workspace.Enter(name="fork"))
+        await run_in_threadpool(code_workspace._copy_snapshot, source_root, created["workspace"]["path"])
+        return chat
+    except (ValueError, OSError) as exc:
+        if chat is not None:
+            await code_worker_cleanup.queue(session, chat)
+            await session.delete(chat)
+            await session.commit()
+            await trash.purge_dirs(code_worker_cleanup.take(session))
+        raise HTTPException(status_code=409, detail=str(exc)[:1000]) from exc
+
+
+@router.get("/{chat_id}/session/export")
+async def export_code_session(chat_id: str, original: bool = False,
+                              user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session),
+                              maker=Depends(get_sessionmaker)):
+    from app.models.code_session import CodeSessionArchive
+    await _worker_manager(session, maker, user, chat_id, active=False)
+    if original:
+        archive = await session.scalar(select(CodeSessionArchive).where(CodeSessionArchive.chat_id == chat_id))
+        if archive is None:
+            raise HTTPException(status_code=404, detail="Исходный импортированный журнал отсутствует")
+        return {"entries": archive.entries}
+    rows = list(await session.scalars(select(CodeLeadEntry).join(CodeLeadTurn).where(
+        CodeLeadTurn.chat_id == chat_id, CodeLeadTurn.owner_id == user.id, CodeLeadTurn.active.is_(True))
+        .order_by(CodeLeadTurn.created_at, CodeLeadTurn.id, CodeLeadEntry.sequence)))
+    if rows:
+        messages = [row.message for row in rows]
+    else:
+        visible = await session.scalars(select(Message).where(Message.chat_id == chat_id).order_by(Message.created_at, Message.id))
+        messages = [{"role": row.role, "content": row.content} for row in visible if row.role in ("user", "assistant")]
+    return {"format": "layla-code-transcript-v1", "messages": messages}
+
+
 @router.get("/{chat_id}/session")
 async def get_code_session(chat_id: str, offset: int = Query(0, ge=0), limit: int = Query(25, ge=1, le=100),
                            user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session),
@@ -288,6 +361,17 @@ async def get_worker_transcript(chat_id: str, worker_id: str, offset: int = Quer
         CodeTranscript.sequence >= offset).order_by(CodeTranscript.sequence).limit(limit + 1)))
     return {"entries": [{"sequence": row.sequence, "message": row.message} for row in rows[:limit]],
             "next_offset": rows[limit].sequence if len(rows) > limit else None}
+
+
+@router.post("/{chat_id}/workers/command")
+async def start_code_command(chat_id: str, body: code_workers.CommandStart,
+                             user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session),
+                             maker=Depends(get_sessionmaker)) -> dict:
+    manager = await _worker_manager(session, maker, user, chat_id)
+    try:
+        return await manager.start_command(body)
+    except (ValueError, OSError, sandbox.SandboxError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/{chat_id}/workers/{worker_id}")

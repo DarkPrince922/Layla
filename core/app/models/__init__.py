@@ -4,10 +4,10 @@ so Alembic autogeneration and metadata.create_all() see them all.
 from app.models.agent import AgentConfig, AgentRun, AgentStep, AgentWorker
 from app.models.audit import AuditLog
 from app.models.chat import Chat, Checkpoint, Message
-from app.models.code_session import CodeLeadEntry, CodeLeadTurn
+from app.models.code_session import CodeLeadEntry, CodeLeadTurn, CodeSessionArchive
 from app.models.code_shell import CodeShellRun
 from app.models.code_state import CodeState
-from app.models.code_team import CodeTeam, CodeTeamMessage, CodeTranscript
+from app.models.code_team import CodeTeam, CodeTeamMessage, CodeTeamRequest, CodeTranscript
 from app.models.code_worker import CodeWorker
 from app.models.code_workspace import CodeWorkspace, CodeWorkspaceCheckpoint
 from app.models.combo import Combo
@@ -46,10 +46,12 @@ __all__ = [
     "Checkpoint",
     "CodeLeadEntry",
     "CodeLeadTurn",
+    "CodeSessionArchive",
     "CodeShellRun",
     "CodeState",
     "CodeTeam",
     "CodeTeamMessage",
+    "CodeTeamRequest",
     "CodeTranscript",
     "CodeWorker",
     "CodeWorkspace",
