@@ -29,10 +29,21 @@ from app.schemas.project import (
     ProjectOut,
     RepoImport,
 )
-from app.services import audit, files, jobs, repo, sandbox, trash
+from app.services import audit, code_skills, files, jobs, repo, sandbox, trash
 from app.services.auth import get_current_user
 
 router = APIRouter(prefix="/projects", tags=["projects"])
+
+
+@router.get("/{project_id}/skills")
+async def project_skills(project_id: str, user: User = Depends(get_current_user),
+                          session: AsyncSession = Depends(get_session)) -> dict:
+    project = await _owned_project(session, user, project_id)
+    try:
+        catalog = await run_in_threadpool(code_skills.Catalog, _project_root(project))
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"skills": [skill.public() for skill in catalog.skills.values()], "errors": catalog.errors}
 
 
 async def _default_workspace(session: AsyncSession, user: User) -> Workspace | None:

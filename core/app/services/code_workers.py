@@ -18,7 +18,15 @@ from app.models.code_worker import CodeWorker
 from app.models.job import Job
 from app.models.provider import Provider
 from app.models.user import Project
-from app.services import code_lsp, code_runner, code_worktrees, jobs, provider_client, sandbox
+from app.services import (
+    code_hooks,
+    code_lsp,
+    code_runner,
+    code_worktrees,
+    jobs,
+    provider_client,
+    sandbox,
+)
 
 ACTIVE = frozenset({"queued", "running"})
 OUTPUT_LIMIT = 80000
@@ -130,6 +138,7 @@ class Manager:
         self.provider_id, self.model, self.mode = provider_id, model, mode
         self.caps = dict(caps or {})
         self.attached: set[str] = set()
+        self.tool_allowlist = None
 
     async def authorize(self, session):
         await self.runtime._authorize(session)
@@ -226,13 +235,17 @@ class Manager:
                                     self.permissions is not None and "files.write" not in self.permissions):
             raise ValueError("Режим или персона разрешает только исследование/ревью, без реализации")
 
-    async def start_agent(self, args: AgentStart) -> dict:
+    async def start_agent(self, args: AgentStart, *, tool_allowlist=None, skill_hooks=None) -> dict:
         self._allow_implement(args.role)
         if not self.provider_id or not self.model:
             raise ValueError("Для воркера нужен провайдер и модель Code-чата")
         row = await self._reserve("agent", args.task, args.role, {
             "provider_id": self.provider_id, "model": self.model, "caps": self.caps,
             "permissions": self.permissions, "detached": args.detached, "mode": self.mode,
+            "tool_allowlist": sorted(set(tool_allowlist) & set(self.tool_allowlist))
+            if tool_allowlist is not None and self.tool_allowlist is not None
+            else tool_allowlist if tool_allowlist is not None else self.tool_allowlist,
+            "skill_hooks": skill_hooks or [],
         })
         return {"worker": public(row)}
 
@@ -291,6 +304,9 @@ class Manager:
             if row.payload.get("workspace_removed"):
                 raise ValueError("Рабочая копия удалена; запустите нового воркера")
             payload = {**row.payload, "permissions": self.permissions, "mode": self.mode}
+            if self.tool_allowlist is not None:
+                old = payload.get("tool_allowlist")
+                payload["tool_allowlist"] = sorted(set(self.tool_allowlist) & set(old)) if old is not None else self.tool_allowlist
             if row.kind == "command" and (self.mode == "plan" or not code_runner.can_run(self.permissions)):
                 raise ValueError("Нет права на запуск команды")
             kind, role, task = row.kind, row.role, row.task
@@ -473,6 +489,9 @@ class Manager:
                     runner=runner if role == "implement" and payload.get("mode") != "plan" else None,
                     worker_context=True,
                     lsp=code_lsp.Client(self.owner_id, worker_id, worktree),
+                    workflow=code_hooks.Runtime(runner, permissions, session_id=worker_id,
+                                                extra_hooks=payload.get("skill_hooks")),
+                    tool_allowlist=payload.get("tool_allowlist"),
                 ):
                     if "delta" in event:
                         output = (output + event["delta"])[-OUTPUT_LIMIT:]

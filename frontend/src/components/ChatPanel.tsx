@@ -10,6 +10,7 @@ import { useAuth } from "@/store/auth";
 import { FileDiff } from "@/components/FileDiff";
 import { RunCard } from "@/components/RunOutput";
 import { CodeWorkerPanel, type CodeWorker } from "@/components/CodeWorkerPanel";
+import { CodeSkillPicker } from "@/components/CodeSkillPicker";
 import { confirmAction } from "@/components/ConfirmDialog";
 
 const active = (job?: Job | null) => !!job && ["queued", "running"].includes(job.status);
@@ -397,7 +398,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
         {m.meta?.reasoning && <details className="mb-3 rounded-lg border border-ink-700 p-3"><summary className="cursor-pointer text-xs text-neutral-400">Размышление</summary><p className="mt-3 whitespace-pre-wrap break-words text-xs leading-relaxed text-neutral-400">{m.meta.reasoning}</p></details>}
         {!!m.meta?.todos?.length && <Todos items={m.meta.todos} />}
         <>{m.role === "assistant" ? <MarkdownResponse content={m.content} /> : <div className="whitespace-pre-wrap break-words text-sm leading-7">{m.content}</div>}</>
-        {m.meta?.tools?.map(tool => <div key={tool.id} className="mt-3">{tool.status === "pending" ? <Approval tool={tool} active={approval?.id === tool.id} busy={deciding} onDecide={decide} /> : tool.status === "rejected" ? <p className="rounded-lg border border-ink-700 p-3 text-xs text-neutral-400">Отклонено вами · <span className="break-all font-mono">{tool.command || tool.path}</span></p> : tool.name === "delegate_agent" ? <AgentCard tool={tool} /> : RUN_TOOLS.has(tool.name) || GIT_TOOLS.has(tool.name) ? <RunCard tool={tool} /> : tool.change && tool.status === "done" ? <FileDiff change={tool.change} onOpen={onOpenFile} /> : <div className={`rounded-lg border p-3 text-xs ${tool.status === "error" ? "border-red-500/30 text-red-300" : "border-ink-700 text-neutral-400"}`}><span>{tool.status === "running" ? "Выполняется" : tool.status === "done" ? "Готово" : "Ошибка"} · {tool.name}</span>{(tool.command || tool.path) && <p className="mt-1 break-all font-mono">{tool.command || tool.path}</p>}{tool.note && <p className="mt-1 text-neutral-500">{tool.note}</p>}{tool.error && <p>{tool.error}</p>}</div>}</div>)}
+        {m.meta?.tools?.map(tool => <div key={tool.id} className="mt-3">{tool.status === "pending" ? <Approval tool={tool} active={approval?.id === tool.id} busy={deciding} onDecide={decide} /> : tool.status === "rejected" ? <p className="rounded-lg border border-ink-700 p-3 text-xs text-neutral-400">Отклонено вами · <span className="break-all font-mono">{tool.command || tool.path}</span></p> : tool.name === "delegate_agent" ? <AgentCard tool={tool} /> : RUN_TOOLS.has(tool.name) || GIT_TOOLS.has(tool.name) || tool.name === "project_hook" ? <RunCard tool={tool} /> : tool.change && tool.status === "done" ? <FileDiff change={tool.change} onOpen={onOpenFile} /> : <div className={`rounded-lg border p-3 text-xs ${tool.status === "error" ? "border-red-500/30 text-red-300" : "border-ink-700 text-neutral-400"}`}><span>{tool.status === "running" ? "Выполняется" : tool.status === "done" ? "Готово" : "Ошибка"} · {tool.name}</span>{(tool.command || tool.path) && <p className="mt-1 break-all font-mono">{tool.command || tool.path}</p>}{tool.note && <p className="mt-1 text-neutral-500">{tool.note}</p>}{tool.error && <p>{tool.error}</p>}</div>}</div>)}
         {m.meta?.error && <p role="alert" className="mt-3 text-sm text-red-300">{m.meta.error}</p>}
       </article>)}
     </div>
@@ -423,6 +424,8 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
         {MODES.map(({ id, label, hint, icon: Icon }) => <button key={id} role="radio" aria-checked={mode === id} title={hint} onClick={() => pickMode(id)} className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 ${mode === id ? "bg-accent-500/20 text-accent-100" : "text-neutral-400 hover:bg-ink-900"}`}><Icon className="h-3.5 w-3.5" />{label}</button>)}
       </div>
       <div className="mb-3 flex flex-wrap gap-2 text-xs">
+        {domain === "code" && projectId && <CodeSkillPicker key={`${owner}:${projectId}`} projectId={projectId} disabled={running || sending}
+          onChoose={name => { const text = `/${name} ${input}`; setInput(text); remember(`${scope}:draft:${chatId || "new"}`, text); }} />}
         <select aria-label="Персона" value={personaId} disabled={!!chatId || sending} onChange={e => pickPersona(e.target.value)} className="min-w-0 max-w-full rounded-lg bg-ink-900 px-3 py-2"><option value="">Без персоны</option>{personas.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
         <select aria-label="Модель" value={choice} disabled={running || sending} onChange={e => pickModel(e.target.value)} className="min-w-0 max-w-full rounded-lg bg-ink-900 px-3 py-2">{!models.length && <option value="">Нет активных моделей</option>}{models.map(m => <option key={`${m.provider_id}|${m.name}`} value={`${m.provider_id}|${m.name}`}>{m.name} · {m.provider}</option>)}</select>
       </div>

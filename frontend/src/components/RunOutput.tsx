@@ -30,6 +30,7 @@ export function seconds(value?: number) {
 
 /** Итог запуска одной строкой: код выхода, таймаут, ошибка. */
 export function RunBadge({ tool }: { tool: ToolEvent }) {
+  if (tool.name === "project_hook" && tool.note?.includes("пропущен")) return <span className="text-neutral-500">пропущен</span>;
   if (tool.status === "running") return <span className="flex items-center gap-1 text-accent-200"><Loader2 className="h-3 w-3 animate-spin" />Выполняется</span>;
   if (tool.status === "error") return <span className="flex items-center gap-1 text-red-300"><CircleAlert className="h-3 w-3" />Ошибка</span>;
   if (tool.timed_out) return <span className="flex items-center gap-1 text-amber-200"><Clock3 className="h-3 w-3" />Время вышло</span>;
@@ -45,19 +46,21 @@ export function RunCard({ tool }: { tool: ToolEvent }) {
   const live = tool.status === "running";
   const failed = tool.status === "error" || !!tool.timed_out || (tool.status === "done" && tool.exit_code !== undefined && tool.exit_code !== 0);
   const [open, setOpen] = useState<boolean | null>(null);
-  const shown = open ?? (live || failed);
+  const shown = open ?? (tool.name === "project_hook" ? false : live || failed);
   const Icon = tool.name === "run_code" ? Cpu : tool.name.startsWith("git_") ? GitBranch : tool.name.endsWith("_preview") ? MonitorPlay : SquareTerminal;
   const output = tool.output || "";
   return (
     <div className={`overflow-hidden rounded-lg border text-xs ${failed ? "border-red-500/30" : "border-ink-700"}`}>
       <button onClick={() => setOpen(!shown)} aria-expanded={shown} className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-ink-800/60">
         <Icon className="h-3.5 w-3.5 shrink-0 text-accent-300" />
+        {tool.name === "project_hook" && <span className="shrink-0 text-accent-300">{tool.note?.split(":")[0] || "Hook"}</span>}
         <code className="min-w-0 flex-1 truncate font-mono text-neutral-200" title={tool.command}>{tool.name === "run_command" ? "$ " : ""}{tool.command || tool.name}</code>
         {tool.duration_s !== undefined && !live && <span className="shrink-0 text-neutral-500">{seconds(tool.duration_s)}</span>}
         <span className="shrink-0"><RunBadge tool={tool} /></span>
         <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-neutral-500 transition-transform ${shown ? "rotate-180" : ""}`} />
       </button>
       {shown && <div className="border-t border-ink-700">
+        {tool.name === "project_hook" && tool.note && <p className="px-3 py-2 text-neutral-500">{tool.note}</p>}
         {live && tool.note && !output && <p className="px-3 py-2 text-neutral-500">{tool.note}</p>}
         {(output || !live) && <OutputPane text={output} live={live} />}
         {tool.error && <p className="border-t border-red-500/20 px-3 py-2 text-red-300">{tool.error}</p>}
