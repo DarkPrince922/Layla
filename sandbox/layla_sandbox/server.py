@@ -24,6 +24,7 @@ import subprocess
 from collections import defaultdict
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+from typing import Literal
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -33,13 +34,14 @@ from starlette.background import BackgroundTask
 from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import WebSocketException
 
-from layla_sandbox import config
+from layla_sandbox import config, lsp
 from layla_sandbox.services import Registry, default_command
 from layla_sandbox.workspace import Users, Workspace, archive_names, check_path, prepare_root
 
 log = logging.getLogger("layla.sandbox")
 users = Users(config.WORK)
 services = Registry()
+language_servers = lsp.Registry()
 
 
 async def _reaper() -> None:
@@ -48,6 +50,7 @@ async def _reaper() -> None:
         await asyncio.sleep(30)
         try:
             await services.reap()
+            await language_servers.reap()
         except Exception:  # уборка не должна падать насовсем из-за одного превью
             log.exception("reap failed")
 
@@ -61,6 +64,7 @@ async def _lifespan(_app: FastAPI):
         task.cancel()
         for key in list(services.items):
             await services.stop(*key)
+        await language_servers.shutdown()
 
 
 app = FastAPI(title="Layla sandbox", docs_url=None, redoc_url=None, openapi_url=None, lifespan=_lifespan)
@@ -108,6 +112,7 @@ def info() -> dict:
     if _info is None:
         _info = {
             "tools": _probe(),
+            "lsp": lsp.available(),
             "network": "proxy" if config.PROXY else "off",
             "limits": {"max_timeout": config.MAX_TIMEOUT, "default_timeout": config.DEFAULT_TIMEOUT,
                        "max_output": config.MAX_OUTPUT, "max_parallel": config.MAX_PARALLEL},
@@ -162,6 +167,7 @@ async def sync(owner: str, project: str, request: Request) -> dict:
         if need:
             return {"need": need}
         written = await ws.apply(files, archive, names & set(files), remove)
+        await language_servers.changed(ws.uid, ws.project, names & set(files), remove)
     return {"ok": True, "written": written, "removed": len(remove)}
 
 
@@ -192,7 +198,7 @@ async def run(owner: str, project: str, body: RunIn) -> StreamingResponse:
                     yield _line({"type": "info", "data": "Создаю окружение Python (.venv)…"})
                     await ws.ensure_venv()
                 # Работающее превью пользователя не трогаем: добиваем только процессы команды.
-                cleanup_all = not services.active_for(ws.uid)
+                cleanup_all = not services.active_for(ws.uid) and not language_servers.active_for(ws.uid)
                 async for event in ws.run(body.command, timeout, body.stdin, cleanup_all=cleanup_all):
                     yield _line(event)
             except Exception as exc:  # причина уходит клиенту событием, поток не рвётся
@@ -207,8 +213,61 @@ async def reset(owner: str, project: str) -> dict:
     ws = _workspace(owner, project)
     await services.stop(ws.uid, ws.project)
     async with _locks[ws.uid]:
+        await language_servers.stop(ws.uid, ws.project)
         await ws.reset()
     return {"ok": True}
+
+
+class LspIn(BaseModel):
+    operation: Literal["goToDefinition", "findReferences", "hover", "documentSymbol", "workspaceSymbol",
+                       "goToImplementation", "prepareCallHierarchy", "incomingCalls", "outgoingCalls", "diagnostics"]
+    path: str = Field(min_length=1, max_length=4096)
+    text: str = Field(max_length=1_000_000)
+    line: int = Field(default=1, ge=1, le=1_000_000)
+    character: int = Field(default=1, ge=1, le=1_000_001)
+    query: str = Field(default="", max_length=200)
+
+
+@app.get("/workspaces/{owner}/{project}/lsp")
+async def lsp_status(owner: str, project: str) -> dict:
+    return language_servers.status(_workspace(owner, project))
+
+
+@app.delete("/workspaces/{owner}/{project}/lsp")
+async def lsp_stop(owner: str, project: str) -> dict:
+    ws = _workspace(owner, project)
+    async with _locks[ws.uid]:
+        await language_servers.stop(ws.uid, ws.project)
+    return {"ok": True}
+
+
+@app.post("/workspaces/{owner}/{project}/lsp")
+async def lsp_query(owner: str, project: str, body: LspIn, request: Request) -> dict:
+    ws = _workspace(owner, project)
+    try:
+        check_path(body.path)
+        if not ws.path.is_dir():
+            raise lsp.LspError("Сначала синхронизируйте файлы проекта")
+        async def guarded():
+            async with _slots_sem(), _locks[ws.uid]:
+                return await language_servers.query(ws, body)
+
+        task = asyncio.create_task(guarded())
+        try:
+            while True:
+                done, _ = await asyncio.wait({task}, timeout=0.2)
+                if done:
+                    return await task
+                if await request.is_disconnected():
+                    raise HTTPException(status_code=499, detail="Запрос LSP отменён")
+        finally:
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+    except (ValueError, OSError, TimeoutError) as exc:
+        message = "Language server не ответил за 30 секунд; повторите запрос" if isinstance(exc, TimeoutError) else str(exc)
+        raise HTTPException(status_code=503, detail=message[:1000]) from exc
 
 
 # --- превью: долгоживущий процесс и доступ к нему ------------------------------

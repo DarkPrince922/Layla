@@ -50,10 +50,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt pytest pytest-asyncio httpx
+      - run: pip install -r requirements-dev.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install test language servers
+        run: npm install --prefix "$RUNNER_TEMP/layla-lsp" --ignore-scripts --no-audit --no-fund typescript-language-server@4.3.3 typescript@5.7.3
       # Без root запуск от uid песочницы невозможен — эти тесты пропускаются сами;
       # проверяются пути, идентификаторы и правила прокси.
       - run: pytest -q
+        env:
+          LAYLA_TEST_TS_SERVER: ${{ runner.temp }}/layla-lsp/node_modules/.bin/typescript-language-server
 
   frontend:
     runs-on: ubuntu-latest

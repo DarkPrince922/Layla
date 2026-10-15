@@ -16,6 +16,7 @@ from app.schemas.project import FileWrite
 from app.services import (
     agent_git,
     code_intelligence,
+    code_lsp,
     code_notebooks,
     code_research,
     code_runner,
@@ -24,6 +25,7 @@ from app.services import (
     files,
     provider_client,
     provider_errors,
+    sandbox,
     tool_chat,
 )
 
@@ -773,7 +775,7 @@ async def _worker_lifetime(workers):
 async def run(
     provider, key, model: str, messages: list[dict], root: str, permissions=None,
     *, mode: str = "auto", approve=None, caps: dict | None = None, extra: str = "", runner=None,
-    git=None, mcp=None, runtime=None, workers=None, worker_context=False,
+    git=None, mcp=None, runtime=None, workers=None, worker_context=False, lsp=None,
 ):
     """approve(event) -> "approve" | "reject" | "approve_all" — только для режима confirm.
 
@@ -799,6 +801,8 @@ async def run(
                       or permissions is None or "files.write" in permissions]
     if workers is not None:
         available += workers.tools()
+    if lsp is not None:
+        available += await lsp.tools(permissions)
     if mode in READ_ONLY_MODES:
         available = [t for t in available if t["function"]["name"] not in MUTATING
                      and t["function"]["name"] not in {"notebook_edit", "memory_write", "memory_delete"}]
@@ -833,6 +837,10 @@ async def run(
     )
     if caps.get("tools") is False:
         prompt += NO_TOOLS_NOTE
+    if "lsp" in allowed_names:
+        prompt += ("\nUse lsp for semantic definitions, references, types, symbols and call hierarchy before "
+                   "broad text searching. After meaningful code edits check diagnostics on changed files. "
+                   "Respect unsupported-operation errors and pending diagnostics; never report unverified clean code.")
     if runtime is not None:
         prompt += (
             "\nCode runtime: use task_list to resume durable work. For multi-step work create tasks "
@@ -978,6 +986,21 @@ async def run(
                     conversation.append({"role": "tool", "tool_call_id": call["id"],
                                          "content": json.dumps(result, ensure_ascii=False),
                                          "is_error": "error" in result})
+                    continue
+                if name == "lsp" and lsp is not None and name in allowed_names:
+                    event = {"id": f"{round_number}:{call['id']}", "name": name,
+                             "path": str(arguments.get("path", ""))[:4096], "status": "running",
+                             "command": str(arguments.get("operation", ""))[:100]}
+                    yield {"tool": event}
+                    try:
+                        result = await lsp.call(code_lsp.Query.model_validate(arguments))
+                    except (ValueError, OSError, sandbox.SandboxError) as exc:
+                        result = {"error": str(exc)[:1500]}
+                    encoded = json.dumps(result, ensure_ascii=False)
+                    yield {"tool": {**event, "status": "error" if "error" in result else "done",
+                                    **({"error": result["error"]} if "error" in result else {"output": encoded})}}
+                    conversation.append({"role": "tool", "tool_call_id": call["id"],
+                                         "content": encoded, "is_error": "error" in result})
                     continue
                 if runtime is not None and name in code_state.SCHEMAS and name in allowed_names:
                     result = await runtime.call(name, arguments)

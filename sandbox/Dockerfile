@@ -40,6 +40,10 @@ RUN if [ "$SANDBOX_WITH_RUST" = "true" ]; then \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
+RUN python -m venv /opt/layla-lsp/python \
+    && /opt/layla-lsp/python/bin/pip install 'python-lsp-server[pyflakes,pycodestyle]==1.12.2' \
+    && npm install --prefix /opt/layla-lsp --ignore-scripts --no-audit --no-fund \
+        typescript-language-server@4.3.3 typescript@5.7.3
 COPY layla_sandbox ./layla_sandbox
 ENV PYTHONPATH=/app
 

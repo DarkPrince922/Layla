@@ -35,6 +35,7 @@ import { ProjectTerminal, type RunRequest } from "@/components/ProjectTerminal";
 import { GitPanel } from "@/components/GitPanel";
 import { PreviewPanel } from "@/components/PreviewPanel";
 import { confirmAction } from "@/components/ConfirmDialog";
+import { CodeIntelligencePanel } from "@/components/CodeIntelligencePanel";
 
 type OpenFile = Omit<FileContent, "sha256"> & { sha256: string | null };
 type Pane = "projects" | "editor" | "chat" | "terminal" | "git" | "preview";
@@ -52,6 +53,9 @@ export function CodeDomain() {
   const [repoUrl, setRepoUrl] = useState("");
   const [openFile, setOpenFile] = useState<OpenFile | null>(null);
   const [draft, setDraft] = useState("");
+  const editor = useRef<HTMLTextAreaElement>(null);
+  const [cursor, setCursor] = useState({ line: 1, character: 1 });
+  const [location, setLocation] = useState<{ path: string; line: number; character: number } | null>(null);
   const [newPath, setNewPath] = useState("");
   const [addingFile, setAddingFile] = useState(false);
   const [change, setChange] = useState<FileChange | null>(null);
@@ -74,6 +78,16 @@ export function CodeDomain() {
     queryFn: () => api.get<Project[]>("/projects"),
   });
   const project = projects.find((p) => p.id === projectId);
+  useEffect(() => {
+    if (!location || openFile?.path !== location.path || !editor.current) return;
+    const lines = draft.split("\n");
+    const line = Math.max(1, Math.min(location.line, lines.length));
+    const offset = lines.slice(0, line - 1).reduce((sum, text) => sum + text.length + 1, 0)
+      + Math.min(Math.max(0, location.character - 1), lines[line - 1].length);
+    editor.current.focus(); editor.current.setSelectionRange(offset, offset);
+    editor.current.scrollTop = Math.max(0, (line - 4) * 28);
+    setCursor({ line, character: location.character }); setLocation(null);
+  }, [location, openFile?.path, draft]);
 
   useEffect(() => {
     if (!projectId && projects.length) {
@@ -122,6 +136,8 @@ export function CodeDomain() {
     openSequence.current++;
     setProjectId(id);
     setOpenFile(null);
+    setLocation(null);
+    setCursor({ line: 1, character: 1 });
     setDraft("");
     setChange(null);
     setStale(false);
@@ -186,22 +202,25 @@ export function CodeDomain() {
     }
   }
   async function openPath(path: string, force = false) {
-    if (!projectId || (!force && !canLeave())) return;
+    if (!projectId || (!force && !canLeave())) return false;
     const seq = ++openSequence.current;
     setError(null);
     try {
       const file = await api.get<FileContent>(
         `/projects/${projectId}/file?path=${encodeURIComponent(path)}`,
       );
-      if (seq !== openSequence.current) return;
+      if (seq !== openSequence.current) return false;
       setOpenFile(file);
       setDraft(file.content);
       setStale(false);
       setChange(null);
       setPane("editor");
+      setCursor({ line: 1, character: 1 });
+      return true;
     } catch (e) {
       if (seq === openSequence.current)
         setError(e instanceof Error ? e.message : "Не удалось открыть файл");
+      return false;
     }
   }
   function startFile() {
@@ -538,13 +557,23 @@ export function CodeDomain() {
                 </div>
               )}
               <textarea
+                ref={editor}
                 aria-label="Содержимое файла"
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
+                onSelect={event => {
+                  const before = event.currentTarget.value.slice(0, event.currentTarget.selectionStart);
+                  const lines = before.split("\n");
+                  setCursor({ line: lines.length, character: lines.at(-1)!.length + 1 });
+                }}
                 spellCheck={false}
                 disabled={pending}
                 className="min-h-48 flex-1 resize-none border-0 bg-transparent p-5 font-mono text-sm leading-7 text-neutral-200 focus-visible:outline-accent-400"
               />
+              {projectId && <CodeIntelligencePanel key={`${projectId}:${openFile.path}`} projectId={projectId} path={openFile.path}
+                content={draft} saved={openFile.sha256 !== null} position={cursor} onNavigate={async (path, line, character) => {
+                  if (path === openFile.path || await openPath(path)) setLocation({ path, line, character });
+                }} />}
             </>
           ) : (
             <div className="grid flex-1 place-items-center p-8 text-center">

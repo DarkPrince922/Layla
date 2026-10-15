@@ -18,7 +18,7 @@ from app.models.code_worker import CodeWorker
 from app.models.job import Job
 from app.models.provider import Provider
 from app.models.user import Project
-from app.services import code_runner, code_worktrees, jobs, provider_client, sandbox
+from app.services import code_lsp, code_runner, code_worktrees, jobs, provider_client, sandbox
 
 ACTIVE = frozenset({"queued", "running"})
 OUTPUT_LIMIT = 80000
@@ -472,6 +472,7 @@ class Manager:
                     worktree, permissions, mode="auto", caps=dict(payload.get("caps") or {}), extra=context,
                     runner=runner if role == "implement" and payload.get("mode") != "plan" else None,
                     worker_context=True,
+                    lsp=code_lsp.Client(self.owner_id, worker_id, worktree),
                 ):
                     if "delta" in event:
                         output = (output + event["delta"])[-OUTPUT_LIMIT:]

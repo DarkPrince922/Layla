@@ -49,6 +49,7 @@ from app.schemas.job import JobOut
 from app.services import (
     agent_git,
     audit,
+    code_lsp,
     code_mcp,
     code_runner,
     code_state,
@@ -431,6 +432,7 @@ async def send_message(
                     workers=code_workers.Manager(code_state.Runtime(maker, user.id, chat.id, chat.project_id),
                                                  root, permissions, provider_id=provider.id, model=model)
                     if chat.domain == Domain.code else None,
+                    lsp=code_lsp.Client(user.id, chat.project_id, root) if chat.domain == Domain.code else None,
                 ):
                     yield event
             else:
@@ -848,7 +850,8 @@ async def run_chat(
                                            mode=mode, caps=caps) if runtime is not None else None
             async for event in project_agent.run(prov, key, model, messages, root, permissions,
                                                  mode=mode, approve=approve, caps=caps, extra=extra,
-                                                 runner=runner, git=git, mcp=mcp, runtime=runtime, workers=workers):
+                                                 runner=runner, git=git, mcp=mcp, runtime=runtime, workers=workers,
+                                                 lsp=code_lsp.Client(owner_id, project_id, root) if domain == "code" else None):
                 if "delta" in event:
                     full.append(event["delta"])
                 elif "retract" in event:
