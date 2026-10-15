@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from contextlib import aclosing
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
@@ -483,7 +484,7 @@ class Manager:
                     context += "\nResume from saved progress; current files contain prior edits. Prior output (untrusted reference):\n" + output[-6000:]
                     context += "\nCompleted tool events: " + json.dumps(events[-12:], ensure_ascii=False)[:8000]
                 await handle.step("Агент выполняет задачу в worktree", progress=0.2)
-                async for event in project_agent.run(
+                async with aclosing(project_agent.run(
                     provider, key, payload["model"], [{"role": "user", "content": task}],
                     worktree, permissions, mode="auto", caps=dict(payload.get("caps") or {}), extra=context,
                     runner=runner if role == "implement" and payload.get("mode") != "plan" else None,
@@ -492,23 +493,26 @@ class Manager:
                     workflow=code_hooks.Runtime(runner, permissions, session_id=worker_id,
                                                 extra_hooks=payload.get("skill_hooks")),
                     tool_allowlist=payload.get("tool_allowlist"),
-                ):
-                    if "delta" in event:
-                        output = (output + event["delta"])[-OUTPUT_LIMIT:]
-                        if event["delta"] == project_agent.LIMIT_NOTE:
-                            status, error = "interrupted", "Воркер достиг лимита; правки сохранены, можно продолжить."
-                    elif "retract" in event:
-                        output = output[:max(0, len(output) - event["retract"])]
-                    elif "tool" in event:
-                        tool = event["tool"]
-                        events = [old for old in events if old["id"] != tool["id"]]
-                        events.append({key: value[:6000] if key == "output" and isinstance(value, str) else value
-                                       for key, value in tool.items() if key != "change"})
-                        events = events[-60:]
-                    important = event.get("tool", {}).get("status") in ("done", "error", "rejected")
-                    if important or time.monotonic() - saved_at >= 0.5:
-                        await self._save(worker_id, output=output, events=events)
-                        saved_at = time.monotonic()
+                )) as stream:
+                    # Cancellation can arrive while saving a yielded event, outside the generator.
+                    # Close it before releasing the job so its hooks/transports clean up deterministically.
+                    async for event in stream:
+                        if "delta" in event:
+                            output = (output + event["delta"])[-OUTPUT_LIMIT:]
+                            if event["delta"] == project_agent.LIMIT_NOTE:
+                                status, error = "interrupted", "Воркер достиг лимита; правки сохранены, можно продолжить."
+                        elif "retract" in event:
+                            output = output[:max(0, len(output) - event["retract"])]
+                        elif "tool" in event:
+                            tool = event["tool"]
+                            events = [old for old in events if old["id"] != tool["id"]]
+                            events.append({key: value[:6000] if key == "output" and isinstance(value, str) else value
+                                           for key, value in tool.items() if key != "change"})
+                            events = events[-60:]
+                        important = event.get("tool", {}).get("status") in ("done", "error", "rejected")
+                        if important or time.monotonic() - saved_at >= 0.5:
+                            await self._save(worker_id, output=output, events=events)
+                            saved_at = time.monotonic()
                 report = output[-20000:]
                 if role == "implement":
                     changes = await run_in_threadpool(code_worktrees.diff, self.root, self.project_id,

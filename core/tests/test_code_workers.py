@@ -306,15 +306,30 @@ async def test_lead_collects_worker_and_imports_without_continue_message(client,
 async def test_parent_cancellation_stops_only_attached_workers(client, db_sessionmaker, monkeypatch, detached):
     manager, _chat, _root = await setup(client, db_sessionmaker)
     started, stopped = asyncio.Event(), asyncio.Event()
+    streams = []
 
-    async def child(*_args, **_kwargs):
-        started.set()
-        yield {"delta": "Working"}
+    async def child_stream():
         try:
+            yield {"delta": "Working"}
             await asyncio.Event().wait()
         finally:
             stopped.set()
 
+    def child(*_args, **_kwargs):
+        stream = child_stream()
+        streams.append(stream)  # Cleanup must be explicit, independent of garbage collection.
+        return stream
+
+    save = manager._save
+
+    async def saving_output(worker_id, **values):
+        if values.get("output") == "Working" and "status" not in values:
+            # Cancel while the consumer saves an event, with the generator paused at yield.
+            started.set()
+            await asyncio.Event().wait()
+        await save(worker_id, **values)
+
+    monkeypatch.setattr(manager, "_save", saving_output)
     monkeypatch.setattr(project_agent, "run", child)
     ident = (await manager.start_agent(code_workers.AgentStart(task="Explore module behavior", detached=detached)))["worker"]["id"]
     await asyncio.wait_for(started.wait(), 10)
@@ -333,6 +348,7 @@ async def test_parent_cancellation_stops_only_attached_workers(client, db_sessio
     if detached:
         assert (await manager.output(code_workers.WorkerOutput(worker_id=ident)))["worker"]["status"] == "running"
         await manager.stop(ident)
+        assert stopped.is_set()
 
 
 async def test_confirm_import_rejection_and_project_deletion_lifecycle(client, db_sessionmaker, monkeypatch):
