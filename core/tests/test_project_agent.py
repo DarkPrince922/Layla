@@ -13,6 +13,7 @@ from app.services import (
     agent_git,
     code_notebooks,
     code_state,
+    code_teams,
     code_workers,
     files,
     project_agent,
@@ -193,7 +194,7 @@ async def test_agent_creates_reads_edits_deletes_and_persists(
         # Файловые инструменты и git проекта (запуск кода — только если песочница подключена).
         assert len(body["tools"]) == (
             len(project_agent.TOOLS) + len(agent_git.GIT_TOOLS)
-            + len(code_state.TOOLS) + len(code_notebooks.TOOLS) + len(code_workers.TOOLS) - 1
+            + len(code_state.TOOLS) + len(code_notebooks.TOOLS) + len(code_workers.TOOLS) + len(code_teams.TOOLS) - 1
         )
         history = results(body, native)
         if round_number == 0:

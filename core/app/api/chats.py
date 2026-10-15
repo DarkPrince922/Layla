@@ -28,6 +28,7 @@ from app.api.projects import _default_workspace, _owned_project, _project_root
 from app.config import get_settings
 from app.db import get_session, get_sessionmaker
 from app.models.chat import Chat, Checkpoint, Message
+from app.models.code_team import CodeTranscript
 from app.models.code_worker import CodeWorker
 from app.models.enums import Domain
 from app.models.job import Job
@@ -54,6 +55,7 @@ from app.services import (
     code_mcp,
     code_runner,
     code_state,
+    code_teams,
     code_workers,
     design_gen,
     history,
@@ -120,6 +122,65 @@ async def _worker_manager(session, maker, user, chat_id):
         permissions = persona.allowed_tools if persona is not None else []
     return code_workers.Manager(code_state.Runtime(maker, user.id, chat_id, chat.project_id),
                                 _project_root(project), permissions, provider_id=chat.provider_id, model=chat.model)
+
+
+@router.get("/{chat_id}/team")
+async def get_code_team(chat_id: str, team_id: str | None = None, before: int | None = Query(None, ge=0),
+                        user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session),
+                        maker=Depends(get_sessionmaker)) -> dict:
+    manager = await _worker_manager(session, maker, user, chat_id)
+    try:
+        await manager.list()
+        return await manager.team.info(team_id, before=before)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/{chat_id}/team/create")
+async def create_code_team(chat_id: str, body: code_teams.Create,
+                           user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session),
+                           maker=Depends(get_sessionmaker)) -> dict:
+    manager = await _worker_manager(session, maker, user, chat_id)
+    result = await manager.team.call("team_create", body.model_dump())
+    if "error" in result:
+        raise HTTPException(status_code=409, detail=result["error"])
+    return result
+
+
+@router.post("/{chat_id}/team/message")
+async def send_code_team_message(chat_id: str, body: code_teams.Send,
+                                 user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session),
+                                 maker=Depends(get_sessionmaker)) -> dict:
+    manager = await _worker_manager(session, maker, user, chat_id)
+    result = await manager.team.call("send_message", body.model_dump())
+    if "error" in result:
+        raise HTTPException(status_code=409, detail=result["error"])
+    return result
+
+
+@router.post("/{chat_id}/team/close")
+async def close_code_team(chat_id: str, user: User = Depends(get_current_user),
+                          session: AsyncSession = Depends(get_session), maker=Depends(get_sessionmaker)) -> dict:
+    manager = await _worker_manager(session, maker, user, chat_id)
+    result = await manager.team.call("team_delete", {})
+    if "error" in result:
+        raise HTTPException(status_code=409, detail=result["error"])
+    return result
+
+
+@router.get("/{chat_id}/workers/{worker_id}/transcript")
+async def get_worker_transcript(chat_id: str, worker_id: str, offset: int = Query(0, ge=0),
+                                limit: int = Query(50, ge=1, le=100), user: User = Depends(get_current_user),
+                                session: AsyncSession = Depends(get_session), maker=Depends(get_sessionmaker)) -> dict:
+    manager = await _worker_manager(session, maker, user, chat_id)
+    try:
+        await manager.owned(session, worker_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    rows = list(await session.scalars(select(CodeTranscript).where(CodeTranscript.worker_id == worker_id,
+        CodeTranscript.sequence >= offset).order_by(CodeTranscript.sequence).limit(limit + 1)))
+    return {"entries": [{"sequence": row.sequence, "message": row.message} for row in rows[:limit]],
+            "next_offset": rows[limit].sequence if len(rows) > limit else None}
 
 
 @router.get("/{chat_id}/workers/{worker_id}")

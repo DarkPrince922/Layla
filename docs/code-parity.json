@@ -4023,7 +4023,7 @@
       "archive_tool": "AgentTool",
       "status": "partial",
       "layla": "agent_start, worker_list/output/wait/resume/apply/discard",
-      "notes": "Up to 3 concurrent implement/explore/review agents in private snapshot worktrees, durable output, progress, resume and explicit detach. Lead collects attached results before finishing. Missing teams, messaging and full archive transcript/session replay."
+      "notes": "Up to 3 concurrent implement/explore/review agents in private snapshot worktrees, durable output, progress, resume and explicit detach. Named durable teams, direct/broadcast mail and append-only worker protocol history with resume are implemented. Lead collects attached results and receives peer mail while waiting. Missing full lead/archive session replay and structured approval/shutdown protocols."
     },
     {
       "archive_tool": "AskUserQuestionTool",
@@ -4165,9 +4165,9 @@
     },
     {
       "archive_tool": "SendMessageTool",
-      "status": "missing",
-      "layla": "",
-      "notes": "Need agent inboxes and direct/broadcast team messages."
+      "status": "partial",
+      "layla": "send_message, team_info",
+      "notes": "Durable named direct/broadcast mail, automatic between-turn delivery, transactional worker transcript acknowledgement, bounded mailboxes and archived UI. Missing structured shutdown/plan approval and cross-session UDS/bridge peers."
     },
     {
       "archive_tool": "SkillTool",
@@ -4225,15 +4225,15 @@
     },
     {
       "archive_tool": "TeamCreateTool",
-      "status": "missing",
-      "layla": "",
-      "notes": "Need durable teams, members and role assignment."
+      "status": "partial",
+      "layla": "team_create, agent_start name",
+      "notes": "One durable active team per Code chat, named implement/explore/review members, database uniqueness and three shared active slots. Missing archive backend/team configuration compatibility."
     },
     {
       "archive_tool": "TeamDeleteTool",
-      "status": "missing",
-      "layla": "",
-      "notes": "Need coordinated shutdown and team cleanup."
+      "status": "partial",
+      "layla": "team_delete",
+      "notes": "Refuse cleanup while members run, serialize close/member reservation, retain mail/reports/transcripts/worktrees in archive and cascade on chat deletion. Structured graceful shutdown responses remain."
     },
     {
       "archive_tool": "TodoWriteTool",
@@ -4279,7 +4279,7 @@
         "utils/conversationRecovery.ts",
         "utils/crossProjectResume.ts"
       ],
-      "notes": "Durable chats and interrupted-turn notes; no full archive transcript replay/resume/fork compatibility."
+      "notes": "Durable chats and append-only worker messages/tool results, independent of compaction; resume repairs unknown tool outcomes and preserves worktrees. Full lead transcript, archive replay/import/fork and attribution recovery remain."
     },
     {
       "id": "context_compaction",
@@ -4320,7 +4320,7 @@
         "utils/teammateMailbox.ts",
         "utils/tasks.ts"
       ],
-      "notes": "Durable task graph and 3 independent implement/explore/review workers with progress, stop/resume, detach and reviewed imports. Missing teams, messaging and full session replay."
+      "notes": "Durable task graph and 3 independent implement/explore/review workers with progress, stop/resume, detach and reviewed imports. Named teams, direct/broadcast durable mail and worker transcript resume are implemented. Missing structured approval/shutdown, cross-session peers and full lead/archive session replay."
     },
     {
       "id": "hooks",

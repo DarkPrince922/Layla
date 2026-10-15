@@ -10,6 +10,7 @@ import { useAuth } from "@/store/auth";
 import { FileDiff } from "@/components/FileDiff";
 import { RunCard } from "@/components/RunOutput";
 import { CodeWorkerPanel, type CodeWorker } from "@/components/CodeWorkerPanel";
+import { CodeTeamPanel } from "@/components/CodeTeamPanel";
 import { CodeSkillPicker } from "@/components/CodeSkillPicker";
 import { confirmAction } from "@/components/ConfirmDialog";
 
@@ -450,11 +451,11 @@ function CodeWorkState({ chatId, scope, running, canApply, onResume }: { chatId:
   const notes = Object.entries(state.data?.memory || {});
   const questions = state.data?.questions || [];
   const workers = state.data?.workers || [];
-  if (!tasks.length && !notes.length && !questions.length && !workers.length) return null;
   const done = tasks.filter(task => task.status === "completed").length;
   const working = tasks.filter(task => task.status === "in_progress").length;
   const subjects = new Map(tasks.map(task => [task.id, task.subject]));
   return <div className="space-y-3">
+    <CodeTeamPanel key={`${scope}:${chatId}`} chatId={chatId} scope={scope} running={running} canApply={canApply} />
     <CodeWorkerPanel workers={workers} chatId={chatId} scope={scope} parentRunning={running} canApply={canApply} refresh={() => state.refetch()} onResume={onResume} />
     {questions.slice(-3).map(group => <CodeQuestionForm key={group.id} chatId={chatId} group={group} onSaved={() => state.refetch()} onResume={onResume} />)}
     {(tasks.length > 0 || notes.length > 0) && <details className="rounded-xl border border-accent-500/20 bg-accent-500/5 p-3 text-xs">
