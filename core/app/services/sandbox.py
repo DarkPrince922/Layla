@@ -2,8 +2,9 @@
 
 Песочница — рабочая копия проекта, где команды выполняются с зависимостями: pip/npm
 install, тесты, сборка. Проект остаётся источником истины: перед каждой командой копия
-догоняет его (присылаются только изменённые файлы), а всё, что команда создаёт или меняет,
-остаётся в копии и в проект не попадает.
+догоняет его (присылаются только изменённые файлы). collect_changes сохраняет
+проверяемый пакет результатов до применения/отклонения в Core; старые raw-вызовы
+и hooks остаются в режиме копии.
 
 Piston — отдельный изолированный запуск программ на десятках языков, без сети и зависимостей.
 """
@@ -95,15 +96,17 @@ def manifest(root: str) -> dict[str, str]:
     for directory, dirs, names in os.walk(base):
         dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and not os.path.islink(os.path.join(directory, d)))
         for name in sorted(names):
+            if name in SKIP_DIRS or name.startswith(".layla-write-"):
+                continue
             path = os.path.join(directory, name)
             try:
                 st = os.lstat(path)
             except OSError:
                 continue
-            if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_FILE:
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > MAX_FILE:
                 continue
             rel = os.path.relpath(path, base).replace(os.sep, "/")
-            found[rel] = f"{st.st_size}:{st.st_mtime_ns}"
+            found[rel] = f"{st.st_size}:{st.st_mtime_ns}:{st.st_mode & 0o777}"
             total += st.st_size
             if len(found) > MAX_FILES or total > MAX_TOTAL:
                 raise SandboxError("Проект слишком большой для песочницы (больше 20 000 файлов или 300 МБ).")
@@ -120,11 +123,11 @@ def pack(root: str, paths: list[str]) -> bytes:
                 st = os.lstat(path)
             except OSError:
                 continue
-            if not stat.S_ISREG(st.st_mode):
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
                 continue
             item = tarfile.TarInfo(rel)
             item.size = st.st_size
-            item.mode = 0o755 if st.st_mode & 0o111 else 0o644
+            item.mode = stat.S_IMODE(st.st_mode) & 0o777
             item.mtime = int(st.st_mtime)
             with open(path, "rb") as handle:
                 archive.addfile(item, handle)
@@ -162,12 +165,15 @@ async def sync(owner_id: str, project_id: str, root: str) -> None:
 
 
 async def run(owner_id: str, project_id: str, root: str, command: str, *,
-              timeout: int = DEFAULT_TIMEOUT, stdin: str | None = None) -> AsyncIterator[dict]:
+              timeout: int = DEFAULT_TIMEOUT, stdin: str | None = None, collect_changes=False,
+              shell="bash", cwd=".", interactive=False) -> AsyncIterator[dict]:
     """Выполнить команду в копии проекта. События: info / output / exit / error."""
     timeout = max(1, min(int(timeout or DEFAULT_TIMEOUT), MAX_TIMEOUT))
     yield {"type": "info", "data": "Синхронизирую файлы проекта…"}
     await sync(owner_id, project_id, root)
     body = {"command": command, "timeout": timeout, "stdin": stdin}
+    if collect_changes or shell != "bash" or cwd != "." or interactive:
+        body.update(collect_changes=collect_changes, shell=shell, cwd=cwd, interactive=interactive)
     url = f"/workspaces/{_owner_key(owner_id)}/{project_id}/run"
     # Своё время команды плюс запас на очередь и создание .venv.
     async with _client(httpx.Timeout(timeout + 600, connect=5)) as client:
@@ -181,6 +187,19 @@ async def run(owner_id: str, project_id: str, root: str, command: str, *,
                         yield json.loads(line)
         except httpx.HTTPError as exc:
             raise SandboxError(f"Связь с песочницей прервалась: {type(exc).__name__}") from exc
+
+
+async def shell_request(owner_id: str, project_id: str, method: str, suffix: str, body=None) -> dict:
+    """Private Code transport; caller supplies server-owned workspace identifiers."""
+    url = f"/workspaces/{_owner_key(owner_id)}/{project_id}/{suffix}"
+    async with _client(httpx.Timeout(180, connect=5)) as client:
+        try:
+            response = await client.request(method, url, json=body)
+        except httpx.HTTPError as exc:
+            raise SandboxError(f"Связь с песочницей прервалась: {type(exc).__name__}") from exc
+        if response.status_code >= 400:
+            raise SandboxError(_detail(response, "Песочница отклонила запрос shell"))
+        return response.json()
 
 
 async def reset(owner_id: str, project_id: str) -> None:

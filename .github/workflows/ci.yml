@@ -61,6 +61,14 @@ jobs:
       - run: pytest -q
         env:
           LAYLA_TEST_TS_SERVER: ${{ runner.temp }}/layla-lsp/node_modules/.bin/typescript-language-server
+      - name: Verify shell lifecycle with isolated workspace UIDs
+        run: |
+          layla_shell_test_root=$(mktemp -d /var/tmp/layla-shell-ci.XXXXXX)
+          trap 'sudo rm -rf -- "$layla_shell_test_root"' EXIT
+          cp -R layla_sandbox tests pyproject.toml "$layla_shell_test_root/"
+          chmod -R a+rX "$layla_shell_test_root"
+          cd "$layla_shell_test_root"
+          sudo env "PATH=$PATH" PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider tests/test_changes.py
 
   frontend:
     runs-on: ubuntu-latest

@@ -56,7 +56,6 @@ from app.services import (
     code_state,
     code_workers,
     design_gen,
-    files,
     history,
     jobs,
     project_agent,
@@ -83,6 +82,8 @@ _TOOL_LABELS = {
     "delete_file": "Удаление",
     "run_command": "Команда",
     "run_code": "Запуск программы",
+    "command_changes": "Изменения команды",
+    "command_input": "Ввод в процесс",
     "git_status": "Git: статус",
     "git_log": "Git: история",
     "git_diff": "Git: изменения",
@@ -131,6 +132,28 @@ async def get_code_worker(chat_id: str, worker_id: str, offset: int = Query(0, g
         return await manager.output(code_workers.WorkerOutput(worker_id=worker_id, offset=offset, limit=limit, path=path))
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/{chat_id}/workers/{worker_id}/input")
+async def input_code_worker(chat_id: str, worker_id: str, body: code_workers.CommandText,
+                              user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session),
+                              maker=Depends(get_sessionmaker)) -> dict:
+    manager = await _worker_manager(session, maker, user, chat_id)
+    try:
+        return await manager.input(code_workers.CommandInput(worker_id=worker_id, **body.model_dump()))
+    except (ValueError, sandbox.SandboxError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/{chat_id}/workers/{worker_id}/changes")
+async def worker_shell_changes(chat_id: str, worker_id: str, body: code_runner.CommandChanges,
+                                user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session),
+                                maker=Depends(get_sessionmaker)) -> dict:
+    manager = await _worker_manager(session, maker, user, chat_id)
+    try:
+        return await manager.command_changes(code_workers.WorkerCommandChanges(worker_id=worker_id, **body.model_dump()))
+    except (ValueError, OSError, sandbox.SandboxError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/{chat_id}/workers/{worker_id}/{action}")
@@ -520,7 +543,8 @@ async def _save_checkpoint(maker, chat_id: str, message_id: str, point: dict) ->
     """Исходное состояние файла — до того, как агент его изменит (для отката)."""
     async with maker() as session:
         session.add(Checkpoint(chat_id=chat_id, message_id=message_id, path=point["path"],
-                               content=point["content"], created_at=datetime.now(UTC)))
+                               content=point["content"], encoding=point.get("encoding", "utf-8"),
+                               mode=point.get("mode"), created_at=datetime.now(UTC)))
         await session.commit()
 
 
@@ -567,18 +591,10 @@ async def _chat_provider(session: AsyncSession, chat: Chat, user: User) -> Provi
 def _restore(root: str, points: list[Checkpoint]) -> list[str]:
     """Вернуть файлы к сохранённому состоянию: от новых точек к старым."""
     restored = []
+    from app.services import code_shell
     for point in points:
-        try:
-            current = files.read_file(root, point.path)
-        except FileNotFoundError:
-            current = None
-        if point.content is None:
-            if current is not None:
-                files.change_file(root, point.path, None, current["sha256"])
-        elif current is None:
-            files.change_file(root, point.path, point.content, None)
-        elif current["content"] != point.content:
-            files.change_file(root, point.path, point.content, current["sha256"])
+        code_shell.restore(root, {"path": point.path, "content": point.content,
+                                  "encoding": point.encoding, "mode": point.mode})
         restored.append(point.path)
     return restored
 
@@ -919,7 +935,7 @@ async def run_chat(
                         await persist(tool.get("change") if tool["status"] == "done" else None)
                         if tool.get("change") and tool["status"] == "done":
                             sandbox.preview_touch(owner_id, project_id)  # запущенное превью подхватит правку
-                        if ((tool["name"] in code_runner.RUN_TOOLS or tool["name"] in agent_git.GIT_MUTATING or tool["name"] == "project_hook")
+                        if ((tool["name"] in (code_runner.RUN_TOOLS | code_runner.SHELL_TOOLS) or tool["name"] in agent_git.GIT_MUTATING or tool["name"] == "project_hook")
                                 and tool["status"] in ("done", "error")):
                             await _audit_run(maker, owner_id, project_id, tool)
                 if time.monotonic() - last_persist >= 0.7:

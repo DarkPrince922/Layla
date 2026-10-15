@@ -22,10 +22,12 @@ import re
 import shutil
 import subprocess
 from collections import defaultdict
-from contextlib import asynccontextmanager, suppress
+from contextlib import aclosing, asynccontextmanager, suppress
 from pathlib import Path
 from typing import Literal
+from uuid import uuid4
 
+import anyio
 import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response, StreamingResponse
@@ -36,12 +38,13 @@ from websockets.exceptions import WebSocketException
 
 from layla_sandbox import config, lsp
 from layla_sandbox.services import Registry, default_command
-from layla_sandbox.workspace import Users, Workspace, archive_names, check_path, prepare_root
+from layla_sandbox.workspace import Users, Workspace, archive_names, check_path, kill_session, prepare_root
 
 log = logging.getLogger("layla.sandbox")
 users = Users(config.WORK)
 services = Registry()
 language_servers = lsp.Registry()
+processes = {}
 
 
 async def _reaper() -> None:
@@ -62,13 +65,15 @@ async def _lifespan(_app: FastAPI):
         yield
     finally:
         task.cancel()
+        for proc in list(processes.values()):
+            kill_session(proc.pid)
         for key in list(services.items):
             await services.stop(*key)
         await language_servers.shutdown()
 
 
 app = FastAPI(title="Layla sandbox", docs_url=None, redoc_url=None, openapi_url=None, lifespan=_lifespan)
-_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+_locks: dict[tuple[int, str], asyncio.Lock] = defaultdict(asyncio.Lock)
 _slots: asyncio.Semaphore | None = None
 _info: dict | None = None
 
@@ -113,6 +118,9 @@ def info() -> dict:
         _info = {
             "tools": _probe(),
             "lsp": lsp.available(),
+            "shells": ["bash"] + (["powershell"] if shutil.which("pwsh", path=config.BASE_PATH) else []),
+            "file_changes": 1,
+            "interactive_stdin": True,
             "network": "proxy" if config.PROXY else "off",
             "limits": {"max_timeout": config.MAX_TIMEOUT, "default_timeout": config.DEFAULT_TIMEOUT,
                        "max_output": config.MAX_OUTPUT, "max_parallel": config.MAX_PARALLEL},
@@ -162,7 +170,9 @@ async def sync(owner: str, project: str, request: Request) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # битый tar
         raise HTTPException(status_code=400, detail="Не удалось прочитать архив файлов") from exc
-    async with _locks[ws.uid]:
+    async with _locks[(ws.uid, ws.project)]:
+        if ws.pending_changes() is not None:
+            raise HTTPException(status_code=409, detail="В песочнице есть неприменённые изменения команды. Откройте command_changes: примените или явно отклоните их.")
         need, remove = await asyncio.to_thread(ws.plan, files, names)
         if need:
             return {"need": need}
@@ -175,6 +185,10 @@ class RunIn(BaseModel):
     command: str = Field(min_length=1, max_length=20_000)
     timeout: int = Field(default=config.DEFAULT_TIMEOUT, ge=1)
     stdin: str | None = Field(default=None, max_length=1_000_000)
+    collect_changes: bool = False
+    shell: Literal["bash", "powershell"] = "bash"
+    cwd: str = Field(default=".", max_length=4096)
+    interactive: bool = False
 
 
 def _line(event: dict) -> bytes:
@@ -185,22 +199,53 @@ def _line(event: dict) -> bytes:
 async def run(owner: str, project: str, body: RunIn) -> StreamingResponse:
     ws = _workspace(owner, project)
     timeout = min(body.timeout, config.MAX_TIMEOUT)
+    if body.shell == "powershell" and not shutil.which("pwsh", path=config.BASE_PATH):
+        raise HTTPException(status_code=422, detail="PowerShell не установлен в sandbox")
 
     async def stream():
-        lock, slots = _locks[ws.uid], _slots_sem()
+        lock, slots = _locks[(ws.uid, ws.project)], _slots_sem()
         if lock.locked() or slots.locked():
             yield _line({"type": "info", "data": "Ждёт очереди: выполняется другая команда"})
         async with slots, lock:
             try:
+                if ws.pending_changes() is not None:
+                    raise ValueError("Сначала примените или отклоните command_changes")
                 if not ws.path.is_dir():
                     await ws.apply({}, b"", set(), [])
                 if not (ws.path / ".venv").exists():
                     yield _line({"type": "info", "data": "Создаю окружение Python (.venv)…"})
                     await ws.ensure_venv()
                 # Работающее превью пользователя не трогаем: добиваем только процессы команды.
-                cleanup_all = not services.active_for(ws.uid) and not language_servers.active_for(ws.uid)
-                async for event in ws.run(body.command, timeout, body.stdin, cleanup_all=cleanup_all):
-                    yield _line(event)
+                # Other project/worker commands may share this user's uid. Never kill siblings.
+                cleanup_all = False
+                before = None
+                pending = None
+                if body.collect_changes:
+                    initial = await ws.export_changes()
+                    before = initial["files"]
+                    pending = {"id": str(uuid4()), "status": "running", "before": before,
+                               "ignored": list(initial["blocked"]), "changes": [], "blocked": {}}
+                    ws.save_changes(pending)
+                try:
+                    async with aclosing(ws.run(body.command, timeout, body.stdin, cleanup_all=cleanup_all,
+                                               shell=body.shell, cwd=body.cwd, interactive=body.interactive,
+                                               processes=processes)) as events:
+                        async for event in events:
+                            if pending is not None and event.get("type") == "output":
+                                pending["output"] = (pending.get("output", "") + event.get("data", ""))[-40000:]
+                            elif pending is not None and event.get("type") == "exit":
+                                pending["exit"] = event
+                            yield _line(event)
+                finally:
+                    if pending is not None:
+                        with anyio.CancelScope(shield=True):
+                            try:
+                                pending.update(await ws.export_changes(before, pending["ignored"]), status="ready")
+                            except (ValueError, OSError) as exc:
+                                pending.update(status="error", error=str(exc))
+                            ws.save_changes(pending)
+                if pending is not None:
+                    yield _line({"type": "changes", **{key: value for key, value in pending.items() if key != "before"}})
             except Exception as exc:  # причина уходит клиенту событием, поток не рвётся
                 log.exception("run failed")
                 yield _line({"type": "error", "data": f"Не удалось выполнить команду: {exc}"})
@@ -208,13 +253,65 @@ async def run(owner: str, project: str, body: RunIn) -> StreamingResponse:
     return StreamingResponse(stream(), media_type="application/x-ndjson")
 
 
+@app.get("/workspaces/{owner}/{project}/changes")
+async def command_changes(owner: str, project: str) -> dict:
+    ws = _workspace(owner, project)
+    async with _locks[(ws.uid, ws.project)]:
+        data = ws.pending_changes()
+        if data is None:
+            return {"changes": [], "blocked": {}, "id": None}
+        if data["status"] == "running":
+            try:
+                data.update(await ws.export_changes(data["before"], data.get("ignored")), status="ready")
+            except (ValueError, OSError) as exc:
+                data.update(status="error", error=str(exc))
+            ws.save_changes(data)
+        return {key: value for key, value in data.items() if key != "before"}
+
+
+@app.delete("/workspaces/{owner}/{project}/changes/{change_id}")
+async def acknowledge_changes(owner: str, project: str, change_id: str) -> dict:
+    ws = _workspace(owner, project)
+    async with _locks[(ws.uid, ws.project)]:
+        data = ws.pending_changes()
+        if data is not None and data["id"] != change_id:
+            raise HTTPException(status_code=409, detail="Пакет изменений уже сменился")
+        ws.changes_file.unlink(missing_ok=True)
+    return {"ok": True}
+
+
+class InputIn(BaseModel):
+    text: str = Field(default="", max_length=100000)
+    eof: bool = False
+
+
+@app.post("/workspaces/{owner}/{project}/input")
+async def command_input(owner: str, project: str, body: InputIn) -> dict:
+    _workspace(owner, project)
+    proc = processes.get((owner, project))
+    if proc is None or proc.returncode is not None or proc.stdin is None or proc.stdin.is_closing():
+        raise HTTPException(status_code=409, detail="Нет работающего процесса с открытым stdin")
+    try:
+        proc.stdin.write(body.text.encode())
+        await asyncio.wait_for(proc.stdin.drain(), 5)
+        if body.eof:
+            proc.stdin.close()
+    except (OSError, TimeoutError) as exc:
+        raise HTTPException(status_code=409, detail="Процесс не принимает ввод") from exc
+    return {"written": len(body.text.encode()), "eof": body.eof}
+
+
 @app.delete("/workspaces/{owner}/{project}")
 async def reset(owner: str, project: str) -> dict:
     ws = _workspace(owner, project)
+    proc = processes.get((owner, project))
+    if proc is not None:
+        kill_session(proc.pid)
     await services.stop(ws.uid, ws.project)
-    async with _locks[ws.uid]:
+    async with _locks[(ws.uid, ws.project)]:
         await language_servers.stop(ws.uid, ws.project)
         await ws.reset()
+        ws.changes_file.unlink(missing_ok=True)
     return {"ok": True}
 
 
@@ -236,7 +333,7 @@ async def lsp_status(owner: str, project: str) -> dict:
 @app.delete("/workspaces/{owner}/{project}/lsp")
 async def lsp_stop(owner: str, project: str) -> dict:
     ws = _workspace(owner, project)
-    async with _locks[ws.uid]:
+    async with _locks[(ws.uid, ws.project)]:
         await language_servers.stop(ws.uid, ws.project)
     return {"ok": True}
 
@@ -249,7 +346,7 @@ async def lsp_query(owner: str, project: str, body: LspIn, request: Request) -> 
         if not ws.path.is_dir():
             raise lsp.LspError("Сначала синхронизируйте файлы проекта")
         async def guarded():
-            async with _slots_sem(), _locks[ws.uid]:
+            async with _slots_sem(), _locks[(ws.uid, ws.project)]:
                 return await language_servers.query(ws, body)
 
         task = asyncio.create_task(guarded())

@@ -18,7 +18,7 @@ from starlette.concurrency import run_in_threadpool
 from app.services import files, gitops
 
 MAX_CHANGED_FILES = 200
-MAX_CHANGE_BYTES = 4_000_000
+MAX_CHANGE_BYTES = 32 * 1024 * 1024
 
 
 def paths(root: str, project_id: str, worker_id: str) -> tuple[Path, Path, Path]:
@@ -48,7 +48,7 @@ def _snapshot(root: str, location: Path, repository: Path) -> dict:
                 continue
             data = archive.read(item)
             files.change_file(repository, item.filename, data, None)
-            os.chmod(repository / item.filename, 0o755 if item.external_attr >> 16 & 0o111 else 0o644)
+            os.chmod(repository / item.filename, item.external_attr >> 16 & 0o777)
             baseline[item.filename] = hashlib.sha256(data).hexdigest()
     return baseline
 
@@ -65,6 +65,9 @@ async def create(root: str, project_id: str, worker_id: str) -> dict:
         await gitops._git(str(repository), "commit", "--allow-empty", "-q", "-m", "Code worker snapshot",
                           config={"user.name": "Layla", "user.email": "worker@localhost"})
         await gitops._git(str(repository), "worktree", "add", "--detach", str(worktree), "HEAD")
+        # Git records only the executable bit; preserve the snapshot's remaining permission bits too.
+        for rel in baseline:
+            os.chmod(files.safe_join(worktree, rel), os.stat(files.safe_join(repository, rel)).st_mode & 0o777)
         return {"baseline": baseline, "initialized": True}
     except BaseException:
         # This directory was generated for this worker only. Never delete the
@@ -90,22 +93,21 @@ def diff(root: str, project_id: str, worker_id: str, baseline: dict[str, str]) -
     changed = []
     total = 0
     for rel in sorted(set(baseline) | set(current)):
-        if baseline.get(rel) == current.get(rel):
-            continue
         files.safe_join(worktree, rel)  # reject a replacement symlink, never import it as deletion
+        repository = paths(root, project_id, worker_id)[1]
+        before = files.read_blob(repository, rel) if baseline.get(rel) is not None else None
+        after = files.read_blob(worktree, rel) if current.get(rel) is not None else None
+        if baseline.get(rel) == current.get(rel) and (before is None or after is None or before["mode"] == after["mode"]):
+            continue
         if len(changed) >= MAX_CHANGED_FILES:
             raise ValueError("Воркер изменил больше 200 файлов: разбейте задачу")
-        # Text changes only. Binary inputs stay in the snapshot but are never
-        # imported through a lossy decode or silently treated as deletions.
-        before = None
-        repository = paths(root, project_id, worker_id)[1]
-        if baseline.get(rel) is not None:
-            before = files.read_file(repository, rel)["content"]
-        after = files.read_file(worktree, rel)["content"] if current.get(rel) is not None else None
-        total += len((after or "").encode()) + len((before or "").encode())
+        total += len(after["data"] if after else b"") + len(before["data"] if before else b"")
         if total > MAX_CHANGE_BYTES:
-            raise ValueError("Изменения воркера превышают 4 МБ: разбейте задачу")
-        change = files._change(rel, before, after)
+            raise ValueError("Изменения воркера превышают 32 МиБ: разбейте задачу")
+        change = files.blob_change(rel, before["data"] if before else None, after["data"] if after else None)
+        change.update(before_mode=before["mode"] if before else None, mode=after["mode"] if after else None)
+        if before and after and before["mode"] != after["mode"]:
+            change["diff"] = f"mode {oct(before['mode'])} → {oct(after['mode'])}\n" + change["diff"]
         changed.append(change)
     return changed
 
@@ -113,19 +115,23 @@ def diff(root: str, project_id: str, worker_id: str, baseline: dict[str, str]) -
 def proposal(root: str, project_id: str, worker_id: str, change: dict) -> dict:
     _, _, worktree = paths(root, project_id, worker_id)
     rel = change["path"]
-    info = files.upload_info(root, rel)
+    try:
+        info = files.read_blob(root, rel)
+    except FileNotFoundError:
+        info = {"sha256": None, "mode": None}
     expected = change["before_sha256"]
-    if info["sha256"] == change["after_sha256"]:
+    if info["sha256"] == change["after_sha256"] and (change.get("mode") is None or info["mode"] == change["mode"]):
         return {"path": rel, "already_applied": True}
-    if info["sha256"] != expected:
+    if info["sha256"] != expected or change.get("before_mode") is not None and info["mode"] != change["before_mode"]:
         raise files.FileConflict(f"{rel}: основной файл изменился после запуска воркера. Изменения сохранены в рабочей копии.")
     content = None
     if change["after_sha256"] is not None:
-        current = files.read_file(worktree, rel)
+        current = files.read_blob(worktree, rel)
         if current["sha256"] != change["after_sha256"]:
             raise files.FileConflict(f"{rel}: рабочая копия изменилась после завершения воркера")
-        content = current["content"]
-    return {"path": rel, "content": content, "expected_sha256": expected}
+        content = current["data"]
+    return {"path": rel, "content": content, "expected_sha256": expected, "expected_mode": info["mode"],
+            "mode": change.get("mode"), "change": change}
 
 
 async def remove(root: str, project_id: str, worker_id: str) -> None:
@@ -138,13 +144,13 @@ def advance_baseline(root: str, project_id: str, worker_id: str, rel: str, sha: 
     _, repository, worktree = paths(root, project_id, worker_id)
     content = None
     if sha is not None:
-        current = files.read_file(worktree, rel)
+        current = files.read_blob(worktree, rel)
         if current["sha256"] != sha:
             raise files.FileConflict("Рабочая копия изменилась во время импорта")
-        content = current["content"]
+        content = current["data"]
     old = files.upload_info(repository, rel)["sha256"]
-    if old != sha:
-        files.change_file(repository, rel, content, old)
+    if old != sha or sha is not None:
+        files.change_file(repository, rel, content, old, binary=True, mode=current["mode"] if sha is not None else None)
 
 
 def public_change(change: dict) -> dict:

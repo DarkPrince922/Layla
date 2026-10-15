@@ -23,6 +23,7 @@ from app.services import (
     code_hooks,
     code_lsp,
     code_runner,
+    code_shell,
     code_worktrees,
     jobs,
     provider_client,
@@ -48,10 +49,26 @@ class CommandStart(NoArgs):
     timeout: int = Field(default=120, ge=1, le=sandbox.MAX_TIMEOUT)
     stdin: str | None = Field(default=None, max_length=100000)
     detached: bool = False
+    shell: Literal["bash", "powershell"] = "bash"
+    cwd: str = Field(default=".", max_length=4096)
+    interactive: bool = False
 
 
 class WorkerId(NoArgs):
     worker_id: str = Field(pattern=r"^[0-9a-f-]{36}$")
+
+
+class CommandText(NoArgs):
+    text: str = Field(default="", max_length=100000)
+    eof: bool = False
+
+
+class CommandInput(WorkerId, CommandText):
+    pass
+
+
+class WorkerCommandChanges(WorkerId, code_runner.CommandChanges):
+    pass
 
 
 class WorkerOutput(WorkerId):
@@ -77,11 +94,13 @@ SCHEMAS = {
     "agent_start": AgentStart, "command_start": CommandStart,
     "worker_list": NoArgs, "worker_output": WorkerOutput, "worker_wait": WorkerWait,
     "worker_stop": WorkerId, "worker_resume": WorkerId, "worker_apply": WorkerApply,
-    "worker_discard": WorkerDiscard,
+    "worker_discard": WorkerDiscard, "command_input": CommandInput, "worker_command_changes": WorkerCommandChanges,
 }
 DESCRIPTIONS = {
     "agent_start": "Start an independent Code agent in a private Git worktree snapshot of current project files (uncommitted files included). role=implement may edit its copy; explore/review inspect it. Returns worker_id immediately. At most 3 active workers per chat. No recursive delegation. Use worker_wait/output, then worker_apply to import reviewed changes. Attached workers are awaited before the lead finishes and stopped if it is cancelled; detached=true explicitly allows work to outlive the lead.",
-    "command_start": "Start a background sandbox command with isolated files/dependencies and durable output. Returns worker_id immediately. Commands do not execute on the API host or change main project files. Use worker_output/wait/stop. Changes made inside the sandbox are not imported by this tool.",
+    "command_start": "Start a background sandbox command in a private worktree with durable output. Returns worker_id immediately. Created/edited/deleted files are collected into the worker copy; use worker_apply to import them into the main project with diffs/rollback. shell is bash or powershell when installed; cwd is project-relative. interactive=true keeps stdin open for REPLs (python -u -i, node -i, bash); interactive workers are detached so the chat stays responsive. Use command_input, worker_output/wait/stop.",
+    "command_input": "Send exact text to a running interactive command's stdin. Include newline to submit a REPL expression; eof=true closes stdin. The same process retains variables/current directory. Only this chat's command workers are accessible. Never claims success if stdin is closed or the process restarted.",
+    "worker_command_changes": "Inspect/retry/discard a finished command worker's retained sandbox packet after an interrupted import or export limit. action=apply collects eligible results into that worker's private copy, not the main project; worker_apply imports them into the main project separately. discard requires the current change_id from list.",
     "worker_list": "List this Code chat's workers, progress, reports, changed files and whether their changes were applied. Other chats/users/projects are inaccessible.",
     "worker_output": "Read a worker's persisted output using character offset/limit, recent tool events, report and diffs. Works after navigation or restart.",
     "worker_wait": "Wait up to 60 seconds for one worker; return status, output and changed files. May be called repeatedly. It does not restart the worker or consume additional model calls internally.",
@@ -106,6 +125,8 @@ def public(row: CodeWorker, *, detail=False) -> dict:
                 for event in row.events[-8:]
             ],
             "detached": row.payload.get("detached", False),
+            "interactive": row.payload.get("interactive", False),
+            "pending_shell": row.payload.get("pending_shell"),
             "workspace_removed": row.payload.get("workspace_removed", False)}
     if detail:
         data["changes"] = row.changes
@@ -125,8 +146,8 @@ def summarize(summary: dict, values: dict) -> dict:
     if "changes" in values:
         summary["changes"] = [code_worktrees.public_change(change) for change in values["changes"]]
     if "payload" in values:
-        for key in ("detached", "workspace_removed"):
-            summary[key] = values["payload"].get(key, False)
+        for key in ("detached", "workspace_removed", "interactive", "pending_shell"):
+            summary[key] = values["payload"].get(key, None if key == "pending_shell" else False)
     return summary
 
 
@@ -157,6 +178,9 @@ class Manager:
                 names.add("worker_apply")
         if self.mode != "plan" and code_runner.can_run(self.permissions):
             names.add("command_start")
+            if self.mode != "review":
+                names.add("worker_command_changes")
+                names.add("command_input")
         return [tool for tool in TOOLS if tool["function"]["name"] in names]
 
     async def owned(self, session, worker_id: str) -> CodeWorker:
@@ -207,9 +231,9 @@ class Manager:
                             raise ValueError("Этот воркер уже работает или завершён")
                         changed = await session.execute(update(CodeWorker).where(
                             CodeWorker.id == existing, CodeWorker.status == row.status,
-                        ).values(slot=slot, status="queued", job_id=job_id, error=None,
+                        ).values(slot=slot, status="queued", job_id=job_id, error=None, applied={},
                                  payload={**row.payload, **payload},
-                                 summary={**row.summary, "status": "queued", "error": None}))
+                                 summary={**row.summary, "status": "queued", "error": None, "applied": {}}))
                         if changed.rowcount != 1:
                             raise ValueError("Воркер уже запущен параллельным запросом")
                         await session.refresh(row)
@@ -220,7 +244,7 @@ class Manager:
                                          output="", report="", events=[], changes=[], applied={})
                         row.summary = {"kind": kind, "role": role, "task": task, "status": "queued",
                                        "report": "", "error": None, "changes": [], "applied": {}, "events": [],
-                                       "detached": payload.get("detached", False), "workspace_removed": False}
+                                       "detached": payload.get("detached", False), "interactive": payload.get("interactive", False), "workspace_removed": False}
                         session.add(row)
                     await session.commit()
                 jobs.launch(self.maker, job_id, lambda handle, wid=worker_id: self._execute(wid, handle))
@@ -256,9 +280,20 @@ class Manager:
         if await sandbox.info() is None:
             raise ValueError("Песочница не подключена; команда не запущена")
         row = await self._reserve("command", args.command, "command", {
-            **args.model_dump(), "permissions": self.permissions, "mode": self.mode,
+            **args.model_dump(), "detached": args.detached or args.interactive,
+            "permissions": self.permissions, "mode": self.mode,
         })
         return {"worker": public(row)}
+
+    async def input(self, args: CommandInput):
+        if self.mode in ("plan", "review") or not code_runner.can_run(self.permissions):
+            raise ValueError("Ввод в процесс недоступен в этом режиме/персоне")
+        async with self.maker() as session:
+            row = await self.owned(session, args.worker_id)
+            if row.kind != "command" or row.status not in ACTIVE or not row.payload.get("interactive"):
+                raise ValueError("Это не работающий интерактивный command-воркер")
+        return await sandbox.shell_request(self.owner_id, args.worker_id, "POST", "input",
+                                           {"text": args.text, "eof": args.eof})
 
     async def output(self, args: WorkerOutput) -> dict:
         await self.list()
@@ -274,6 +309,35 @@ class Manager:
             return {"worker": worker, "output": row.output[args.offset:args.offset + args.limit],
                     "offset": args.offset, "total_chars": len(row.output),
                     "truncated": args.offset + args.limit < len(row.output)}
+
+    async def command_changes(self, args: WorkerCommandChanges):
+        if self.mode == "plan" or not code_runner.can_run(self.permissions):
+            raise ValueError("Shell-инструменты недоступны")
+        async with self.maker() as session:
+            row = await self.owned(session, args.worker_id)
+            if row.kind != "command" or row.status in ACTIVE or row.payload.get("workspace_removed"):
+                raise ValueError("Нужен завершённый command-воркер с сохранённой копией")
+            payload = dict(row.payload)
+        root = str(code_worktrees.paths(self.root, self.project_id, args.worker_id)[2])
+        runner = code_runner.Runner(self.owner_id, args.worker_id, root)
+        packet = await code_shell.fetch(runner)
+        if args.action == "list":
+            return code_shell.describe(packet)
+        if self.mode == "review" or not args.change_id or args.change_id != packet.get("id"):
+            raise ValueError("Нужен актуальный change_id; изменения недоступны в Review")
+        if args.action == "discard":
+            await code_shell.acknowledge(runner, packet)
+            result = {"discarded": packet["id"]}
+        else:
+            result = {}
+            async for event in code_shell.apply(runner, packet, {"id": "retry", "name": "shell_file"}):
+                if "shell_result" in event:
+                    result = event["shell_result"]
+        remaining = await code_shell.fetch(runner)
+        payload["pending_shell"] = code_shell.describe(remaining) if remaining.get("id") else None
+        changes = await run_in_threadpool(code_worktrees.diff, self.root, self.project_id, args.worker_id, payload["baseline"])
+        await self._save(args.worker_id, payload=payload, changes=changes)
+        return result
 
     async def wait(self, args: WorkerWait) -> dict:
         deadline = asyncio.get_running_loop().time() + args.timeout
@@ -337,7 +401,7 @@ class Manager:
             raise ValueError("Нет права применять изменения проекта")
         async with self.maker() as session:
             row = await self.owned(session, args.worker_id)
-            if row.status in ACTIVE or row.role != "implement":
+            if row.status in ACTIVE or row.role != "implement" and row.kind != "command":
                 raise ValueError("Применять можно только завершённого реализующего воркера")
             if row.payload.get("workspace_removed"):
                 raise ValueError("Рабочая копия удалена")
@@ -374,6 +438,10 @@ class Manager:
                 return await self.start_agent(args)
             if name == "command_start":
                 return await self.start_command(args)
+            if name == "command_input":
+                return await self.input(args)
+            if name == "worker_command_changes":
+                return await self.command_changes(args)
             if name == "worker_list":
                 return {"workers": await self.list()}
             if name == "worker_output":
@@ -434,6 +502,7 @@ class Manager:
         payload = {}
         status, error = "done", None
         initialized = False
+        runner = None
         saved_at = 0.0
         try:
             async with self.maker() as session:
@@ -455,15 +524,25 @@ class Manager:
                 await handle.step("Команда работает в собственной песочнице", progress=0.2)
                 async for item in runner.command(code_runner.RunCommand(
                     command=task, timeout=payload["timeout"], stdin=payload.get("stdin"),
+                    shell=payload.get("shell", "bash"), cwd=payload.get("cwd", "."),
+                    interactive=payload.get("interactive", False),
                 )):
                     if "output" in item:
                         output = item["output"][-OUTPUT_LIMIT:]
                         await self._save(worker_id, output=output)
                     if "result" in item:
                         result = item["result"]
+                        packet = result.pop("shell_packet", None)
+                        if packet is not None:
+                            async for change in code_shell.apply(runner, packet, {"id": "command", "name": "shell_file"}):
+                                if "shell_result" in change and change["shell_result"].get("error"):
+                                    result["error"] = change["shell_result"]["error"]
                         report = json.dumps({key: value for key, value in result.items() if key != "shown"}, ensure_ascii=False)[-20000:]
-                        if result.get("error") or result.get("exit_code") not in (None, 0):
-                            status, error = "error", result.get("error") or f"Код выхода {result.get('exit_code')}"
+                        if result.get("error") or result.get("timed_out") or result.get("signal") or result.get("exit_code") not in (None, 0):
+                            status, error = "error", result.get("error") or ("Превышено время команды; частичные файлы сохранены"
+                                if result.get("timed_out") else f"Сигнал {result['signal']}" if result.get("signal") else f"Код выхода {result.get('exit_code')}")
+                changes = await run_in_threadpool(code_worktrees.diff, self.root, self.project_id,
+                                                 worker_id, payload["baseline"])
             else:
                 async with self.maker() as session:
                     provider = await session.get(Provider, payload["provider_id"])
@@ -528,6 +607,22 @@ class Manager:
             error = str(exc)[:1500] if isinstance(exc, ValueError) else jobs.public_error(exc)
             raise
         finally:
+            if runner is not None:
+                await runner.close()
+            if runner is not None and payload.get("command") and runner.partial_output:
+                output = runner.partial_output[-OUTPUT_LIMIT:]
+            if runner is not None and payload.get("command"):
+                # A cancelled stream may still have produced files. Recovery waits for sandbox cleanup.
+                try:
+                    packet = await code_shell.fetch(runner)
+                    if packet.get("id"):
+                        if packet.get("output"):
+                            output = sandbox.clean(packet["output"])[-OUTPUT_LIMIT:]
+                        async for _item in code_shell.apply(runner, packet, {"id": "stopped", "name": "shell_file"}):
+                            if "shell_result" in _item and _item["shell_result"].get("pending_changes"):
+                                payload["pending_shell"] = code_shell.describe(packet)
+                except (ValueError, OSError, sandbox.SandboxError):
+                    pass
             if initialized and not changes:
                 try:
                     changes = await run_in_threadpool(code_worktrees.diff, self.root, self.project_id,

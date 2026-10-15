@@ -596,7 +596,7 @@ export function CodeDomain() {
           <section
             className={`code-pane code-terminal min-h-0 min-w-0 flex-1 flex-col ${pane === "terminal" ? "code-active" : ""}`}
           >
-            <ProjectTerminal key={projectId} projectId={projectId} request={runRequest} />
+            <ProjectTerminal key={projectId} projectId={projectId} request={runRequest} onFileChange={agentChanged} />
           </section>
         )}
         {projectId && (pane === "preview" || previewOpened) && (

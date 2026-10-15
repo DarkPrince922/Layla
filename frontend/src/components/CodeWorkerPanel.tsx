@@ -10,6 +10,8 @@ import { confirmAction } from "@/components/ConfirmDialog";
 export type CodeWorker = {
   id: string; kind: "agent" | "command"; role: string; task: string; status: string;
   report: string; error?: string | null; detached: boolean; workspace_removed: boolean;
+  interactive?: boolean;
+  pending_shell?: { id?: string; error?: string; blocked?: Record<string, string> } | null;
   changes: FileChange[]; applied: Record<string, string | null>;
   events: { id?: string; name: string; path?: string; status: string; note?: string; command?: string; output?: string; error?: string }[];
 };
@@ -41,6 +43,7 @@ function WorkerCard({ worker, chatId, scope, parentRunning, canApply, refresh, o
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [input, setInput] = useState("");
   const detail = useQuery({
     queryKey: ["code-worker", scope, chatId, worker.id, worker.status],
     queryFn: () => api.get<{ worker: CodeWorker; output: string; truncated: boolean }>(`/chats/${chatId}/workers/${worker.id}?limit=40000`),
@@ -61,6 +64,24 @@ function WorkerCard({ worker, chatId, scope, parentRunning, canApply, refresh, o
     } catch (e) { setError(e instanceof Error ? e.message : "Не удалось выполнить действие"); }
     finally { setBusy(false); }
   }
+  async function sendInput(eof = false) {
+    setBusy(true); setError(null);
+    try {
+      await api.post(`/chats/${chatId}/workers/${worker.id}/input`, { text: input ? input + "\n" : "", eof });
+      setInput(""); await detail.refetch();
+    } catch (e) { setError(e instanceof Error ? e.message : "Процесс не принял ввод"); }
+    finally { setBusy(false); }
+  }
+  async function resolveChanges(action: "apply" | "discard") {
+    if (action === "discard" && !(await confirmAction("Отклонить оставшиеся результаты команды в песочнице?"))) return;
+    setBusy(true); setError(null);
+    try {
+      const result = await api.post<{ error?: string }>(`/chats/${chatId}/workers/${worker.id}/changes`, { action, change_id: info.pending_shell?.id });
+      if (result.error) setError(result.error);
+      await refresh(); await detail.refetch();
+    } catch (e) { setError(e instanceof Error ? e.message : "Не удалось обработать пакет"); }
+    finally { setBusy(false); }
+  }
   return <details onToggle={event => setOpen(event.currentTarget.open)} className="rounded-lg border border-ink-700 bg-ink-950/30 p-3">
     <summary className="flex cursor-pointer list-none items-center gap-2 [&::-webkit-details-marker]:hidden">
       {active(worker) && <Loader2 className="h-3 w-3 shrink-0 animate-spin text-accent-300" />}
@@ -74,9 +95,21 @@ function WorkerCard({ worker, chatId, scope, parentRunning, canApply, refresh, o
       <div className="flex flex-wrap gap-2">
         {active(worker) && <button disabled={busy} onClick={() => void control("stop")} className="secondary-button !px-3 !py-1.5 text-xs">Остановить</button>}
         {!active(worker) && worker.status !== "done" && !worker.workspace_removed && <button disabled={busy || !canApply} onClick={() => void control("resume")} className="secondary-button !px-3 !py-1.5 text-xs">Продолжить</button>}
-        {!active(worker) && worker.role === "implement" && !!pendingChanges.length && !worker.workspace_removed && <button disabled={busy || parentRunning || !canApply} onClick={() => onResume(`Проверь результат воркера ${worker.id}, примени подходящие изменения через worker_apply и проверь основной проект.`)} className="primary-button !px-3 !py-1.5 text-xs">Проверить и применить · {pendingChanges.length}</button>}
+        {!active(worker) && (worker.role === "implement" || worker.kind === "command") && !!pendingChanges.length && !worker.workspace_removed && <button disabled={busy || parentRunning || !canApply} onClick={() => onResume(`Проверь результат воркера ${worker.id}, примени подходящие изменения через worker_apply и проверь основной проект.`)} className="primary-button !px-3 !py-1.5 text-xs">Проверить и применить · {pendingChanges.length}</button>}
         {!active(worker) && !worker.workspace_removed && <button disabled={busy} onClick={() => void control("discard")} className="secondary-button !px-3 !py-1.5 text-xs">Удалить копию</button>}
       </div>
+      {active(worker) && info.interactive && <div className="flex flex-wrap gap-2">
+        <textarea aria-label="Ввод в процесс" value={input} onChange={e => setInput(e.target.value)} placeholder="Команда REPL или ввод программы" className="min-w-0 flex-1 rounded-lg bg-ink-950 p-2 font-mono text-xs" rows={2} />
+        <button disabled={busy || !input} onClick={() => void sendInput()} className="secondary-button !px-3 text-xs">Отправить</button>
+        <button disabled={busy} onClick={() => void sendInput(true)} className="secondary-button !px-3 text-xs">EOF</button>
+      </div>}
+      {!active(worker) && info.pending_shell?.id && <div className="space-y-2 rounded-lg border border-amber-500/30 p-2 text-amber-200">
+        <p>В песочнице сохранён пакет результатов.</p>
+        {info.pending_shell.error && <p>{info.pending_shell.error}</p>}
+        {Object.entries(info.pending_shell.blocked || {}).map(([path, reason]) => <p key={path} className="break-all">{path}: {reason}</p>)}
+        <button disabled={busy} onClick={() => void resolveChanges("apply")} className="secondary-button !px-3 !py-1.5">Повторить сбор в копию воркера</button>
+        <button disabled={busy} onClick={() => void resolveChanges("discard")} className="secondary-button !px-3 !py-1.5">Отклонить пакет</button>
+      </div>}
       {error && <p role="alert" className="text-red-300">{error}</p>}
       {info.error && <p className="text-red-300">{info.error}</p>}
       {detail.isPending && open && <p className="text-neutral-500">Загружаю вывод…</p>}

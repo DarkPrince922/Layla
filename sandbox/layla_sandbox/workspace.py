@@ -27,6 +27,8 @@ from collections.abc import AsyncIterator
 from contextlib import suppress
 from pathlib import Path
 
+import anyio
+
 from layla_sandbox import config
 
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -124,7 +126,7 @@ class Workspace:
             st = os.lstat(self.path / rel)
         except OSError:
             return None
-        return f"{st.st_size}:{st.st_mtime_ns}"
+        return f"{st.st_size}:{st.st_mtime_ns}:{st.st_mode & 0o777}"
 
     # --- синхронизация ---------------------------------------------------------
 
@@ -214,6 +216,41 @@ class Workspace:
             start_new_session=True, **self._as_user(),
         )
 
+    async def export_changes(self, before=None, ignored=None) -> dict:
+        """Never inspect workspace file contents with the privileged server uid."""
+        helper = str(Path(__file__).with_name("changes.py"))
+        proc = await asyncio.create_subprocess_exec(
+            PYTHON, "-I", helper, str(self.path), cwd="/", env={"PATH": config.BASE_PATH},
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            **self._as_user(),
+        )
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(json.dumps({"before": before, "ignored": ignored}).encode()), 120)
+        except BaseException:
+            proc.kill()
+            await proc.wait()
+            raise
+        result = json.loads(out or b"{}")
+        if proc.returncode or "error" in result:
+            raise ValueError(result.get("error") or err.decode(errors="replace")[-500:])
+        return result
+
+    @property
+    def changes_file(self):
+        return self.work / ".state" / "changes" / self.owner / (self.project + ".json")
+
+    def pending_changes(self):
+        try:
+            return json.loads(self.changes_file.read_text())
+        except FileNotFoundError:
+            return None
+
+    def save_changes(self, data):
+        self.changes_file.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.changes_file.with_suffix(".tmp")
+        temporary.write_text(json.dumps(data))
+        temporary.replace(self.changes_file)
+
     async def kill_all(self) -> None:
         """Добить всё, что команда оставила (фоновые процессы, демоны): kill(-1) от uid."""
         script = "import os, signal\ntry:\n    os.kill(-1, signal.SIGKILL)\nexcept OSError:\n    pass\n"
@@ -230,15 +267,26 @@ class Workspace:
         return proc.returncode == 0
 
     async def run(self, command: str, timeout: int, stdin: str | None = None, *,
-                  cleanup_all: bool = True) -> AsyncIterator[dict]:
+                  cleanup_all: bool = True, shell: str = "bash", cwd: str = ".",
+                  interactive: bool = False, processes: dict | None = None) -> AsyncIterator[dict]:
         """Выполнить команду bash в рабочей копии: события output (по мере вывода) и exit.
 
         По окончании добиваются процессы сеанса команды; cleanup_all=False — только они, а не
         все процессы пользователя (у него работает превью, его трогать нельзя).
         """
         started = time.monotonic()
-        proc = await self.spawn(["/bin/bash", "-c", command], stdin=stdin is not None)
-        feeder = asyncio.create_task(_feed(proc, stdin)) if stdin is not None else None
+        if cwd != ".":
+            check_path(cwd)
+            directory = (self.path / cwd).resolve()
+            if not directory.is_relative_to(self.path.resolve()) or not directory.is_dir():
+                raise ValueError("Рабочая папка должна быть внутри проекта")
+        argv = ["/bin/bash", "-c", command] if shell == "bash" else ["pwsh", "-NoLogo", "-NoProfile", "-Command", command]
+        # The relative cwd is passed as data, never interpolated into shell code.
+        wrapper = [PYTHON, "-I", "-c", "import os,sys;os.chdir(sys.argv[1]);os.execvp(sys.argv[2],sys.argv[2:])", cwd, *argv]
+        proc = await self.spawn(wrapper, stdin=stdin is not None or interactive)
+        if processes is not None:
+            processes[(self.owner, self.project)] = proc
+        feeder = asyncio.create_task(_feed(proc, stdin, close=not interactive)) if stdin is not None else None
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         size, truncated, timed_out = 0, False, False
         deadline = started + timeout
@@ -249,10 +297,13 @@ class Workspace:
                     timed_out = True
                     break
                 try:
-                    chunk = await asyncio.wait_for(proc.stdout.read(8192), left)
+                    chunk = await asyncio.wait_for(proc.stdout.read(8192), min(left, 0.5))
                 except TimeoutError:
-                    timed_out = True
-                    break
+                    if time.monotonic() >= deadline:
+                        timed_out = True
+                        break
+                    yield {"type": "heartbeat"}
+                    continue
                 if not chunk:
                     break
                 if size < config.MAX_OUTPUT:
@@ -273,15 +324,20 @@ class Workspace:
                 _killpg(proc.pid)
                 code = await proc.wait()
         finally:
-            if proc.returncode is None:
-                _killpg(proc.pid)
-                with suppress(Exception):
-                    await asyncio.wait_for(proc.wait(), 5)
-            if feeder is not None:
-                feeder.cancel()
-            kill_session(proc.pid)
-            if cleanup_all:
-                await self.kill_all()
+            if processes is not None:
+                processes.pop((self.owner, self.project), None)
+            with anyio.CancelScope(shield=True):
+                if proc.returncode is None:
+                    _killpg(proc.pid)
+                    with suppress(Exception):
+                        await asyncio.wait_for(proc.wait(), 5)
+                if feeder is not None:
+                    feeder.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await feeder
+                kill_session(proc.pid)
+                if cleanup_all:
+                    await self.kill_all()
         tail = decoder.decode(b"", final=True)
         if tail:
             yield {"type": "output", "data": tail}
@@ -328,13 +384,14 @@ def _killpg(pid: int) -> None:
         pass
 
 
-async def _feed(proc: asyncio.subprocess.Process, text: str) -> None:
+async def _feed(proc: asyncio.subprocess.Process, text: str, *, close=True) -> None:
     """stdin пишется отдельно от чтения вывода: иначе большой ввод и вывод заперли бы друг друга."""
     with suppress(Exception):
         proc.stdin.write(text.encode())
         await proc.stdin.drain()
-    with suppress(Exception):
-        proc.stdin.close()
+    if close:
+        with suppress(Exception):
+            proc.stdin.close()
 
 
 def empty_tar() -> bytes:

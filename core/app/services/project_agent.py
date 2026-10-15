@@ -21,6 +21,7 @@ from app.services import (
     code_notebooks,
     code_research,
     code_runner,
+    code_shell,
     code_state,
     code_workers,
     files,
@@ -765,12 +766,16 @@ async def _parallel_delegates(calls: list[dict], remaining: int, round_number: i
 
 
 @asynccontextmanager
-async def _worker_lifetime(workers):
+async def _worker_lifetime(workers, runner=None):
     try:
         yield
     finally:
-        if workers is not None:
-            await workers.cancel_attached()
+        try:
+            if workers is not None:
+                await workers.cancel_attached()
+        finally:
+            if runner is not None and hasattr(runner, "close"):
+                await runner.close()
 
 
 async def run(
@@ -929,7 +934,7 @@ async def run(
         if feedback:
             message["content"] = json.dumps({"tool_result": response, "hook_feedback": feedback}, ensure_ascii=False)
 
-    async with _worker_lifetime(workers), asyncio.timeout(MAX_SECONDS):
+    async with _worker_lifetime(workers, runner), asyncio.timeout(MAX_SECONDS):
         for event, data in (("SessionStart", {"source": "resume" if len(messages) > 1 else "startup"}),
                             ("UserPromptSubmit", {"prompt": anchor.get("content", "")})):
             result = {}
@@ -1114,7 +1119,8 @@ async def run(
                                 yield update
                     else:
                         rejected = False
-                        if ask is not None and name in {"agent_start", "command_start", "worker_resume", "worker_discard"}:
+                        if ask is not None and (name in {"agent_start", "command_start", "command_input", "worker_resume", "worker_discard"}
+                                                or name == "worker_command_changes" and arguments.get("action", "list") != "list"):
                             pending = {**event, "status": "pending"}
                             yield {"tool": pending}
                             decision = await ask(pending)
@@ -1284,10 +1290,12 @@ async def run(
                                          "content": json.dumps(outcome, ensure_ascii=False),
                                          "is_error": "error" in outcome})
                     continue
-                if name in code_runner.RUN_TOOLS and name in allowed_names:
+                if name in (code_runner.RUN_TOOLS | code_runner.SHELL_TOOLS) and name in allowed_names:
                     event["command"] = code_runner.label(name, arguments)
                     outcome = None
-                    async for item in _run_code_tool(runner, name, arguments, event, ask):
+                    async for item in _run_code_tool(runner, name, arguments, event, ask, workers=workers,
+                                                     taken=taken, writable=mode not in READ_ONLY_MODES
+                                                     and (permissions is None or "files.write" in permissions)):
                         if "ask_off" in item:
                             ask = None
                         elif "outcome" in item:
@@ -1358,7 +1366,7 @@ async def _apply_worker(workers, arguments: dict, event: dict, ask, root: str, t
     try:
         args = code_workers.WorkerApply.model_validate(arguments)
         proposals = await workers.proposals(args)
-        previews = [await run_in_threadpool(files.preview_change, root, item["path"], item["content"])
+        previews = [item["change"] if "change" in item else await run_in_threadpool(files.preview_change, root, item["path"], item["content"])
                     for item in proposals if not item.get("already_applied")]
         if ask is not None and previews:
             pending = {**event, "status": "pending", "change": {
@@ -1380,10 +1388,14 @@ async def _apply_worker(workers, arguments: dict, event: dict, ask, root: str, t
                 continue
             async with workers.maker() as session:
                 await workers.owned(session, args.worker_id)
-            saved = await run_in_threadpool(snapshot, root, item["path"], taken)
+            saved = await run_in_threadpool(code_shell.checkpoint, root, item["path"]) if item["path"] not in taken else None
             if saved is not None:
                 yield {"checkpoint": saved}
-            change = await run_in_threadpool(files.change_file, root, item["path"], item["content"], item["expected_sha256"])
+                taken.add(item["path"])
+            change = await run_in_threadpool(files.change_file, root, item["path"], item["content"], item["expected_sha256"],
+                                             binary=True, mode=item.get("mode"), expected_mode=item.get("expected_mode"))
+            if "change" in item:
+                change["diff"] = item["change"]["diff"]
             # Persist the actual file change before any subsequent bookkeeping
             # may fail; the normal chat handler saves its diff/audit/checkpoint.
             yield {"tool": {**event, "id": event["id"] + ":" + item["path"], "path": item["path"],
@@ -1395,7 +1407,8 @@ async def _apply_worker(workers, arguments: dict, event: dict, ask, root: str, t
         yield {"outcome": {"error": str(exc)[:1500], "applied": applied}}
 
 
-async def _run_code_tool(runner, name: str, arguments: dict, event: dict, ask):
+async def _run_code_tool(runner, name: str, arguments: dict, event: dict, ask, *,
+                         workers=None, taken=None, writable=True):
     """Выполнить run_command / run_code. Выдаёт события карточки ({"tool": ...}), затем
     {"outcome": результат для модели}; {"ask_off": True} — пользователь разрешил всё."""
     args, problem = code_runner.validate(name, arguments)
@@ -1409,22 +1422,63 @@ async def _run_code_tool(runner, name: str, arguments: dict, event: dict, ask):
         decision = await ask(pending)
         if decision == "approve_all":
             yield {"ask_off": True}
+            ask = None
         elif decision != "approve":
             yield {"tool": {**event, "status": "rejected", "error": "Отклонено пользователем"}}
             yield {"outcome": {"error": "Пользователь отклонил этот запуск."}}
             return
     yield {"tool": event}
-    if name == "run_command":
+    if name == "command_changes":
+        try:
+            packet = await code_shell.fetch(runner)
+            if args.action == "discard":
+                if not args.change_id or args.change_id != packet.get("id"):
+                    raise ValueError("Для discard нужен актуальный change_id из command_changes list")
+                if ask is not None:
+                    pending = {**event, "status": "pending", "command": "Отклонить сохранённые изменения команды"}
+                    yield {"tool": pending}
+                    approval = await ask(pending)
+                    if approval == "approve_all":
+                        yield {"ask_off": True}
+                    elif approval != "approve":
+                        raise ValueError("Отклонение пакета не подтверждено")
+                await code_shell.acknowledge(runner, packet)
+                result = {"discarded": packet.get("id")}
+            elif args.action == "list":
+                result = code_shell.describe(packet)
+            else:
+                result = {"shell_packet": packet}
+        except (ValueError, OSError, sandbox.SandboxError) as exc:
+            result = {"error": str(exc)[:1500]}
+    elif name == "run_command" and args.run_in_background:
+        try:
+            if workers is None:
+                raise ValueError("Фоновые команды недоступны в этом контексте")
+            result = await workers.start_command(code_workers.CommandStart(
+                **args.model_dump(exclude={"run_in_background"})))
+        except (ValueError, OSError) as exc:
+            result = {"error": str(exc)[:1500]}
+    elif name == "run_command":
         result: dict = {"error": "Песочница не вернула результат"}
-        async for item in runner.command(args):
-            if "output" in item:
-                yield {"tool": {**event, "output": item["output"]}}
-            elif "info" in item:
-                yield {"tool": {**event, "note": item["info"]}}
-            elif "result" in item:
-                result = item["result"]
+        if args.interactive:
+            result = {"error": "Для interactive=true нужен run_in_background=true или command_start"}
+        else:
+            async for item in runner.command(args):
+                if "output" in item:
+                    yield {"tool": {**event, "output": item["output"]}}
+                elif "info" in item:
+                    yield {"tool": {**event, "note": item["info"]}}
+                elif "result" in item:
+                    result = item["result"]
     else:
         result = await runner.call(name, args)
+    packet = result.pop("shell_packet", None)
+    if packet is not None:
+        async for item in code_shell.apply(runner, packet, event, ask=ask, taken=taken, writable=writable):
+            if "shell_result" in item:
+                result.update(item["shell_result"])
+            else:
+                yield item
     shown = result.pop("shown", None)
     final = {**event, "status": "error" if "error" in result else "done"}
     for key in ("exit_code", "duration_s", "timed_out", "signal", "error"):
