@@ -178,8 +178,8 @@ class Manager:
                 names.add("worker_apply")
         if self.mode != "plan" and code_runner.can_run(self.permissions):
             names.add("command_start")
-            names.add("worker_command_changes")
             if self.mode != "review":
+                names.add("worker_command_changes")
                 names.add("command_input")
         return [tool for tool in TOOLS if tool["function"]["name"] in names]
 
