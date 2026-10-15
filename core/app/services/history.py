@@ -40,12 +40,13 @@ SUMMARY_HEADER = "Сводка более ранней части разгово
 
 
 def is_summary(message: Message) -> bool:
-    return message.role == "system" and (message.meta or {}).get("kind") == SUMMARY
+    return (message.role == "system" and (message.meta or {}).get("kind") == SUMMARY
+            and not (message.meta or {}).get("disabled"))
 
 
 def entry(message: Message) -> dict | None:
     """Сообщение чата в том виде, в каком его видит модель."""
-    if message.role not in ("user", "assistant", "system") or is_summary(message):
+    if message.role not in ("user", "assistant", "system") or is_summary(message) or (message.meta or {}).get("disabled"):
         return None
     meta = message.meta or {}
     content = message.content or ""
@@ -183,8 +184,14 @@ async def compact(session: AsyncSession, chat: Chat, provider, key, model: str, 
     older = candidates[:-keep] if keep else candidates
     if not older:
         return None
+    from app.models.enums import Domain
+    if chat.domain == Domain.code:
+        from app.services.code_sessions import compact_items
+        items = await compact_items(session, older)
+    else:
+        items = [entry(row) for row in older]
     text = await summarize(provider, key, model, caps, previous.content if previous else None,
-                           [entry(row) for row in older], on_event=on_event)
+                           items, on_event=on_event)
     if not text:
         return None
     count = len(older) + int(((previous.meta or {}).get("count") or 0) if previous else 0)
@@ -242,7 +249,7 @@ def _shrink_call(message: dict) -> dict | None:
     return {**message, "tool_calls": calls} if changed else None
 
 
-def shrink_run(conversation: list[dict], anchor: dict, caps: dict) -> int:
+def shrink_run(conversation: list[dict], anchor: dict, caps: dict, *, include_previous=False) -> int:
     """Ужать старые результаты инструментов и аргументы записей в текущем ходе."""
     context = caps.get("context")
     limit = (context - (caps.get("max_output") or 8192) - 256) if context else RUN_BUDGET
@@ -250,12 +257,14 @@ def shrink_run(conversation: list[dict], anchor: dict, caps: dict) -> int:
     total = tokens(conversation)
     if total <= limit:
         return 0
-    start = next(i for i, m in enumerate(conversation) if m is anchor) + 1
+    start = 1 if include_previous else next(i for i, m in enumerate(conversation) if m is anchor) + 1
     rounds = [i for i in range(start, len(conversation))
               if conversation[i]["role"] == "assistant" and conversation[i].get("tool_calls")]
     stop = rounds[-KEEP_ROUNDS] if len(rounds) >= KEEP_ROUNDS else start
     shrunk = 0
     for index in range(start, stop):
+        if conversation[index] is anchor:
+            continue
         if total <= limit:
             break
         message = conversation[index]

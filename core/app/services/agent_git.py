@@ -86,11 +86,12 @@ class GitAgent:
     """Git одного проекта от имени пользователя; токен хостинга — через credential()."""
 
     def __init__(self, root: str, author: str, email: str,
-                 credential: Callable[[str | None], Awaitable[tuple[str | None, str | None]]]) -> None:
+                 credential: Callable[[str | None], Awaitable[tuple[str | None, str | None]]], *, publish_branch=None) -> None:
         self.root = root
         self.author = author
         self.email = email
         self.credential = credential
+        self.publish_branch = publish_branch
 
     async def call(self, name: str, arguments: dict) -> dict:
         schema = _SCHEMAS.get(name)
@@ -98,6 +99,10 @@ class GitAgent:
             return {"error": "Неизвестный инструмент"}
         try:
             args = schema.model_validate(arguments or {})
+            if name in ("git_push", "git_sync") and self.publish_branch is not None:
+                if args.branch is not None and args.branch != self.publish_branch:
+                    return {"error": "Рабочая копия публикуется только в свою отдельную ветку: " + self.publish_branch}
+                args.branch = self.publish_branch
         except ValidationError as exc:
             fields = ", ".join(".".join(map(str, e["loc"])) or e["msg"] for e in exc.errors())
             return {"error": f"Некорректные аргументы инструмента: {fields}"}

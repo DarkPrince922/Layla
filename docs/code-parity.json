@@ -4023,7 +4023,7 @@
       "archive_tool": "AgentTool",
       "status": "partial",
       "layla": "agent_start, worker_list/output/wait/resume/apply/discard",
-      "notes": "Up to 3 concurrent implement/explore/review agents in private snapshot worktrees, durable output, progress, resume and explicit detach. Named durable teams, direct/broadcast mail and append-only worker protocol history with resume are implemented. Lead collects attached results and receives peer mail while waiting. Missing full lead/archive session replay and structured approval/shutdown protocols."
+      "notes": "Up to 3 concurrent implement/explore/review agents in private snapshot worktrees, durable output, progress, resume and explicit detach. Named durable teams, direct/broadcast mail and append-only worker protocol history with resume are implemented. Lead collects attached results and receives peer mail while waiting. Lead and worker protocol replay, rollback/compact-aware context and lead worktree switching are implemented. Archive import/fork/attribution and structured approval/shutdown protocols remain."
     },
     {
       "archive_tool": "AskUserQuestionTool",
@@ -4058,8 +4058,8 @@
     {
       "archive_tool": "EnterWorktreeTool",
       "status": "partial",
-      "layla": "agent_start",
-      "notes": "Workers receive managed detached Git worktrees from actual project snapshots, including dirty/untracked files. Main repository/index remain untouched. No lead workspace switching or user-selected branches."
+      "layla": "enter_worktree, resume_worktree, worktree_list",
+      "notes": "Lead switches tools mid-turn into durable private Git worktrees with source history/current dirty files, separate cache IDs and worker scopes; original source/index/branch preserved. Missing hook-created worktrees, arbitrary ref selection and global editor/terminal switching."
     },
     {
       "archive_tool": "ExitPlanModeTool",
@@ -4070,8 +4070,8 @@
     {
       "archive_tool": "ExitWorktreeTool",
       "status": "partial",
-      "layla": "worker_apply, worker_discard",
-      "notes": "Retain private edits, import selected text/binary/mode changes with optimistic hashes/checkpoints, or explicitly discard. No archive-compatible lead cwd transition or branch publication."
+      "layla": "exit_worktree, worktree_diff/read/publish, worker_apply/discard",
+      "notes": "Lead returns to source, keeps/resumes or explicitly discards its copy. Complete since-entry diff, ZIP and fixed generated branch publication using owner credentials; scoped rollback cannot overwrite source. Missing archive hooks/tmux and automated PR/merge lifecycle."
     },
     {
       "archive_tool": "FileEditTool",
@@ -4279,7 +4279,7 @@
         "utils/conversationRecovery.ts",
         "utils/crossProjectResume.ts"
       ],
-      "notes": "Durable chats and append-only worker messages/tool results, independent of compaction; resume repairs unknown tool outcomes and preserves worktrees. Full lead transcript, archive replay/import/fork and attribution recovery remain."
+      "notes": "Durable chats and append-only worker messages/tool results, independent of compaction; resume repairs unknown tool outcomes and preserves worktrees. Lead journal replay, fresh persona/provider adaptation, atomic mail acknowledgement, rollback invalidation, full-tool compaction and atomic protocol trimming are implemented. Archive import/fork, attribution and complete compact/hook state remain."
     },
     {
       "id": "context_compaction",
@@ -4320,7 +4320,7 @@
         "utils/teammateMailbox.ts",
         "utils/tasks.ts"
       ],
-      "notes": "Durable task graph and 3 independent implement/explore/review workers with progress, stop/resume, detach and reviewed imports. Named teams, direct/broadcast durable mail and worker transcript resume are implemented. Missing structured approval/shutdown, cross-session peers and full lead/archive session replay."
+      "notes": "Durable task graph and 3 independent implement/explore/review workers with progress, stop/resume, detach and reviewed imports. Named teams, direct/broadcast durable mail and worker transcript resume are implemented. Missing structured approval/shutdown, cross-session peers and archive session import/fork/attribution compatibility."
     },
     {
       "id": "hooks",
@@ -4383,7 +4383,7 @@
         "utils/worktree.ts",
         "utils/worktreeModeEnabled.ts"
       ],
-      "notes": "Private snapshot repositories and detached worktrees, selected CAS imports/checkpoints, retain/discard and trash cleanup. No lead cwd switching, custom branches or publication lifecycle."
+      "notes": "Private snapshot repositories and detached worktrees, selected CAS imports/checkpoints, retain/discard and trash cleanup. Lead cwd switching, private source history, retain/resume/remove, scoped rollback and own-branch publication are implemented. Custom refs, hook worktrees and unified editor/terminal switching remain."
     },
     {
       "id": "permissions",

@@ -263,6 +263,7 @@ async def test_review_mode_is_read_only(client, monkeypatch):
         "task_create", "task_get", "task_list", "task_update", "memory_search", "notebook_read",
         "ask_user",
         "agent_start", "command_start", "worker_list", "worker_output", "worker_wait", "team_info",
+        "worktree_list", "worktree_diff", "worktree_read",
     }
     assert "REVIEW MODE" in calls[0]["conversation"][0]["content"]
 

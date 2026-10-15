@@ -158,7 +158,7 @@ def summarize(summary: dict, values: dict) -> dict:
 
 class Manager:
     def __init__(self, runtime, root: str, permissions=None, *, provider_id=None, model=None,
-                 mode="auto", caps=None):
+                 mode="auto", caps=None, source_root=None, workspace_id=None):
         self.runtime, self.root, self.permissions = runtime, root, permissions
         self.maker = runtime.maker
         self.owner_id, self.chat_id, self.project_id = runtime.owner_id, runtime.chat_id, runtime.project_id
@@ -166,13 +166,23 @@ class Manager:
         self.caps = dict(caps or {})
         self.attached: set[str] = set()
         self.tool_allowlist = None
+        self.source_root, self.workspace_id = source_root or root, workspace_id
         self.team = code_teams.Runtime(self)
+        self.transcript = None
 
     async def authorize(self, session):
         await self.runtime._authorize(session)
         project = await session.get(Project, self.project_id)
-        if project.path != self.root:
+        if project.path != self.source_root:
             raise ValueError("Каталог проекта изменился; откройте чат заново")
+        if self.workspace_id:
+            from app.models.code_workspace import CodeWorkspace
+            from app.services.code_workspace import paths
+            workspace = await session.get(CodeWorkspace, self.workspace_id)
+            if (workspace is None or workspace.owner_id != self.owner_id or workspace.chat_id != self.chat_id
+                    or workspace.project_id != self.project_id or workspace.status not in ("active", "kept")
+                    or str(paths(self.source_root, self.project_id, workspace.id)[2]) != self.root):
+                raise ValueError("Рабочая копия воркера недоступна")
 
     def tools(self) -> list[dict]:
         if self.permissions is not None and "files.read" not in self.permissions:
@@ -197,15 +207,21 @@ class Manager:
         ))
         if row is None:
             raise ValueError("Воркер не найден в этом Code-чате")
+        if row.payload.get("workspace_id") != self.workspace_id:
+            raise ValueError("Переключитесь в рабочую копию, из которой запускался этот воркер")
         return row
 
-    async def list(self) -> list[dict]:
+    async def list(self, *, all_contexts=False) -> list[dict]:
         async with self.maker() as session:
             await self.authorize(session)
-            rows = list(await session.scalars(select(CodeWorker).where(
+            query = select(CodeWorker).where(
                 CodeWorker.chat_id == self.chat_id, CodeWorker.owner_id == self.owner_id,
                 CodeWorker.project_id == self.project_id,
-            ).options(load_only(CodeWorker.id, CodeWorker.job_id, CodeWorker.status,
+            )
+            if not all_contexts:
+                context = CodeWorker.payload["workspace_id"].as_string()
+                query = query.where(context == self.workspace_id if self.workspace_id else context.is_(None))
+            rows = list(await session.scalars(query.options(load_only(CodeWorker.id, CodeWorker.job_id, CodeWorker.status,
                                 CodeWorker.error, CodeWorker.summary)).order_by(CodeWorker.created_at)))
             for row in rows:
                 if not row.summary:
@@ -220,6 +236,7 @@ class Manager:
             return [public(row) for row in rows]
 
     async def _reserve(self, kind: str, task: str, role: str, payload: dict, existing=None, *, allow_done=False) -> CodeWorker:
+        payload = {**payload, "workspace_id": self.workspace_id}
         await self.list()  # release slots held by terminal/interrupted jobs
         for slot in range(3):
             try:
@@ -498,7 +515,13 @@ class Manager:
         results = []
         for worker_id in sorted(ids):
             while True:
-                incoming = await self.team.receive()
+                if self.transcript is not None:
+                    async with self.maker() as session:
+                        if await self.team.pending(session):
+                            return {"team_mail_pending": True, "workers_completed": results}
+                    incoming = None
+                else:
+                    incoming = await self.team.receive()
                 if incoming:
                     return {"team_mail": incoming["content"], "workers_completed": results}
                 result = await self.wait(WorkerWait(worker_id=worker_id, timeout=0))
