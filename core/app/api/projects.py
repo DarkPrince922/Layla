@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import quote
 from uuid import uuid4
 
@@ -35,15 +36,17 @@ from app.services.auth import get_current_user
 router = APIRouter(prefix="/projects", tags=["projects"])
 
 
+@router.get("/{project_id}/chats/{chat_id}/workspaces/{workspace_id}/skills")
 @router.get("/{project_id}/skills")
 async def project_skills(project_id: str, user: User = Depends(get_current_user),
-                          session: AsyncSession = Depends(get_session)) -> dict:
-    project = await _owned_project(session, user, project_id)
+                          session: AsyncSession = Depends(get_session), workspace_id: str | None = None, chat_id: str | None = None) -> dict:
+    project = await _bound_project(session, user, project_id, workspace_id, chat_id)
     try:
         catalog = await run_in_threadpool(code_skills.Catalog, _project_root(project))
     except (ValueError, OSError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"skills": [skill.public() for skill in catalog.skills.values()], "errors": catalog.errors}
+
 
 
 async def _default_workspace(session: AsyncSession, user: User) -> Workspace | None:
@@ -59,6 +62,34 @@ async def _owned_project(session: AsyncSession, user: User, project_id: str) -> 
     if ws is None or ws.owner_id != user.id:
         raise HTTPException(status_code=404, detail="Проект не найден")
     return project
+
+
+async def _bound_project(session, user, project_id, workspace_id=None, chat_id=None):
+    """Resolve an explicit editor/terminal target, never a mutable active pointer."""
+    project = await _owned_project(session, user, project_id)
+    if workspace_id is None:
+        return project
+    if chat_id is None:
+        raise HTTPException(status_code=404, detail="Не указан Code-чат рабочей копии")
+    from app.models.code_workspace import CodeWorkspace
+    from app.services import code_state, code_workspace
+    row = await session.get(CodeWorkspace, workspace_id)
+    if row is None or row.owner_id != user.id or row.project_id != project.id or row.chat_id != chat_id:
+        raise HTTPException(status_code=404, detail="Рабочая копия не найдена")
+    binding = code_workspace.Runtime(code_state.Runtime(None, user.id, row.chat_id, project.id), _project_root(project))
+    try:
+        row = await binding.owned(session, workspace_id)
+        root = code_workspace.paths(project.path, project.id, row.id)[2]
+        if row.status != "active" or row.active_slot != 1 or not root.is_dir():
+            raise ValueError("Рабочая копия недоступна")
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return SimpleNamespace(id=project.id, path=str(root), name=row.name, branch=row.branch,
+                           cache_id=row.id, workspace_id=row.id, source=project)
+
+
+def _cache_id(project):
+    return getattr(project, "cache_id", project.id)
 
 
 def _project_root(project: Project) -> str:
@@ -180,38 +211,40 @@ def file_errors():
         raise HTTPException(status_code=400, detail="Операция с файлом недоступна") from exc
 
 
+@router.get("/{project_id}/chats/{chat_id}/workspaces/{workspace_id}/files", response_model=list[FileNode])
 @router.get("/{project_id}/files", response_model=list[FileNode])
 async def project_files(
     project_id: str,
     path: str = Query(default=".", max_length=4096),
     user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-) -> list[dict]:
-    project = await _owned_project(session, user, project_id)
+    session: AsyncSession = Depends(get_session), workspace_id: str | None = None, chat_id: str | None = None) -> list[dict]:
+    project = await _bound_project(session, user, project_id, workspace_id, chat_id)
     with file_errors():
         return await run_in_threadpool(files.list_dir, _project_root(project), path)
 
 
+
+@router.get("/{project_id}/chats/{chat_id}/workspaces/{workspace_id}/file", response_model=FileContent)
 @router.get("/{project_id}/file", response_model=FileContent)
 async def project_file(
     project_id: str,
     path: str = Query(..., min_length=1, max_length=4096),
     user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-) -> dict:
-    project = await _owned_project(session, user, project_id)
+    session: AsyncSession = Depends(get_session), workspace_id: str | None = None, chat_id: str | None = None) -> dict:
+    project = await _bound_project(session, user, project_id, workspace_id, chat_id)
     with file_errors():
         return await run_in_threadpool(files.read_file, _project_root(project), path)
 
 
+
+@router.put("/{project_id}/chats/{chat_id}/workspaces/{workspace_id}/file", response_model=FileChange)
 @router.put("/{project_id}/file", response_model=FileChange)
 async def write_project_file(
     project_id: str,
     body: FileWrite,
     user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-) -> dict:
-    project = await _owned_project(session, user, project_id)
+    session: AsyncSession = Depends(get_session), workspace_id: str | None = None, chat_id: str | None = None) -> dict:
+    project = await _bound_project(session, user, project_id, workspace_id, chat_id)
     with file_errors():
         change = await run_in_threadpool(
             files.change_file,
@@ -228,19 +261,20 @@ async def write_project_file(
         meta={"path": change["path"]},
     )
     await session.commit()
-    sandbox.preview_touch(user.id, project.id)  # запущенное превью подхватит правку
+    sandbox.preview_touch(user.id, _cache_id(project))  # запущенное превью подхватит правку
     return change
 
 
+
+@router.delete("/{project_id}/chats/{chat_id}/workspaces/{workspace_id}/file", response_model=FileChange)
 @router.delete("/{project_id}/file", response_model=FileChange)
 async def delete_project_file(
     project_id: str,
     path: str = Query(..., min_length=1, max_length=4096),
     expected_sha256: str = Query(..., pattern=r"^[a-f0-9]{64}$"),
     user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-) -> dict:
-    project = await _owned_project(session, user, project_id)
+    session: AsyncSession = Depends(get_session), workspace_id: str | None = None, chat_id: str | None = None) -> dict:
+    project = await _bound_project(session, user, project_id, workspace_id, chat_id)
     with file_errors():
         change = await run_in_threadpool(
             files.change_file,
@@ -257,26 +291,30 @@ async def delete_project_file(
         meta={"path": change["path"]},
     )
     await session.commit()
-    sandbox.preview_touch(user.id, project.id)
+    sandbox.preview_touch(user.id, _cache_id(project))
     return change
 
 
+
+@router.get("/{project_id}/chats/{chat_id}/workspaces/{workspace_id}/upload")
 @router.get("/{project_id}/upload")
 async def project_upload_info(project_id: str, path: str = Query(..., min_length=1, max_length=4096),
                               user: User = Depends(get_current_user),
-                              session: AsyncSession = Depends(get_session)) -> dict:
-    project = await _owned_project(session, user, project_id)
+                              session: AsyncSession = Depends(get_session), workspace_id: str | None = None, chat_id: str | None = None) -> dict:
+    project = await _bound_project(session, user, project_id, workspace_id, chat_id)
     with file_errors():
         return await run_in_threadpool(files.upload_info, _project_root(project), path)
 
 
+
+@router.put("/{project_id}/chats/{chat_id}/workspaces/{workspace_id}/upload", response_model=FileChange)
 @router.put("/{project_id}/upload", response_model=FileChange)
 async def upload_project_file(project_id: str, request: Request,
                               path: str = Query(..., min_length=1, max_length=4096),
                               expected_sha256: str | None = Query(default=None, pattern=r"^[a-f0-9]{64}$"),
                               user: User = Depends(get_current_user),
-                              session: AsyncSession = Depends(get_session)) -> dict:
-    project = await _owned_project(session, user, project_id)
+                              session: AsyncSession = Depends(get_session), workspace_id: str | None = None, chat_id: str | None = None) -> dict:
+    project = await _bound_project(session, user, project_id, workspace_id, chat_id)
     with file_errors():
         files.safe_join(_project_root(project), path)
     data = bytearray()
@@ -290,17 +328,18 @@ async def upload_project_file(project_id: str, request: Request,
     await audit.record(session, actor=user.id, action="project.file.upload", target=project.id,
                        meta={"path": change["path"], "size": len(data)})
     await session.commit()
-    sandbox.preview_touch(user.id, project.id)
+    sandbox.preview_touch(user.id, _cache_id(project))
     return change
 
 
+
+@router.get("/{project_id}/chats/{chat_id}/workspaces/{workspace_id}/archive")
 @router.get("/{project_id}/archive")
 async def project_archive(
     project_id: str,
     user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-) -> StreamingResponse:
-    project = await _owned_project(session, user, project_id)
+    session: AsyncSession = Depends(get_session), workspace_id: str | None = None, chat_id: str | None = None) -> StreamingResponse:
+    project = await _bound_project(session, user, project_id, workspace_id, chat_id)
     with file_errors():
         archive = await run_in_threadpool(files.export_zip, _project_root(project))
 
@@ -320,6 +359,7 @@ async def project_archive(
             "Content-Disposition": f"attachment; filename=project.zip; filename*=UTF-8''{filename}"
         },
     )
+
 
 
 @router.delete("/{project_id}", status_code=204)

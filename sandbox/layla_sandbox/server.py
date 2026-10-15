@@ -121,6 +121,7 @@ def info() -> dict:
             "shells": ["bash"] + (["powershell"] if shutil.which("pwsh", path=config.BASE_PATH) else []),
             "file_changes": 1,
             "interactive_stdin": True,
+            "pty": True,
             "network": "proxy" if config.PROXY else "off",
             "limits": {"max_timeout": config.MAX_TIMEOUT, "default_timeout": config.DEFAULT_TIMEOUT,
                        "max_output": config.MAX_OUTPUT, "max_parallel": config.MAX_PARALLEL},
@@ -189,6 +190,9 @@ class RunIn(BaseModel):
     shell: Literal["bash", "powershell"] = "bash"
     cwd: str = Field(default=".", max_length=4096)
     interactive: bool = False
+    tty: bool = False
+    rows: int = Field(default=24, ge=2, le=300)
+    cols: int = Field(default=80, ge=10, le=500)
 
 
 def _line(event: dict) -> bytes:
@@ -229,7 +233,7 @@ async def run(owner: str, project: str, body: RunIn) -> StreamingResponse:
                 try:
                     async with aclosing(ws.run(body.command, timeout, body.stdin, cleanup_all=cleanup_all,
                                                shell=body.shell, cwd=body.cwd, interactive=body.interactive,
-                                               processes=processes)) as events:
+                                               processes=processes, tty=body.tty, rows=body.rows, cols=body.cols)) as events:
                         async for event in events:
                             if pending is not None and event.get("type") == "output":
                                 pending["output"] = (pending.get("output", "") + event.get("data", ""))[-40000:]
@@ -299,6 +303,21 @@ async def command_input(owner: str, project: str, body: InputIn) -> dict:
     except (OSError, TimeoutError) as exc:
         raise HTTPException(status_code=409, detail="Процесс не принимает ввод") from exc
     return {"written": len(body.text.encode()), "eof": body.eof}
+
+
+class ResizeIn(BaseModel):
+    rows: int = Field(default=24, ge=2, le=300)
+    cols: int = Field(default=80, ge=10, le=500)
+
+
+@app.post("/workspaces/{owner}/{project}/resize")
+async def resize_terminal(owner: str, project: str, body: ResizeIn):
+    _workspace(owner, project)
+    proc = processes.get((owner, project))
+    if proc is None or proc.returncode is not None or not hasattr(proc, "resize"):
+        raise HTTPException(status_code=409, detail="Нет работающего PTY")
+    proc.resize(body.rows, body.cols)
+    return {"rows": body.rows, "cols": body.cols}
 
 
 @app.delete("/workspaces/{owner}/{project}")

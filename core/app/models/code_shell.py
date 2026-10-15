@@ -12,6 +12,7 @@ class CodeShellRun(UUIDPk, Timestamps, Base):
 
     owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    workspace_id: Mapped[str | None] = mapped_column(String(36), index=True)
     status: Mapped[str] = mapped_column(String(20), default="running")
     error: Mapped[str | None] = mapped_column(Text)
     result: Mapped[dict] = mapped_column(JSONList, default=dict)

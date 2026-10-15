@@ -45,6 +45,7 @@ class AgentStart(NoArgs):
     task: str = Field(min_length=10, max_length=12000)
     role: Literal["implement", "explore", "review"] = "implement"
     detached: bool = False
+    require_plan: bool = False
     name: str | None = Field(default=None, pattern=code_teams.NAME)
 
 
@@ -56,6 +57,9 @@ class CommandStart(NoArgs):
     shell: Literal["bash", "powershell"] = "bash"
     cwd: str = Field(default=".", max_length=4096)
     interactive: bool = False
+    tty: bool = False
+    rows: int = Field(default=24, ge=2, le=300)
+    cols: int = Field(default=80, ge=10, le=500)
 
 
 class WorkerId(NoArgs):
@@ -65,6 +69,8 @@ class WorkerId(NoArgs):
 class CommandText(NoArgs):
     text: str = Field(default="", max_length=100000)
     eof: bool = False
+    rows: int | None = Field(default=None, ge=2, le=300)
+    cols: int | None = Field(default=None, ge=10, le=500)
 
 
 class CommandInput(WorkerId, CommandText):
@@ -102,7 +108,7 @@ SCHEMAS = {
 }
 DESCRIPTIONS = {
     "agent_start": "Start an independent Code agent in a private Git worktree snapshot of current project files (uncommitted files included). role=implement may edit its copy; explore/review inspect it. Returns worker_id immediately. At most 3 active workers per chat. No recursive delegation. Use worker_wait/output, then worker_apply to import reviewed changes. Attached workers are awaited before the lead finishes and stopped if it is cancelled; detached=true explicitly allows work to outlive the lead.",
-    "command_start": "Start a background sandbox command in a private worktree with durable output. Returns worker_id immediately. Created/edited/deleted files are collected into the worker copy; use worker_apply to import them into the main project with diffs/rollback. shell is bash or powershell when installed; cwd is project-relative. interactive=true keeps stdin open for REPLs (python -u -i, node -i, bash); interactive workers are detached so the chat stays responsive. Use command_input, worker_output/wait/stop.",
+    "command_start": "Start a background sandbox command in a private worktree with durable output. Returns worker_id immediately. Created/edited/deleted files are collected into the worker copy; use worker_apply to import them into the main project with diffs/rollback. shell is bash or powershell when installed; cwd is project-relative. tty=true allocates a real PTY; rows/cols set its size. interactive=true keeps stdin open for REPLs (python -u -i, node -i, bash); interactive workers are detached so the chat stays responsive. Use command_input, worker_output/wait/stop.",
     "command_input": "Send exact text to a running interactive command's stdin. Include newline to submit a REPL expression; eof=true closes stdin. The same process retains variables/current directory. Only this chat's command workers are accessible. Never claims success if stdin is closed or the process restarted.",
     "worker_command_changes": "Inspect/retry/discard a finished command worker's retained sandbox packet after an interrupted import or export limit. action=apply collects eligible results into that worker's private copy, not the main project; worker_apply imports them into the main project separately. discard requires the current change_id from list.",
     "worker_list": "List this Code chat's workers, progress, reports, changed files and whether their changes were applied. Other chats/users/projects are inaccessible.",
@@ -252,7 +258,7 @@ class Manager:
                             if member_name == "lead" or await session.scalar(select(CodeWorker.id).where(
                                     CodeWorker.team_id == team.id, CodeWorker.member_name == member_name)):
                                 raise ValueError("Имя участника уже занято в этой команде")
-                        elif payload.get("name"):
+                        elif payload.get("name") or payload.get("require_plan"):
                             raise ValueError("Сначала создайте команду через team_create")
                     worker_id, job_id = existing or str(uuid4()), str(uuid4())
                     job = Job(id=job_id, owner_id=self.owner_id, domain="code", kind="code.worker",
@@ -270,9 +276,9 @@ class Manager:
                             raise ValueError("Этот воркер уже работает или завершён")
                         changed = await session.execute(update(CodeWorker).where(
                             CodeWorker.id == existing, CodeWorker.status == row.status,
-                        ).values(slot=slot, status="queued", job_id=job_id, error=None, applied={},
+                        ).values(slot=slot, status="queued", job_id=job_id, error=None, applied={}, role=role,
                                  payload={**row.payload, **payload},
-                                 summary={**row.summary, "status": "queued", "error": None, "applied": {}}))
+                                 summary={**row.summary, "role": role, "status": "queued", "error": None, "applied": {}}))
                         if changed.rowcount != 1:
                             raise ValueError("Воркер уже запущен параллельным запросом")
                         await session.refresh(row)
@@ -305,13 +311,13 @@ class Manager:
         self._allow_implement(args.role)
         if not self.provider_id or not self.model:
             raise ValueError("Для воркера нужен провайдер и модель Code-чата")
-        row = await self._reserve("agent", args.task, args.role, {
+        row = await self._reserve("agent", args.task, "explore" if args.require_plan else args.role, {
             "provider_id": self.provider_id, "model": self.model, "caps": self.caps, "name": args.name,
             "permissions": self.permissions, "detached": args.detached, "mode": self.mode,
             "tool_allowlist": sorted(set(tool_allowlist) & set(self.tool_allowlist))
             if tool_allowlist is not None and self.tool_allowlist is not None
             else tool_allowlist if tool_allowlist is not None else self.tool_allowlist,
-            "skill_hooks": skill_hooks or [],
+            "skill_hooks": skill_hooks or [], "require_plan": args.require_plan, "requested_role": args.role,
         })
         return {"worker": public(row)}
 
@@ -333,6 +339,8 @@ class Manager:
             row = await self.owned(session, args.worker_id)
             if row.kind != "command" or row.status not in ACTIVE or not row.payload.get("interactive"):
                 raise ValueError("Это не работающий интерактивный command-воркер")
+        if args.rows is not None or args.cols is not None:
+            await sandbox.shell_request(self.owner_id, args.worker_id, "POST", "resize", {"rows": args.rows or 24, "cols": args.cols or 80})
         return await sandbox.shell_request(self.owner_id, args.worker_id, "POST", "input",
                                            {"text": args.text, "eof": args.eof})
 
@@ -425,6 +433,19 @@ class Manager:
             if row.kind == "command" and (self.mode == "plan" or not code_runner.can_run(self.permissions)):
                 raise ValueError("Нет права на запуск команды")
             kind, role, task = row.kind, row.role, row.task
+            if payload.get("require_plan"):
+                from app.models.code_team import CodeTeamRequest
+                decision = await session.get(CodeTeamRequest, payload.get("plan_request_id")) if payload.get("plan_request_id") else None
+                if decision and decision.status == "approved" and decision.team_id == row.team_id and decision.sender == row.member_name:
+                    role = payload.get("requested_role", "implement")
+                    self._allow_implement(role)
+                    payload["require_plan"] = False
+            if row.team_id:
+                from app.models.code_team import CodeTeamRequest
+                if await session.scalar(select(CodeTeamRequest.id).where(CodeTeamRequest.team_id == row.team_id,
+                    CodeTeamRequest.recipient == row.member_name, CodeTeamRequest.kind == "shutdown",
+                    CodeTeamRequest.status == "approved").limit(1)):
+                    raise ValueError("Участник согласовал завершение; создайте нового участника")
         row = await self._reserve(kind, task, role, payload, existing=worker_id, allow_done=allow_done)
         return {"worker": public(row)}
 
@@ -585,7 +606,8 @@ class Manager:
                 async for item in runner.command(code_runner.RunCommand(
                     command=task, timeout=payload["timeout"], stdin=payload.get("stdin"),
                     shell=payload.get("shell", "bash"), cwd=payload.get("cwd", "."),
-                    interactive=payload.get("interactive", False),
+                    interactive=payload.get("interactive", False), tty=payload.get("tty", False),
+                    rows=payload.get("rows", 24), cols=payload.get("cols", 80),
                 )):
                     if "output" in item:
                         output = item["output"][-OUTPUT_LIMIT:]
@@ -619,6 +641,8 @@ class Manager:
                     "Do not ask the user to continue; finish your assignment and return a concise verified report. "
                     "Role: " + role + ".\n" + project_agent.project_rules(worktree)
                 )
+                if payload.get("require_plan"):
+                    context += "\nPLAN FIRST: inspect only, then submit your concrete plan with team_request(kind='plan', to='lead', content=...). Finish this turn after submission. The lead must approve and resume you before implementation."
                 team = code_teams.Runtime(self, worker_id) if row.team_id else None
                 transcript = code_sessions.Transcript(self, worker_id, team)
                 messages = await transcript.load(task)

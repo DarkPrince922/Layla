@@ -65,7 +65,8 @@ function suggestions(files: FileNode[]): string[] {
   return out;
 }
 
-export function ProjectTerminal({ projectId, request, onFileChange }: { projectId: string; request: RunRequest | null; onFileChange?: (change: FileChange) => void }) {
+type ShellWorker = { id: string; status: string; error?: string | null; interactive?: boolean; task: string };
+export function ProjectTerminal({ projectId, chatId, request, onFileChange }: { projectId: string; chatId: string | null; request: RunRequest | null; onFileChange?: (change: FileChange) => void }) {
   const qc = useQueryClient();
   const status = useQuery({ queryKey: ["sandbox-status"], queryFn: () => api.get<SandboxStatus>("/sandbox/status"), staleTime: 30_000 });
   const root = useQuery({
@@ -80,6 +81,17 @@ export function ProjectTerminal({ projectId, request, onFileChange }: { projectI
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [past, setPast] = useState<string[]>([]);
+  const [workerId, setWorkerId] = useState<string | null>(null);
+  const [workerInput, setWorkerInput] = useState("");
+  const [workerBusy, setWorkerBusy] = useState(false);
+  const storageKey = chatId ? `layla:pty:${chatId}:${projectId}` : null;
+  const worker = useQuery({
+    queryKey: ["code-terminal-worker", chatId, projectId, workerId],
+    queryFn: () => api.get<{ worker: ShellWorker; output: string; truncated: boolean }>(`/chats/${chatId}/workers/${workerId}?limit=40000`),
+    enabled: !!chatId && !!workerId,
+    refetchInterval: workerId ? 1500 : false,
+    retry: false,
+  });
   const cursor = useRef(-1);
   const abort = useRef<AbortController | null>(null);
   const handled = useRef(0);
@@ -89,7 +101,45 @@ export function ProjectTerminal({ projectId, request, onFileChange }: { projectI
   const runtimes = status.data?.piston.runtimes || [];
 
   useEffect(() => () => abort.current?.abort(), []);
+  useEffect(() => {
+    setWorkerId(storageKey ? sessionStorage.getItem(storageKey) : null);
+  }, [storageKey]);
   useEffect(() => { list.current?.scrollTo({ top: list.current.scrollHeight }); }, [entries.length]);
+
+  async function startPty() {
+    if (!chatId || !storageKey || workerBusy || !input.trim()) return;
+    setWorkerBusy(true); setError(null);
+    try {
+      const response = await api.post<{ worker: ShellWorker }>(`/chats/${chatId}/workers/command`, {
+        command: input.trim(), timeout, shell, cwd, detached: true, interactive: true, tty: true,
+        rows: 24, cols: 80,
+      });
+      sessionStorage.setItem(storageKey, response.worker.id);
+      setWorkerId(response.worker.id); setInput("");
+      await qc.invalidateQueries({ queryKey: ["code-state"] });
+    } catch (e) { setError(e instanceof Error ? e.message : "PTY не запущен"); }
+    finally { setWorkerBusy(false); }
+  }
+
+  async function sendToPty(eof = false) {
+    if (!chatId || !workerId || workerBusy) return;
+    setWorkerBusy(true); setError(null);
+    try {
+      await api.post(`/chats/${chatId}/workers/${workerId}/input`, { text: eof ? "" : workerInput + "\n", eof, rows: 24, cols: 80 });
+      setWorkerInput(""); await worker.refetch();
+    } catch (e) { setError(e instanceof Error ? e.message : "PTY не принял ввод"); }
+    finally { setWorkerBusy(false); }
+  }
+
+  async function stopPty() {
+    if (!chatId || !workerId || workerBusy) return;
+    setWorkerBusy(true); setError(null);
+    try {
+      await api.post(`/chats/${chatId}/workers/${workerId}/stop`, {});
+      await worker.refetch();
+    } catch (e) { setError(e instanceof Error ? e.message : "PTY не остановлен"); }
+    finally { setWorkerBusy(false); }
+  }
 
   function update(id: string, patch: Partial<Entry> | ((entry: Entry) => Partial<Entry>)) {
     setEntries(old => old.map(e => (e.id === id ? { ...e, ...(typeof patch === "function" ? patch(e) : patch) } : e)));
@@ -205,6 +255,22 @@ export function ProjectTerminal({ projectId, request, onFileChange }: { projectI
         <button onClick={() => setEntries([])} disabled={running || !entries.length} title="Очистить вывод" className="icon-button !h-7 !w-7"><Trash2 className="h-3.5 w-3.5" /></button>
       </div>
       <div ref={list} className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
+        {workerId && <div className="rounded-lg border border-accent-500/30 bg-ink-950/60 p-3 text-xs">
+          <div className="mb-2 flex items-center gap-2">
+            <span className="min-w-0 flex-1 truncate text-neutral-200">PTY · {worker.data?.worker.task || "подключение…"}</span>
+            <span className="text-neutral-400">{worker.data?.worker.status}</span>
+            {worker.data?.worker.status === "running" && <button onClick={() => void stopPty()} disabled={workerBusy} className="secondary-button !px-2 !py-1 text-red-300">Стоп</button>}
+            <button onClick={() => { sessionStorage.removeItem(storageKey || ""); setWorkerId(null); }} className="secondary-button !px-2 !py-1">Скрыть</button>
+          </div>
+          <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all font-mono text-neutral-300">{worker.data?.output || (worker.isPending ? "Ожидание вывода…" : "")}</pre>
+          {worker.data?.truncated && <p className="text-amber-200">Показаны первые 40 000 символов; полный вывод доступен в чате воркера.</p>}
+          {(worker.error || worker.data?.worker.error) && <p className="text-red-300">{worker.data?.worker.error || (worker.error instanceof Error ? worker.error.message : "")}</p>}
+          {worker.data?.worker.status === "running" && <div className="mt-2 flex gap-2">
+            <input aria-label="Ввод PTY" value={workerInput} onChange={e => setWorkerInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); void sendToPty(); } }} className="min-w-0 flex-1 rounded-md bg-ink-900 px-2 py-1 font-mono" placeholder="Ввод в процесс" />
+            <button onClick={() => void sendToPty()} disabled={workerBusy} className="secondary-button !px-2 !py-1">Ввод</button>
+            <button onClick={() => void sendToPty(true)} disabled={workerBusy} className="secondary-button !px-2 !py-1">EOF</button>
+          </div>}
+        </div>}
         {unavailable && <div className="rounded-xl border border-amber-400/30 bg-amber-500/5 p-4 text-xs leading-relaxed text-amber-100">
           Песочница не запущена. Она поднимается вместе с Layla (сервис <code>sandbox</code> в docker compose) — обновите установку по инструкции и перезапустите.
         </div>}
@@ -235,6 +301,7 @@ export function ProjectTerminal({ projectId, request, onFileChange }: { projectI
           {running && abort.current
             ? <button onClick={() => abort.current?.abort()} aria-label="Остановить команду" className="icon-button !h-7 !w-7 text-red-300"><Square className="h-3 w-3" /></button>
             : <button onClick={() => run(input)} disabled={!input.trim() || running || unavailable} aria-label="Выполнить" className="primary-button !h-7 !w-7 !p-0"><Play className="h-3.5 w-3.5" /></button>}
+          <button onClick={() => void startPty()} disabled={!chatId || !input.trim() || workerBusy || unavailable} title="Интерактивный PTY в фоне: остаётся в чате при переключении вкладок" className="secondary-button !h-7 !px-2">PTY ↗</button>
         </div>
       </div>
     </div>

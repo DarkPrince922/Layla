@@ -1,7 +1,7 @@
 "use client";
 
 import { useAuth } from "@/store/auth";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Download,
@@ -47,6 +47,11 @@ export function CodeDomain() {
   const owner = useAuth(s => s.user?.id);
   const projectKey = `layla:project:${owner}`;
   const [projectId, setProjectId] = useState<string | null>(null);
+  const [workspace, setWorkspace] = useState<{ chatId: string | null; id: string | null; name: string | null; loading: boolean }>({ chatId: null, id: null, name: null, loading: true });
+  const onWorkspace = useCallback((value: typeof workspace) => setWorkspace(old =>
+    old.chatId === value.chatId && old.id === value.id && old.name === value.name && old.loading === value.loading ? old : value), []);
+  const targetId = !workspace.loading && projectId && (!workspace.id || workspace.chatId)
+    ? projectId + (workspace.id ? `/chats/${workspace.chatId}/workspaces/${workspace.id}` : "") : null;
   const [pane, setPane] = useState<Pane>("chat");
   const [form, setForm] = useState<"local" | "import" | null>(null);
   const [name, setName] = useState("");
@@ -77,6 +82,20 @@ export function CodeDomain() {
     queryKey: ["projects"],
     queryFn: () => api.get<Project[]>("/projects"),
   });
+  const drafts = useRef(new Map<string, { file: OpenFile | null; draft: string; stale: boolean }>());
+  const editorTarget = useRef<string | null>(null);
+  const editorSnapshot = useRef({ file: openFile, draft, stale });
+  useEffect(() => { editorSnapshot.current = { file: openFile, draft, stale }; }, [openFile, draft, stale]);
+  useEffect(() => {
+    if (editorTarget.current === targetId) return;
+    if (editorTarget.current) drafts.current.set(editorTarget.current, editorSnapshot.current);
+    editorTarget.current = targetId;
+    const saved = targetId ? drafts.current.get(targetId) : undefined;
+    openSequence.current++;
+    setOpenFile(saved?.file || null); setDraft(saved?.draft || ""); setStale(!!saved?.file);
+    setChange(null); setLocation(null); setRunRequest(null); setPreviewOpened(false);
+    setError(null); setUploadNotice(null); setFilesChanged(0);
+  }, [targetId]);
   const project = projects.find((p) => p.id === projectId);
   useEffect(() => {
     if (!location || openFile?.path !== location.path || !editor.current) return;
@@ -134,6 +153,7 @@ export function CodeDomain() {
   function selectProject(id: string) {
     if (id === projectId || !canLeave()) return;
     openSequence.current++;
+    setWorkspace({ chatId: null, id: null, name: null, loading: true });
     setProjectId(id);
     setOpenFile(null);
     setLocation(null);
@@ -202,12 +222,12 @@ export function CodeDomain() {
     }
   }
   async function openPath(path: string, force = false) {
-    if (!projectId || (!force && !canLeave())) return false;
+    if (!targetId || (!force && !canLeave())) return false;
     const seq = ++openSequence.current;
     setError(null);
     try {
       const file = await api.get<FileContent>(
-        `/projects/${projectId}/file?path=${encodeURIComponent(path)}`,
+        `/projects/${targetId}/file?path=${encodeURIComponent(path)}`,
       );
       if (seq !== openSequence.current) return false;
       setOpenFile(file);
@@ -235,8 +255,8 @@ export function CodeDomain() {
     setPane("editor");
   }
   async function uploadFiles(selected: File[]) {
-    if (!projectId || !selected.length || !canLeave()) return;
-    const id = projectId;
+    if (!targetId || !selected.length || !canLeave()) return;
+    const id = targetId;
     setPending(true); setError(null); setUploadNotice(null);
     let uploaded = 0;
     try {
@@ -261,20 +281,22 @@ export function CodeDomain() {
     }
   }
   async function saveFile(remove = false) {
-    if (!projectId || !openFile || pending) return;
+    if (!targetId || !openFile || pending) return;
     if (remove && !(await confirmAction(`Удалить файл ${openFile.path}?`))) return;
+    const sequence = openSequence.current;
     setPending(true);
     setError(null);
     try {
       const result = remove
         ? await api.del<FileChange>(
-            `/projects/${projectId}/file?path=${encodeURIComponent(openFile.path)}&expected_sha256=${openFile.sha256}`,
+            `/projects/${targetId}/file?path=${encodeURIComponent(openFile.path)}&expected_sha256=${openFile.sha256}`,
           )
-        : await api.put<FileChange>(`/projects/${projectId}/file`, {
+        : await api.put<FileChange>(`/projects/${targetId}/file`, {
             path: openFile.path,
             content: draft,
             expected_sha256: openFile.sha256,
           });
+      if (sequence !== openSequence.current) return;
       setChange(result);
       setStale(false);
       setFilesChanged(n => n + 1);
@@ -287,7 +309,7 @@ export function CodeDomain() {
           content: draft,
           sha256: result.after_sha256,
         });
-      await qc.invalidateQueries({ queryKey: ["project-files", projectId] });
+      await qc.invalidateQueries({ queryKey: ["project-files", targetId] });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Не удалось сохранить файл");
     } finally {
@@ -296,18 +318,18 @@ export function CodeDomain() {
   }
   async function agentChanged(result: FileChange) {
     setFilesChanged(n => n + 1);
-    await qc.invalidateQueries({ queryKey: ["project-files", projectId] });
+    await qc.invalidateQueries({ queryKey: ["project-files", targetId] });
     if (openFile?.path === result.path) {
       // Preserve drafts; the hash guard prevents an old editor overwriting the agent.
       setStale(true);
     }
   }
   async function download() {
-    if (!project) return;
+    if (!project || !targetId) return;
     setDownloading(true);
     setError(null);
     try {
-      await downloadProject(project);
+      await downloadProject({ ...project, id: targetId || project.id });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Не удалось скачать ZIP");
     } finally {
@@ -319,8 +341,8 @@ export function CodeDomain() {
     <div className="code-workspace flex h-full min-w-0 flex-col">
       <header className="workspace-toolbar">
         <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-accent-500/10 text-accent-300"><Folder className="h-5 w-5" /></span>
-        <div className="workspace-title"><h1>{project?.name || "Ваше рабочее пространство"}</h1><p>{project ? project.repo_url ? "Код · Проект из Git" : "Код · Локальный проект" : "От идеи до готового проекта"}</p></div>
-        {project && <button className={button} onClick={download} disabled={downloading}><Download className="h-4 w-4" /><span>{downloading ? "Сборка…" : "ZIP"}</span></button>}
+        <div className="workspace-title"><h1>{project?.name || "Ваше рабочее пространство"}</h1><p>{workspace.id ? `Код · ${workspace.name} · рабочая копия` : project ? project.repo_url ? "Код · Проект из Git" : "Код · Локальный проект" : "От идеи до готового проекта"}</p></div>
+        {project && <button className={button} onClick={download} disabled={downloading || !targetId}><Download className="h-4 w-4" /><span>{downloading ? "Сборка…" : "ZIP"}</span></button>}
       </header>
       <div className="flex shrink-0 items-center justify-between gap-2 px-4 pb-3 md:px-7">
         <nav className="segmented-control" aria-label="Панели проекта">
@@ -333,6 +355,8 @@ export function CodeDomain() {
         </nav>
         <button onClick={() => { setForm("local"); setPane("projects"); }} aria-label="Новый проект" className="icon-button"><Plus className="h-5 w-5" /></button>
       </div>
+      {workspace.loading && <p className="px-5 py-2 text-xs text-neutral-400">Загружаю рабочую копию чата…</p>}
+      {workspace.id && pane === "preview" && <p className="px-5 py-2 text-xs text-neutral-400">Превью этой копии доступно через инструменты агента. Редактор, терминал и Git открыты в копии «{workspace.name}».</p>}
       {(error || projectsError) && (
         <div
           role="alert"
@@ -451,7 +475,7 @@ export function CodeDomain() {
               </div>
             ))}
           </div>
-          {projectId && (
+          {targetId && (
             <>
               <div className="flex items-center justify-between px-3 py-2">
                 <span className="text-[11px] text-neutral-500">Файлы проекта</span>
@@ -497,8 +521,8 @@ export function CodeDomain() {
               )}
               <div className="min-h-0 flex-1 overflow-auto">
                 <FileTree
-                  key={projectId}
-                  projectId={projectId}
+                  key={targetId}
+                  projectId={targetId}
                   onOpen={openPath}
                 />
               </div>
@@ -570,7 +594,7 @@ export function CodeDomain() {
                 disabled={pending}
                 className="min-h-48 flex-1 resize-none border-0 bg-transparent p-5 font-mono text-sm leading-7 text-neutral-200 focus-visible:outline-accent-400"
               />
-              {projectId && <CodeIntelligencePanel key={`${projectId}:${openFile.path}`} projectId={projectId} path={openFile.path}
+              {targetId && <CodeIntelligencePanel key={`${targetId}:${openFile.path}`} projectId={targetId} path={openFile.path}
                 content={draft} saved={openFile.sha256 !== null} position={cursor} onNavigate={async (path, line, character) => {
                   if (path === openFile.path || await openPath(path)) setLocation({ path, line, character });
                 }} />}
@@ -592,22 +616,22 @@ export function CodeDomain() {
             </div>
           )}
         </section>
-        {projectId && (
+        {targetId && (
           <section
             className={`code-pane code-terminal min-h-0 min-w-0 flex-1 flex-col ${pane === "terminal" ? "code-active" : ""}`}
           >
-            <ProjectTerminal key={projectId} projectId={projectId} request={runRequest} onFileChange={agentChanged} />
+            <ProjectTerminal key={targetId} projectId={targetId} chatId={workspace.chatId} request={runRequest} onFileChange={agentChanged} />
           </section>
         )}
-        {projectId && (pane === "preview" || previewOpened) && (
+        {targetId && !workspace.id && (pane === "preview" || previewOpened) && (
           <section className={`code-pane code-preview min-h-0 min-w-0 flex-1 flex-col ${pane === "preview" ? "code-active" : ""}`}>
-            <PreviewPanel key={projectId} projectId={projectId} changed={filesChanged}
+            <PreviewPanel key={targetId} projectId={targetId} changed={filesChanged}
               onPicked={() => { if (window.matchMedia?.("(max-width: 1099px)").matches) setPane("chat"); }} />
           </section>
         )}
-        {projectId && pane === "git" && (
+        {targetId && pane === "git" && (
           <section className="code-pane code-terminal code-active min-h-0 min-w-0 flex-1 flex-col">
-            <GitPanel key={projectId} projectId={projectId} onOpenFile={openPath} />
+            <GitPanel key={targetId} projectId={targetId} onOpenFile={openPath} />
           </section>
         )}
         <section
@@ -616,6 +640,7 @@ export function CodeDomain() {
           {projectId ? (
             <ChatPanel
               key={projectId}
+              onWorkspace={onWorkspace}
               domain="code"
               projectId={projectId}
               onFileChange={agentChanged}

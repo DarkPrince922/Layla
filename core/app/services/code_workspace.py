@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import UUID, uuid4
 
+import httpx
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -26,6 +27,7 @@ class Empty(BaseModel):
 
 
 class Enter(Empty):
+    base_ref: str | None = Field(default=None, max_length=200, pattern=r"^[A-Za-z0-9][A-Za-z0-9_./~^{}@+-]*$")
     name: str = Field(default="work", pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,59}$")
 
 
@@ -42,11 +44,19 @@ class Read(WorkspaceId):
     path: str = Field(min_length=1, max_length=4096)
 
 
+class PullRequest(WorkspaceId):
+    title: str = Field(min_length=1, max_length=250)
+    body: str = Field(default="", max_length=50000)
+    base: str | None = Field(default=None, max_length=200, pattern=r"^[A-Za-z0-9][A-Za-z0-9_./-]*$")
+    draft: bool = True
+
+
 SCHEMAS = {"enter_worktree": Enter, "exit_worktree": Exit, "resume_worktree": WorkspaceId,
            "worktree_list": Empty, "worktree_diff": WorkspaceId, "worktree_read": Read,
-           "worktree_publish": WorkspaceId}
+           "worktree_publish": WorkspaceId, "worktree_pr": PullRequest}
 DESCRIPTIONS = {
-    "enter_worktree": "Create a private Git worktree and switch this lead session into it. Copies current project files, including uncommitted edits; preserves source history when it exists. Main project files/index/branch stay in place. All following file/shell/Git/LSP/worker tools use this copy. One active worktree per chat; no nested entry. Running workers or pending command results must be resolved first.",
+    "worktree_pr": "Publish the committed private branch and create or return its GitHub pull request. Requires the configured source HTTPS github.com remote and owner token. base defaults to repository default branch. Draft by default; never merges automatically.",
+    "enter_worktree": "Create a private Git worktree and switch this lead session into it. Optional base_ref selects an existing commit/branch/tag without overlaying current files. Otherwise copies current project files, including uncommitted edits; preserves source history when it exists. Main project files/index/branch stay in place. All following file/shell/Git/LSP/worker tools use this copy. One active worktree per chat; no nested entry. Running workers or pending command results must be resolved first.",
     "exit_worktree": "Return the lead to the original project. action=keep retains the copy/branch for resume, read/diff or publication. action=remove deletes only this chat's managed copy; dirty files or commits beyond its initial HEAD require discard_changes=true. Never publishes or imports files implicitly.",
     "resume_worktree": "Switch back to one of this chat's retained worktrees with its existing files and Git branch. Does not replace missing files with a new snapshot. Resolve active workers/command results first.",
     "worktree_list": "List this Code chat's active and retained lead worktrees, generated branches and availability. A different chat/account/project cannot access them.",
@@ -71,7 +81,7 @@ def public(row):
     return {"id": row.id, "name": row.name, "branch": row.branch, "status": row.status,
             "active": row.active_slot == 1, "available": row.status != "removed" and worktree.is_dir(),
             "path": str(worktree), "published": row.payload.get("published", False),
-            "error": row.payload.get("error"), "storage": str(location)}
+            "error": row.payload.get("error"), "pull_request": row.payload.get("pull_request"), "storage": str(location)}
 
 
 def _copy_snapshot(root, worktree):
@@ -90,7 +100,7 @@ def _copy_snapshot(root, worktree):
             os.chmod(files.safe_join(worktree, item.filename), item.external_attr >> 16 & 0o777)
 
 
-async def create_files(row):
+async def create_files(row, base_ref=None):
     location, repository, worktree = paths(row.source_root, row.project_id, row.id)
     location.mkdir(mode=0o700, parents=True, exist_ok=False)
     try:
@@ -101,9 +111,15 @@ async def create_files(row):
                               row.source_root, str(repository), config={"protocol.file.allow": "always"})
             await gitops._git(str(repository), "remote", "remove", "origin")
             # HEAD is preserved; source hooks/config/credentials are never copied.
-            await gitops._git(str(repository), "worktree", "add", "-b", row.branch, str(worktree), "HEAD")
-            await run_in_threadpool(_copy_snapshot, row.source_root, worktree)
+            revision = "HEAD"
+            if base_ref:
+                revision = (await gitops._git(str(repository), "rev-parse", "--verify", "--end-of-options", base_ref + "^{commit}"))[1].strip()
+            await gitops._git(str(repository), "worktree", "add", "-b", row.branch, str(worktree), revision)
+            if not base_ref:
+                await run_in_threadpool(_copy_snapshot, row.source_root, worktree)
         else:
+            if base_ref:
+                raise ValueError("Для base_ref нужен Git-проект с историей")
             repository.mkdir(mode=0o700)
             await gitops._git(str(repository), "init", "-q", "-b", "snapshot")
             await run_in_threadpool(_copy_snapshot, row.source_root, repository)
@@ -115,7 +131,7 @@ async def create_files(row):
         if remote:
             await gitops.set_remote(str(worktree), gitops.validate_remote(remote))
         head = (await gitops._git(str(worktree), "rev-parse", "HEAD"))[1].strip()
-        return head, {"source_history": bool(has_history)}
+        return head, {"source_history": bool(has_history), "base_ref": base_ref}
     except BaseException:
         await run_in_threadpool(shutil.rmtree, location, True)
         raise
@@ -132,7 +148,7 @@ class Runtime:
             return []
         names = {"worktree_list", "worktree_diff", "worktree_read"}
         if self.mode not in ("plan", "review") and agent_git.can_use(self.permissions):
-            names |= TRANSITIONS | {"worktree_publish"}
+            names |= TRANSITIONS | {"worktree_publish", "worktree_pr"}
         return [tool for tool in TOOLS if tool["function"]["name"] in names]
 
     async def authorize(self, session):
@@ -208,7 +224,7 @@ class Runtime:
             session.add(row)
             await session.commit()
         try:
-            head, payload = await create_files(row)
+            head, payload = await create_files(row, args.base_ref)
             async with self.runtime.maker() as session:
                 row = await self.owned(session, workspace_id)
                 row.baseline, row.payload, row.status = head, payload, "active"
@@ -309,6 +325,44 @@ class Runtime:
                 await session.commit()
             return result
 
+    async def pull_request(self, args):
+        from urllib.parse import urlsplit
+
+        async with self.runtime.maker() as session:
+            row = await self.owned(session, args.workspace_id)
+            remote = (await gitops.status(self.root)).get("remote")
+            url = urlsplit(gitops.validate_remote(remote or ""))
+            parts = url.path.strip("/").removesuffix(".git").split("/")
+            if url.hostname != "github.com" or url.port not in (None, 443) or len(parts) != 2 or any(not part.replace("-", "").replace("_", "").replace(".", "").isalnum() for part in parts):
+                raise ValueError("Создание PR поддерживается для HTTPS-репозитория github.com")
+            if self.git is None:
+                raise ValueError("Git пользователя недоступен")
+            _username, token = await self.git.credential(remote)
+            if not token:
+                raise ValueError("Добавьте GitHub-токен для создания PR")
+            branch = row.branch
+        published = await self.publish(WorkspaceId(workspace_id=args.workspace_id))
+        if "error" in published:
+            return published
+        endpoint = "https://api.github.com/repos/" + "/".join(parts)
+        async with httpx.AsyncClient(timeout=30, follow_redirects=False, trust_env=False,
+                headers={"Authorization": "Bearer " + token, "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}) as client:
+            async def request(method, suffix="", **kwargs):
+                response = await client.request(method, endpoint + suffix, **kwargs)
+                if response.status_code >= 300:
+                    raise ValueError(f"GitHub отклонил запрос PR (HTTP {response.status_code}); опубликованная ветка сохранена")
+                return response.json()
+            base = args.base or (await request("GET"))["default_branch"]
+            existing = await request("GET", "/pulls", params={"state": "open", "head": parts[0] + ":" + branch, "base": base})
+            result = existing[0] if existing else await request("POST", "/pulls", json={"title": args.title,
+                "body": args.body, "head": branch, "base": base, "draft": args.draft})
+        public_result = {"url": result["html_url"], "number": result["number"], "branch": branch, "base": base, "draft": result.get("draft", False)}
+        async with self.runtime.maker() as session:
+            row = await self.owned(session, args.workspace_id)
+            row.payload = {**row.payload, "pull_request": public_result}
+            await session.commit()
+        return {"pull_request": public_result}
+
     async def call(self, name, arguments):
         try:
             if name not in {tool["function"]["name"] for tool in self.tools()}:
@@ -317,9 +371,11 @@ class Runtime:
             if name == "worktree_list":
                 return await self.list()
             method = {"enter_worktree": self.enter, "exit_worktree": self.exit, "resume_worktree": self.resume,
-                      "worktree_diff": self.diff, "worktree_read": self.read, "worktree_publish": self.publish}[name]
+                      "worktree_diff": self.diff, "worktree_read": self.read, "worktree_publish": self.publish, "worktree_pr": self.pull_request}[name]
             return await method(args)
         except (ValueError, OSError, gitops.GitError, sandbox.SandboxError) as exc:
             return {"error": str(exc)[:1500]}
+        except httpx.HTTPError:
+            return {"error": "GitHub недоступен; опубликованная ветка сохранена"}
         except IntegrityError:
             return {"error": "Рабочая копия уже переключена параллельным запросом"}

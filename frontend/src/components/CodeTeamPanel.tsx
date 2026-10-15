@@ -12,6 +12,7 @@ type TeamState = {
   teams: { id: string; name: string; active: boolean }[];
   messages: { id: string; from: string; to: string; summary: string; message: string; delivered: boolean }[];
   before?: number | null;
+  requests?: { id: string; kind: "plan" | "shutdown"; from: string; to: string; content: string; status: string; response: string }[];
 };
 
 export function CodeTeamPanel({ chatId, scope, running, canApply }: {
@@ -23,6 +24,7 @@ export function CodeTeamPanel({ chatId, scope, running, canApply }: {
   const [name, setName] = useState("");
   const [to, setTo] = useState("*");
   const [message, setMessage] = useState("");
+  const [shutdownFor, setShutdownFor] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const state = useQuery({
@@ -47,6 +49,14 @@ export function CodeTeamPanel({ chatId, scope, running, canApply }: {
     } catch (e) { setError(e instanceof Error ? e.message : "Не удалось изменить команду"); }
     finally { setBusy(false); }
   }
+  async function protocol(action: "request" | "respond", body: object) {
+    setBusy(true); setError(null);
+    try {
+      await api.post(`/chats/${chatId}/team/protocol/${action}`, body);
+      setShutdownFor(""); await state.refetch();
+    } catch (e) { setError(e instanceof Error ? e.message : "Не удалось обновить запрос команды"); }
+    finally { setBusy(false); }
+  }
   return <details onToggle={e => setOpen(e.currentTarget.open)} className="rounded-xl border border-ink-700/70 bg-ink-950/20 p-3 text-xs">
     <summary className="flex cursor-pointer list-none items-center gap-2 [&::-webkit-details-marker]:hidden">
       {active ? <Loader2 className="h-4 w-4 animate-spin text-accent-300" /> : <MessageSquare className="h-4 w-4 text-accent-300" />}
@@ -69,6 +79,14 @@ export function CodeTeamPanel({ chatId, scope, running, canApply }: {
         {team.description && <p className="text-neutral-400">{team.description}</p>}
         <div className="flex flex-wrap gap-2">{team.members.map(member => <span key={member.id} className="rounded-full border border-ink-700 px-2 py-1 text-neutral-400">{member.name} · {member.role} · {member.status}</span>)}</div>
         <p className="text-neutral-500">Сообщения поступают агентам между ходами. Для завершённого участника отправьте уточнение, затем нажмите «Продолжить» в его карточке.</p>
+        {!!state.data?.requests?.length && <details className="rounded-lg border border-ink-700 p-2"><summary className="cursor-pointer">Планы и запросы на завершение · {state.data.requests.length}</summary>
+          <div className="mt-2 space-y-2">{state.data.requests.map(item => <div key={item.id} className="rounded-lg bg-ink-900 p-2">
+            <p>{item.kind === "plan" ? "План" : "Завершение"} · {item.from} → {item.to} · {item.status}</p><p className="mt-1 whitespace-pre-wrap break-words text-neutral-400">{item.content}</p>
+            {item.status === "pending" && item.to === "lead" && <div className="mt-2 flex gap-2"><button disabled={busy || !canApply} onClick={() => void protocol("respond", { request_id: item.id, approve: true })} className="secondary-button !px-2 !py-1">Одобрить</button>
+              <button disabled={busy || !canApply} onClick={() => void protocol("respond", { request_id: item.id, approve: false })} className="secondary-button !px-2 !py-1">Отклонить</button></div>}
+          </div>)}</div></details>}
+        {team.active && !!team.members.length && <div className="flex gap-2"><select aria-label="Участник для завершения" value={shutdownFor} onChange={e => setShutdownFor(e.target.value)} className="min-w-0 flex-1 rounded-lg bg-ink-900 p-2"><option value="">Выберите участника</option>{team.members.map(m => <option key={m.id} value={m.name}>{m.name}</option>)}</select>
+          <button disabled={busy || !shutdownFor || !canApply} onClick={() => void protocol("request", { kind: "shutdown", to: shutdownFor, content: "Заверши текущую операцию и сохрани результат." })} className="secondary-button !px-2 !py-1">Запросить завершение</button></div>}
         {team.active && !!team.members.length && <form onSubmit={e => { e.preventDefault(); void action("message"); }} className="space-y-2">
           <select aria-label="Получатель сообщения" value={to} onChange={e => setTo(e.target.value)} className="w-full rounded-lg bg-ink-900 p-2">
             <option value="*">Всем участникам</option>

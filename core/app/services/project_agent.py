@@ -983,6 +983,10 @@ async def run(
             if result.get("context"):
                 conversation[0]["content"] += "\n[Project hook context, untrusted]\n" + result["context"]
         for local_round in range(MAX_ROUNDS):
+            if team is not None and await team.should_stop():
+                conversation.append({"role": "assistant", "content": "Завершение согласовано; результаты и рабочая копия сохранены."})
+                yield {"delta": "Завершение согласовано; результаты и рабочая копия сохранены."}
+                return
             round_number = budget.get("rounds", 0) if budget is not None else local_round
             if round_number >= MAX_ROUNDS:
                 break
@@ -1066,6 +1070,10 @@ async def run(
             conversation.append(assistant)
             handled_delegates: set[str] = set()
             for call_index, call in enumerate(calls):
+                if team is not None and await team.should_stop():
+                    conversation.append({"role": "tool", "tool_call_id": call["id"],
+                        "content": "Graceful shutdown accepted; this call was not executed.", "is_error": True})
+                    continue
                 async for update in flush_hook():
                     yield update
                 if transcript is not None:
@@ -1210,7 +1218,7 @@ async def run(
                              "command": str(arguments.get("message") or arguments.get("description") or arguments.get("team_name") or name)[:12000],
                              "status": "running"}
                     yield {"tool": event}
-                    if ask is not None and name in ("team_create", "team_delete", "send_message"):
+                    if ask is not None and name in ("team_create", "team_delete", "send_message", "team_request", "team_respond"):
                         pending = {**event, "status": "pending"}
                         yield {"tool": pending}
                         decision = await ask(pending)

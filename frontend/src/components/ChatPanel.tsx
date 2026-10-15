@@ -46,9 +46,10 @@ const newRequestId = (): string => {
   return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 14)}`;
 };
 
-export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProject }: {
+export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProject, onWorkspace }: {
   domain: string; projectId?: string; onFileChange?: (change: FileChange) => void; onOpenFile?: (path: string) => void;
   onProject?: (projectId: string | null) => void;
+  onWorkspace?: (value: { chatId: string | null; id: string | null; name: string | null; loading: boolean }) => void;
 }) {
   const owner = useAuth(s => s.user?.id);
   const qc = useQueryClient();
@@ -93,6 +94,15 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
   const job = detail.data?.last_job;
   const running = active(job);
   // Пока история чата грузится, неизвестно, занят ли он: отправка подождёт.
+  const workspaceState = useQuery({ queryKey: ["code-workspaces", scope, chatId],
+    enabled: domain === "code" && !!chatId,
+    queryFn: () => api.get<{ workspaces: { id: string; name: string; active: boolean }[] }>(`/chats/${chatId}/workspaces`),
+    refetchInterval: running ? 1000 : false, refetchIntervalInBackground: true, retry: false });
+  const selectedWorkspace = workspaceState.data?.workspaces.find(item => item.active);
+  useEffect(() => {
+    if (domain === "code") onWorkspace?.({ chatId, id: selectedWorkspace?.id || null,
+      name: selectedWorkspace?.name || null, loading: !ready || (!!chatId && !workspaceState.isSuccess) });
+  }, [domain, chatId, ready, selectedWorkspace?.id, selectedWorkspace?.name, workspaceState.isSuccess, onWorkspace]);
   const loading = !!chatId && detail.isPending;
   const approval = (running ? job?.result?.approval : null) as { id: string } | null | undefined;
   const messages = useMemo(() => detail.data?.messages || [], [detail.data?.messages]);
@@ -172,7 +182,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
     for (const message of messages) for (const tool of message.meta?.tools || []) {
       const key = `${message.id}:${tool.id}`;
       // Превью на подтверждение — ещё не изменение: сообщаем только о применённых.
-      if (tool.change && tool.status === "done" && !applied.current.has(key)) { applied.current.add(key); if (!tool.workspace_id) onFileChange?.(tool.change); }
+      if (tool.change && tool.status === "done" && !applied.current.has(key)) { applied.current.add(key); if ((tool.workspace_id || null) === (selectedWorkspace?.id || null)) onFileChange?.(tool.change); }
       // Агент запустил или остановил превью — панель «Превью» узнаёт сразу, без ожидания опроса.
       if ((tool.name === "start_preview" || tool.name === "stop_preview") && tool.status !== "running" && tool.status !== "pending" && !tool.workspace_id && !applied.current.has(key)) {
         applied.current.add(key);
@@ -400,7 +410,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
         {m.meta?.reasoning && <details className="mb-3 rounded-lg border border-ink-700 p-3"><summary className="cursor-pointer text-xs text-neutral-400">Размышление</summary><p className="mt-3 whitespace-pre-wrap break-words text-xs leading-relaxed text-neutral-400">{m.meta.reasoning}</p></details>}
         {!!m.meta?.todos?.length && <Todos items={m.meta.todos} />}
         <>{m.role === "assistant" ? <MarkdownResponse content={m.content} /> : <div className="whitespace-pre-wrap break-words text-sm leading-7">{m.content}</div>}</>
-        {m.meta?.tools?.map(tool => <div key={tool.id} className="mt-3">{tool.status === "pending" ? <Approval tool={tool} active={approval?.id === tool.id} busy={deciding} onDecide={decide} /> : tool.status === "rejected" ? <p className="rounded-lg border border-ink-700 p-3 text-xs text-neutral-400">Отклонено вами · <span className="break-all font-mono">{tool.command || tool.path}</span></p> : tool.name === "delegate_agent" ? <AgentCard tool={tool} /> : RUN_TOOLS.has(tool.name) || GIT_TOOLS.has(tool.name) || tool.name === "project_hook" ? <RunCard tool={tool} /> : tool.change && tool.status === "done" ? <FileDiff change={tool.change} onOpen={tool.workspace_id ? undefined : onOpenFile} /> : <div className={`rounded-lg border p-3 text-xs ${tool.status === "error" ? "border-red-500/30 text-red-300" : "border-ink-700 text-neutral-400"}`}><span>{tool.status === "running" ? "Выполняется" : tool.status === "done" ? "Готово" : "Ошибка"} · {tool.name}</span>{(tool.command || tool.path) && <p className="mt-1 break-all font-mono">{tool.command || tool.path}</p>}{tool.note && <p className="mt-1 text-neutral-500">{tool.note}</p>}{tool.error && <p>{tool.error}</p>}</div>}</div>)}
+        {m.meta?.tools?.map(tool => <div key={tool.id} className="mt-3">{tool.status === "pending" ? <Approval tool={tool} active={approval?.id === tool.id} busy={deciding} onDecide={decide} /> : tool.status === "rejected" ? <p className="rounded-lg border border-ink-700 p-3 text-xs text-neutral-400">Отклонено вами · <span className="break-all font-mono">{tool.command || tool.path}</span></p> : tool.name === "delegate_agent" ? <AgentCard tool={tool} /> : RUN_TOOLS.has(tool.name) || GIT_TOOLS.has(tool.name) || tool.name === "project_hook" ? <RunCard tool={tool} /> : tool.change && tool.status === "done" ? <FileDiff change={tool.change} onOpen={(tool.workspace_id || null) === (selectedWorkspace?.id || null) ? onOpenFile : undefined} /> : <div className={`rounded-lg border p-3 text-xs ${tool.status === "error" ? "border-red-500/30 text-red-300" : "border-ink-700 text-neutral-400"}`}><span>{tool.status === "running" ? "Выполняется" : tool.status === "done" ? "Готово" : "Ошибка"} · {tool.name}</span>{(tool.command || tool.path) && <p className="mt-1 break-all font-mono">{tool.command || tool.path}</p>}{tool.note && <p className="mt-1 text-neutral-500">{tool.note}</p>}{tool.error && <p>{tool.error}</p>}</div>}</div>)}
         {m.meta?.error && <p role="alert" className="mt-3 text-sm text-red-300">{m.meta.error}</p>}
       </article>)}
     </div>

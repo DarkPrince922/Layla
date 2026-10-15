@@ -38,3 +38,14 @@ class CodeTranscript(UUIDPk, Timestamps, Base):
     worker_id: Mapped[str] = mapped_column(ForeignKey("code_workers.id", ondelete="CASCADE"), index=True)
     sequence: Mapped[int] = mapped_column(Integer)
     message: Mapped[dict] = mapped_column(JSONList)
+
+
+class CodeTeamRequest(UUIDPk, Timestamps, Base):
+    __tablename__ = "code_team_requests"
+    team_id: Mapped[str] = mapped_column(ForeignKey("code_teams.id", ondelete="CASCADE"), index=True)
+    sender: Mapped[str] = mapped_column(String(80))
+    recipient: Mapped[str] = mapped_column(String(80))
+    kind: Mapped[str] = mapped_column(String(20))
+    content: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    response: Mapped[str] = mapped_column(Text, default="")
