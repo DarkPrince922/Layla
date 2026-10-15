@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 TOOL_PARITY = {
-    "AgentTool": ("partial", "agent_start, worker_list/output/wait/resume/apply/discard", "Up to 3 concurrent implement/explore/review agents in private snapshot worktrees, durable output, progress, resume and explicit detach. Lead collects attached results before finishing. Missing teams, messaging and full archive transcript/session replay."),
+    "AgentTool": ("partial", "agent_start, worker_list/output/wait/resume/apply/discard", "Up to 3 concurrent implement/explore/review agents in private snapshot worktrees, durable output, progress, resume and explicit detach. Named durable teams, direct/broadcast mail and append-only worker protocol history with resume are implemented. Lead collects attached results and receives peer mail while waiting. Missing full lead/archive session replay and structured approval/shutdown protocols."),
     "AskUserQuestionTool": ("equivalent", "ask_user", "1-4 structured questions, single/multiple choice and free text; durable answers and same-worker continuation. Code UI can resume after interruption."),
     "BashTool": ("partial", "run_command, command_start, command_input, command_changes, worker_command_changes", "Foreground/background commands, project-relative cwd, persistent stdin for interactive processes, live output, timeout/stop, binary/text/mode file imports with diffs, CAS conflicts, durable pending results and rollback. Missing PTY, automatic in-place foreground promotion, full shell snapshot/profile and archive-specific permission semantics."),
     "BriefTool": ("missing", "", "Need agent-controlled concise output mode."),
@@ -39,7 +39,7 @@ TOOL_PARITY = {
     "ReadMcpResourceTool": ("partial", "mcp_read_resource", "Text resource reads with bounded output; binary resources are described without content."),
     "RemoteTriggerTool": ("missing", "", "Need remote trigger subscriptions, dispatch and lifecycle."),
     "ScheduleCronTool": ("missing", "", "Need durable scheduled jobs and scheduler UI."),
-    "SendMessageTool": ("missing", "", "Need agent inboxes and direct/broadcast team messages."),
+    "SendMessageTool": ("partial", "send_message, team_info", "Durable named direct/broadcast mail, automatic between-turn delivery, transactional worker transcript acknowledgement, bounded mailboxes and archived UI. Missing structured shutdown/plan approval and cross-session UDS/bridge peers."),
     "SkillTool": ("partial", "list_skills, read_skill, invoke_skill, /name", "Bounded project YAML metadata, literal positional/named arguments, user/model invocation flags, narrowing tool scopes, run-scoped hooks and context=fork through isolated workers. Missing model overrides, dynamic shell substitution, plugin/bundled/remote skills and full archive permission-grant semantics."),
     "SleepTool": ("missing", "", "No deferred wake/sleep agent tool."),
     "SyntheticOutputTool": ("missing", "", "No compatible synthetic output transport."),
@@ -49,8 +49,8 @@ TOOL_PARITY = {
     "TaskOutputTool": ("equivalent", "worker_output, worker_wait", "Independently addressed agent/command output, character pagination, bounded diffs, persistent reports and wait/poll operations; scoped to owner/chat/project."),
     "TaskStopTool": ("equivalent", "worker_stop", "Independently stop one agent or background sandbox command while retaining output and completed edits. Parent cancellation stops attached workers; explicit detached workers continue."),
     "TaskUpdateTool": ("equivalent", "task_update", "Durable status, owner, result, metadata merge/delete and dependencies with cycle checks; accepts taskId, activeForm, addBlocks and addBlockedBy."),
-    "TeamCreateTool": ("missing", "", "Need durable teams, members and role assignment."),
-    "TeamDeleteTool": ("missing", "", "Need coordinated shutdown and team cleanup."),
+    "TeamCreateTool": ("partial", "team_create, agent_start name", "One durable active team per Code chat, named implement/explore/review members, database uniqueness and three shared active slots. Missing archive backend/team configuration compatibility."),
+    "TeamDeleteTool": ("partial", "team_delete", "Refuse cleanup while members run, serialize close/member reservation, retain mail/reports/transcripts/worktrees in archive and cascade on chat deletion. Structured graceful shutdown responses remain."),
     "TodoWriteTool": ("equivalent", "update_todos", "Checklist with progress and persisted message metadata."),
     "ToolSearchTool": ("partial", "mcp_search_tools", "Deferred MCP discovery; no unified deferred registry for every built-in/plugin tool."),
     "WebFetchTool": ("partial", "web_fetch", "Public HTTPS text/HTML/JSON/XML with SSRF protections; no authenticated browser or PDF extraction."),
@@ -59,11 +59,11 @@ TOOL_PARITY = {
 
 SUBSYSTEMS = [
     ("agent_loop", "partial", ["QueryEngine.ts", "query.ts", "query/"], "Provider tool loop/retries exist; not every archive stop condition and continuation path is matched."),
-    ("session_history", "partial", ["history.ts", "utils/conversationRecovery.ts", "utils/crossProjectResume.ts"], "Durable chats and interrupted-turn notes; no full archive transcript replay/resume/fork compatibility."),
+    ("session_history", "partial", ["history.ts", "utils/conversationRecovery.ts", "utils/crossProjectResume.ts"], "Durable chats and append-only worker messages/tool results, independent of compaction; resume repairs unknown tool outcomes and preserves worktrees. Full lead transcript, archive replay/import/fork and attribution recovery remain."),
     ("context_compaction", "partial", ["services/compact/", "context/", "context.ts"], "History summaries and tool-result shrinking; no archive compaction/overflow policy equivalence."),
     ("file_checkpoints", "partial", ["utils/fileHistory.ts"], "File checkpoints/rollback exist; no full history snapshot and rewind policy equivalence."),
     ("memory", "partial", ["memdir/", "services/SessionMemory/", "services/extractMemories/", "services/autoDream/"], "Project LAYLA.md and durable Code-chat notes; missing extraction, consolidation, team memory and dream loop."),
-    ("agent_orchestration", "partial", ["coordinator/", "tasks/", "Task.ts", "utils/teammateMailbox.ts", "utils/tasks.ts"], "Durable task graph and 3 independent implement/explore/review workers with progress, stop/resume, detach and reviewed imports. Missing teams, messaging and full session replay."),
+    ("agent_orchestration", "partial", ["coordinator/", "tasks/", "Task.ts", "utils/teammateMailbox.ts", "utils/tasks.ts"], "Durable task graph and 3 independent implement/explore/review workers with progress, stop/resume, detach and reviewed imports. Named teams, direct/broadcast durable mail and worker transcript resume are implemented. Missing structured approval/shutdown, cross-session peers and full lead/archive session replay."),
     ("hooks", "partial", ["utils/hooks.ts", "utils/hooks/", "query/stopHooks.ts"], "Code-only sandbox command hooks: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse/Failure, Stop and SessionEnd. Snapshot config, once, matchers, disableAllHooks, deny/update/context, confirmation, stop retry limits and audit. Missing prompt/agent/http/async hooks, remaining events, full regex matching and session persistence."),
     ("plugins", "missing", ["plugins/", "services/plugins/"], "Need plugin manifest/install/update/enable lifecycle and skill/tool/hook registration."),
     ("lsp", "partial", ["services/lsp/"], "Per-owner/project/worker sandbox servers with bounded JSON-RPC, push/pull diagnostics, changes/deletions, limits, idle reaping and crash recovery. Editor supports draft analysis and source navigation. Plugin configuration, arbitrary language packs and automatic cross-turn diagnostic delivery remain."),

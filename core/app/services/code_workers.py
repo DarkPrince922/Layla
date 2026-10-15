@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import load_only
 from starlette.concurrency import run_in_threadpool
 
+from app.models.code_team import CodeTeam
 from app.models.code_worker import CodeWorker
 from app.models.job import Job
 from app.models.provider import Provider
@@ -23,7 +24,9 @@ from app.services import (
     code_hooks,
     code_lsp,
     code_runner,
+    code_sessions,
     code_shell,
+    code_teams,
     code_worktrees,
     jobs,
     provider_client,
@@ -42,6 +45,7 @@ class AgentStart(NoArgs):
     task: str = Field(min_length=10, max_length=12000)
     role: Literal["implement", "explore", "review"] = "implement"
     detached: bool = False
+    name: str | None = Field(default=None, pattern=code_teams.NAME)
 
 
 class CommandStart(NoArgs):
@@ -119,6 +123,7 @@ def public(row: CodeWorker, *, detail=False) -> dict:
         return {**row.summary, "id": row.id, "job_id": row.job_id, "status": row.status, "error": row.error}
     data = {"id": row.id, "job_id": row.job_id, "kind": row.kind, "role": row.role,
             "task": row.task, "status": row.status, "report": row.report, "error": row.error,
+            "team_id": row.team_id, "member_name": row.member_name,
             "changes": [code_worktrees.public_change(change) for change in row.changes],
             "applied": row.applied, "events": [
                 {key: value for key, value in event.items() if key not in ("output", "command")}
@@ -161,6 +166,7 @@ class Manager:
         self.caps = dict(caps or {})
         self.attached: set[str] = set()
         self.tool_allowlist = None
+        self.team = code_teams.Runtime(self)
 
     async def authorize(self, session):
         await self.runtime._authorize(session)
@@ -213,12 +219,24 @@ class Manager:
             await session.commit()
             return [public(row) for row in rows]
 
-    async def _reserve(self, kind: str, task: str, role: str, payload: dict, existing=None) -> CodeWorker:
+    async def _reserve(self, kind: str, task: str, role: str, payload: dict, existing=None, *, allow_done=False) -> CodeWorker:
         await self.list()  # release slots held by terminal/interrupted jobs
         for slot in range(3):
             try:
                 async with self.maker() as session:
                     await self.authorize(session)
+                    team_id, member_name = None, None
+                    if kind == "agent" and not existing:
+                        team = await session.scalar(select(CodeTeam).where(
+                            CodeTeam.chat_id == self.chat_id, CodeTeam.active_slot == 1).with_for_update())
+                        if team:
+                            team_id = team.id
+                            member_name = payload.get("name") or "agent-" + uuid4().hex[:10]
+                            if member_name == "lead" or await session.scalar(select(CodeWorker.id).where(
+                                    CodeWorker.team_id == team.id, CodeWorker.member_name == member_name)):
+                                raise ValueError("Имя участника уже занято в этой команде")
+                        elif payload.get("name"):
+                            raise ValueError("Сначала создайте команду через team_create")
                     worker_id, job_id = existing or str(uuid4()), str(uuid4())
                     job = Job(id=job_id, owner_id=self.owner_id, domain="code", kind="code.worker",
                               title=("Агент: " if kind == "agent" else "Команда: ") + task[:230],
@@ -227,7 +245,11 @@ class Manager:
                     await session.flush()
                     if existing:
                         row = await self.owned(session, existing)
-                        if row.status in ACTIVE or row.status == "done":
+                        if row.team_id:
+                            current_team = await session.scalar(select(CodeTeam).where(CodeTeam.id == row.team_id).with_for_update())
+                            if current_team is None or current_team.active_slot != 1:
+                                raise ValueError("Команда уже закрыта")
+                        if row.status in ACTIVE or row.status == "done" and not allow_done:
                             raise ValueError("Этот воркер уже работает или завершён")
                         changed = await session.execute(update(CodeWorker).where(
                             CodeWorker.id == existing, CodeWorker.status == row.status,
@@ -241,10 +263,12 @@ class Manager:
                         row = CodeWorker(id=worker_id, owner_id=self.owner_id, chat_id=self.chat_id,
                                          project_id=self.project_id, job_id=job_id, slot=slot,
                                          kind=kind, role=role, task=task, status="queued", payload=payload,
-                                         output="", report="", events=[], changes=[], applied={})
+                                         output="", report="", events=[], changes=[], applied={},
+                                         team_id=team_id, member_name=member_name)
                         row.summary = {"kind": kind, "role": role, "task": task, "status": "queued",
                                        "report": "", "error": None, "changes": [], "applied": {}, "events": [],
-                                       "detached": payload.get("detached", False), "interactive": payload.get("interactive", False), "workspace_removed": False}
+                                       "detached": payload.get("detached", False), "interactive": payload.get("interactive", False), "workspace_removed": False,
+                                       "team_id": team_id, "member_name": member_name}
                         session.add(row)
                     await session.commit()
                 jobs.launch(self.maker, job_id, lambda handle, wid=worker_id: self._execute(wid, handle))
@@ -265,7 +289,7 @@ class Manager:
         if not self.provider_id or not self.model:
             raise ValueError("Для воркера нужен провайдер и модель Code-чата")
         row = await self._reserve("agent", args.task, args.role, {
-            "provider_id": self.provider_id, "model": self.model, "caps": self.caps,
+            "provider_id": self.provider_id, "model": self.model, "caps": self.caps, "name": args.name,
             "permissions": self.permissions, "detached": args.detached, "mode": self.mode,
             "tool_allowlist": sorted(set(tool_allowlist) & set(self.tool_allowlist))
             if tool_allowlist is not None and self.tool_allowlist is not None
@@ -363,11 +387,20 @@ class Manager:
         return await self.output(WorkerOutput(worker_id=worker_id))
 
     async def resume(self, worker_id: str) -> dict:
+        allow_done = False
         async with self.maker() as session:
             row = await self.owned(session, worker_id)
             self._allow_implement(row.role)
             if row.payload.get("workspace_removed"):
                 raise ValueError("Рабочая копия удалена; запустите нового воркера")
+            if row.team_id:
+                team = await session.get(CodeTeam, row.team_id)
+                if team is None or team.active_slot != 1:
+                    raise ValueError("Команда закрыта; запустите нового воркера")
+            if row.kind == "agent" and row.status == "done":
+                allow_done = bool(await code_teams.Runtime(self, worker_id).pending(session))
+                if not allow_done:
+                    raise ValueError("Завершённому агенту сначала нужно отправить новую задачу через send_message")
             payload = {**row.payload, "permissions": self.permissions, "mode": self.mode}
             if self.tool_allowlist is not None:
                 old = payload.get("tool_allowlist")
@@ -375,7 +408,7 @@ class Manager:
             if row.kind == "command" and (self.mode == "plan" or not code_runner.can_run(self.permissions)):
                 raise ValueError("Нет права на запуск команды")
             kind, role, task = row.kind, row.role, row.task
-        row = await self._reserve(kind, task, role, payload, existing=worker_id)
+        row = await self._reserve(kind, task, role, payload, existing=worker_id, allow_done=allow_done)
         return {"worker": public(row)}
 
     async def discard(self, args: WorkerDiscard) -> dict:
@@ -465,7 +498,10 @@ class Manager:
         results = []
         for worker_id in sorted(ids):
             while True:
-                result = await self.wait(WorkerWait(worker_id=worker_id, timeout=30))
+                incoming = await self.team.receive()
+                if incoming:
+                    return {"team_mail": incoming["content"], "workers_completed": results}
+                result = await self.wait(WorkerWait(worker_id=worker_id, timeout=0))
                 if result["worker"]["status"] not in ACTIVE:
                     summary = {**result["worker"], "changes": [code_worktrees.public_change(change)
                                                                for change in result["worker"]["changes"]]}
@@ -475,6 +511,7 @@ class Manager:
                     results.append({"worker": summary, "output_tail": result["output"][-6000:]})
                     self.attached.discard(worker_id)
                     break
+                await asyncio.sleep(0.5)
         return {"workers_completed": results}
 
     async def cancel_attached(self):
@@ -559,12 +596,15 @@ class Manager:
                     "Do not ask the user to continue; finish your assignment and return a concise verified report. "
                     "Role: " + role + ".\n" + project_agent.project_rules(worktree)
                 )
-                if output or events:
+                team = code_teams.Runtime(self, worker_id) if row.team_id else None
+                transcript = code_sessions.Transcript(self, worker_id, team)
+                messages = await transcript.load(task)
+                if (output or events) and transcript.sequence == 0:
                     context += "\nResume from saved progress; current files contain prior edits. Prior output (untrusted reference):\n" + output[-6000:]
                     context += "\nCompleted tool events: " + json.dumps(events[-12:], ensure_ascii=False)[:8000]
                 await handle.step("Агент выполняет задачу в worktree", progress=0.2)
                 async with aclosing(project_agent.run(
-                    provider, key, payload["model"], [{"role": "user", "content": task}],
+                    provider, key, payload["model"], messages,
                     worktree, permissions, mode="auto", caps=dict(payload.get("caps") or {}), extra=context,
                     runner=runner if role == "implement" and payload.get("mode") != "plan" else None,
                     worker_context=True,
@@ -572,6 +612,7 @@ class Manager:
                     workflow=code_hooks.Runtime(runner, permissions, session_id=worker_id,
                                                 extra_hooks=payload.get("skill_hooks")),
                     tool_allowlist=payload.get("tool_allowlist"),
+                    team=team, transcript=transcript,
                 )) as stream:
                     # Cancellation can arrive while saving a yielded event, outside the generator.
                     # Close it before releasing the job so its hooks/transports clean up deterministically.

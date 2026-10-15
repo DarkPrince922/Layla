@@ -11,6 +11,7 @@ export type CodeWorker = {
   id: string; kind: "agent" | "command"; role: string; task: string; status: string;
   report: string; error?: string | null; detached: boolean; workspace_removed: boolean;
   interactive?: boolean;
+  team_id?: string | null; member_name?: string | null;
   pending_shell?: { id?: string; error?: string; blocked?: Record<string, string> } | null;
   changes: FileChange[]; applied: Record<string, string | null>;
   events: { id?: string; name: string; path?: string; status: string; note?: string; command?: string; output?: string; error?: string }[];
@@ -85,7 +86,7 @@ function WorkerCard({ worker, chatId, scope, parentRunning, canApply, refresh, o
   return <details onToggle={event => setOpen(event.currentTarget.open)} className="rounded-lg border border-ink-700 bg-ink-950/30 p-3">
     <summary className="flex cursor-pointer list-none items-center gap-2 [&::-webkit-details-marker]:hidden">
       {active(worker) && <Loader2 className="h-3 w-3 shrink-0 animate-spin text-accent-300" />}
-      <span className="min-w-0 flex-1 truncate text-neutral-300">{worker.kind === "command" ? "Команда" : worker.role === "implement" ? "Разработчик" : worker.role === "review" ? "Ревьюер" : "Исследователь"} · {worker.task}</span>
+      <span className="min-w-0 flex-1 truncate text-neutral-300">{worker.member_name || (worker.kind === "command" ? "Команда" : worker.role === "implement" ? "Разработчик" : worker.role === "review" ? "Ревьюер" : "Исследователь")} · {worker.task}</span>
       <span className={worker.status === "error" ? "text-red-300" : "text-neutral-500"}>{statusText[worker.status] || worker.status}</span>
     </summary>
     {active(worker) && latest && <p className="mt-1 truncate text-neutral-500">{latest.name}{latest.path ? ` · ${latest.path}` : ""}</p>}
@@ -94,7 +95,7 @@ function WorkerCard({ worker, chatId, scope, parentRunning, canApply, refresh, o
       <p className="text-neutral-500">ID: {worker.id}{worker.detached ? " · независим от текущего ответа" : ""}</p>
       <div className="flex flex-wrap gap-2">
         {active(worker) && <button disabled={busy} onClick={() => void control("stop")} className="secondary-button !px-3 !py-1.5 text-xs">Остановить</button>}
-        {!active(worker) && worker.status !== "done" && !worker.workspace_removed && <button disabled={busy || !canApply} onClick={() => void control("resume")} className="secondary-button !px-3 !py-1.5 text-xs">Продолжить</button>}
+        {!active(worker) && (worker.status !== "done" || !!worker.member_name) && !worker.workspace_removed && <button disabled={busy || !canApply} onClick={() => void control("resume")} className="secondary-button !px-3 !py-1.5 text-xs">Продолжить</button>}
         {!active(worker) && (worker.role === "implement" || worker.kind === "command") && !!pendingChanges.length && !worker.workspace_removed && <button disabled={busy || parentRunning || !canApply} onClick={() => onResume(`Проверь результат воркера ${worker.id}, примени подходящие изменения через worker_apply и проверь основной проект.`)} className="primary-button !px-3 !py-1.5 text-xs">Проверить и применить · {pendingChanges.length}</button>}
         {!active(worker) && !worker.workspace_removed && <button disabled={busy} onClick={() => void control("discard")} className="secondary-button !px-3 !py-1.5 text-xs">Удалить копию</button>}
       </div>
@@ -129,6 +130,33 @@ function WorkerCard({ worker, chatId, scope, parentRunning, canApply, refresh, o
       </details>}
       {info.changes.map(change => change.diff ? <FileDiff key={change.path} change={change} /> : <p key={change.path} className="text-neutral-500">{change.operation} · {change.path}</p>)}
       {worker.workspace_removed && <p className="text-neutral-500">Рабочая копия удалена; отчёт и вывод сохранены.</p>}
+      {worker.kind === "agent" && <WorkerTranscript chatId={chatId} workerId={worker.id} scope={scope} status={worker.status} />}
+    </div>
+  </details>;
+}
+
+function WorkerTranscript({ chatId, workerId, scope, status }: { chatId: string; workerId: string; scope: string; status: string }) {
+  const [open, setOpen] = useState(false);
+  const [offset, setOffset] = useState(0);
+  const transcript = useQuery({
+    queryKey: ["code-worker-transcript", scope, chatId, workerId, offset, status],
+    queryFn: () => api.get<{ entries: { sequence: number; message: { role: string; content?: string; tool_calls?: unknown[]; tool_call_id?: string } }[]; next_offset: number | null }>(`/chats/${chatId}/workers/${workerId}/transcript?offset=${offset}&limit=25`),
+    enabled: open, retry: false,
+    refetchInterval: open && ["queued", "running"].includes(status) ? 2000 : false,
+  });
+  return <details onToggle={e => setOpen(e.currentTarget.open)} className="rounded-lg border border-ink-700 p-2">
+    <summary className="cursor-pointer text-neutral-400">Сохранённый диалог и вызовы инструментов</summary>
+    <div className="mt-2 space-y-2">
+      {transcript.isPending && <p className="text-neutral-500">Загружаю историю…</p>}
+      {transcript.isError && <p role="alert" className="text-red-300">Не удалось загрузить историю</p>}
+      {transcript.data?.entries.map(entry => <details key={entry.sequence} className="rounded bg-ink-900 p-2">
+        <summary className="cursor-pointer text-neutral-500">{entry.sequence + 1} · {entry.message.role}{entry.message.tool_call_id ? ` · ${entry.message.tool_call_id}` : ""}</summary>
+        <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-neutral-300">{entry.message.content}{entry.message.tool_calls?.length ? "\n" + JSON.stringify(entry.message.tool_calls, null, 2) : ""}</pre>
+      </details>)}
+      <div className="flex gap-2">
+        <button disabled={!offset} onClick={() => setOffset(Math.max(0, offset - 25))} className="secondary-button !px-2 !py-1">Назад</button>
+        <button disabled={transcript.data?.next_offset == null} onClick={() => setOffset(transcript.data?.next_offset || 0)} className="secondary-button !px-2 !py-1">Далее</button>
+      </div>
     </div>
   </details>;
 }

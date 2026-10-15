@@ -11,13 +11,18 @@ from app.models.types import JSONList
 
 class CodeWorker(UUIDPk, Timestamps, Base):
     __tablename__ = "code_workers"
-    __table_args__ = (UniqueConstraint("chat_id", "slot", name="uq_code_worker_slot"),)
+    __table_args__ = (
+        UniqueConstraint("chat_id", "slot", name="uq_code_worker_slot"),
+        UniqueConstraint("team_id", "member_name", name="uq_code_team_member"),
+    )
 
     owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     chat_id: Mapped[str] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"), index=True)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     job_id: Mapped[str | None] = mapped_column(ForeignKey("jobs.id", ondelete="SET NULL"))
     slot: Mapped[int | None] = mapped_column(Integer)
+    team_id: Mapped[str | None] = mapped_column(ForeignKey("code_teams.id", name="fk_code_worker_team", ondelete="SET NULL"), index=True)
+    member_name: Mapped[str | None] = mapped_column(String(80))
     kind: Mapped[str] = mapped_column(String(16))
     role: Mapped[str] = mapped_column(String(16), default="implement")
     task: Mapped[str] = mapped_column(Text)
