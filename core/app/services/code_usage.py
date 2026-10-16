@@ -31,12 +31,14 @@ class Policy(BaseModel):
     max_usd: Decimal | None = Field(default=None, gt=0, le=10**6, decimal_places=6)
     input_usd_per_million: Decimal | None = Field(default=None, ge=0, le=10**5, decimal_places=6)
     output_usd_per_million: Decimal | None = Field(default=None, ge=0, le=10**5, decimal_places=6)
+    web_search_usd_per_thousand: Decimal = Field(default=Decimal(10), ge=0, le=10**5, decimal_places=6)
 
 
 def cost(prices, inputs, outputs):
     # Price USD / million tokens is numerically microUSD / token.
     return int((Decimal(prices.get("input", "0")) * inputs
-                + Decimal(prices.get("output", "0")) * outputs).to_integral_value(rounding=ROUND_CEILING))
+                + Decimal(prices.get("output", "0")) * outputs
+                + Decimal(prices.get("search_unit_microusd", "0")) * prices.get("searches", 0)).to_integral_value(rounding=ROUND_CEILING))
 
 
 async def ensure(runtime):
@@ -67,7 +69,12 @@ async def configure(runtime, args, provider_id, model):
                 if not provider_id or not model:
                     raise ValueError("Выберите провайдера и модель чата")
                 prices[f"{provider_id}|{model}"] = {"input": str(args.input_usd_per_million),
-                                                   "output": str(args.output_usd_per_million)}
+                    "output": str(args.output_usd_per_million), "web_search": str(args.web_search_usd_per_thousand)}
+            elif provider_id and model and f"{provider_id}|{model}" in prices:
+                prices[f"{provider_id}|{model}"] = {**prices[f"{provider_id}|{model}"],
+                    "web_search": str(args.web_search_usd_per_thousand)}
+            elif args.web_search_usd_per_thousand != Decimal(10):
+                raise ValueError("Для своей цены WebSearch задайте обе цены токенов выбранной модели")
             changed = await session.execute(update(CodeUsagePolicy).where(
                 CodeUsagePolicy.chat_id == runtime.chat_id, CodeUsagePolicy.revision == row.revision
             ).values(max_tokens=args.max_tokens,
@@ -91,27 +98,33 @@ async def snapshot(runtime, provider_id=None, model=None):
                 "tokens_used": policy.tokens_used if policy else 0,
                 "estimated_usd": str(Decimal(policy.cost_used) / 10**6) if policy else "0",
                 "prices": prices, "calls": dict(calls), "model": model, "provider_id": provider_id,
-                "note": "USD — оценка по заданным ценам. Без usage сохраняется полный резерв. Цена отсутствующих моделей не включена в стоимость."}
+                "note": "USD — оценка по заданным ценам; WebSearch по умолчанию 10 USD за 1000 поисков плюс токены. Без usage сохраняется полный резерв. Цена токенов отсутствующих моделей не включена в стоимость."}
 
 
 class Account:
     def __init__(self, runtime, job_id=None):
         self.runtime, self.job_id = runtime, job_id
 
-    async def reserve(self, provider_id, model, messages, tools, caps):
+    async def reserve(self, provider_id, model, messages, tools, caps, *, server_searches=0):
         await ensure(self.runtime)
         # UTF-8 bytes plus protocol overhead deliberately overestimate common
         # tokenizers. Actual reported usage reconciles the reservation later.
         inputs = len(json.dumps({"messages": messages, "tools": tools}, ensure_ascii=False).encode()) + 128 * (len(messages) + 1)
+        if server_searches:
+            inputs = max(inputs, caps.get("context") or 200000)
         outputs = caps.get("max_output") or 8192
         outputs = max(outputs, caps.get("reasoning_budget") or 0)
         for _ in range(12):
             async with self.runtime.maker() as session:
                 await self.runtime._authorize(session)
                 row = await session.get(CodeUsagePolicy, self.runtime.chat_id)
-                prices = (row.prices or {}).get(f"{provider_id}|{model}", {})
+                prices = dict((row.prices or {}).get(f"{provider_id}|{model}", {}))
+                has_prices = bool(prices)
+                if server_searches:
+                    prices.update(searches=server_searches, reserved_searches=server_searches,
+                                  search_unit_microusd=str(Decimal(prices.get("web_search", "10")) * 1000))
                 charge = cost(prices, inputs, outputs)
-                if row.max_cost_microusd is not None and not prices:
+                if row.max_cost_microusd is not None and not has_prices:
                     raise BudgetExceeded("Для бюджета USD задайте цены выбранной модели в панели Code")
                 if row.max_tokens is not None and row.tokens_used + inputs + outputs > row.max_tokens:
                     raise BudgetExceeded("Бюджет токенов Code исчерпан: следующий запрос не отправлен. Увеличьте лимит или сожмите контекст.")
@@ -142,7 +155,17 @@ class Account:
                 status = "reported" if reported else "rejected" if rejected else "uncertain" if failed else "estimated"
                 inputs, outputs = ((usage["input_tokens"], usage["output_tokens"]) if reported else
                                    (0, 0) if rejected else (call.input_tokens, call.output_tokens))
-                tokens, charge = inputs + outputs, cost(call.prices, inputs, outputs)
+                prices = dict(call.prices)
+                if prices.get("reserved_searches"):
+                    searches = usage.get("web_search_requests") if isinstance(usage, dict) else None
+                    if rejected:
+                        prices["searches"] = 0
+                    elif type(searches) is int and 0 <= searches <= prices["reserved_searches"]:
+                        prices["searches"] = searches
+                    else:
+                        status = "uncertain" if failed else "estimated"
+                    call.prices = prices
+                tokens, charge = inputs + outputs, cost(prices, inputs, outputs)
                 changed = await session.execute(update(CodeUsagePolicy).where(
                     CodeUsagePolicy.chat_id == self.runtime.chat_id, CodeUsagePolicy.revision == row.revision
                 ).values(tokens_used=CodeUsagePolicy.tokens_used + tokens - call.charged_tokens,

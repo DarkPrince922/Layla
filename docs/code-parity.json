@@ -4251,13 +4251,13 @@
       "archive_tool": "WebFetchTool",
       "status": "partial",
       "layla": "web_fetch",
-      "notes": "Public HTTPS text/HTML/JSON/XML with SSRF protections; no authenticated browser or PDF extraction."
+      "notes": "Archive url+prompt contract, domain preflight, 89 preapproved URL rules, HTTPS/redirect policy, Markdown/model extraction, owner-scoped 15-minute cache and owned binary attachments. No PDF extraction or full managed permissions; Python Markdown converter differs."
     },
     {
       "archive_tool": "WebSearchTool",
-      "status": "equivalent",
+      "status": "partial",
       "layla": "web_search",
-      "notes": "Public web research with references; search provider differs."
+      "notes": "Archive native web_search_20250305 server tool, max_uses 8, domain filters, structured results, pause continuation and token/search-fee budget. Requires compatible native Messages provider; streamed subquery progress and Vertex/Foundry transports remain."
     }
   ],
   "subsystems": [
