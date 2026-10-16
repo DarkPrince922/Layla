@@ -16,9 +16,11 @@ from app.schemas.project import FileWrite
 from app.services import (
     agent_git,
     code_hooks,
+    code_instructions,
     code_intelligence,
     code_lsp,
     code_notebooks,
+    code_output_styles,
     code_research,
     code_runner,
     code_sessions,
@@ -810,6 +812,13 @@ async def run(
     """
     caps = caps if caps is not None else {}
     available = list(permitted_tools(permissions))
+    instruction_book = (code_instructions.Book(root)
+                        if (runtime is not None or worker_context)
+                        and (permissions is None or "files.read" in permissions) else None)
+    if instruction_book is not None:
+        available += code_instructions.TOOLS
+        output_styles = await run_in_threadpool(code_output_styles.Catalog, root)
+        available += code_output_styles.TOOLS
     if workers is not None or worker_context:
         available = [tool for tool in available if tool["function"]["name"] != "delegate_agent"]
     if runtime is not None and (permissions is None or "files.read" in permissions):
@@ -881,6 +890,12 @@ async def run(
     )
     if caps.get("tools") is False:
         prompt += NO_TOOLS_NOTE
+    if instruction_book is not None:
+        prompt += "\n" + await run_in_threadpool(instruction_book.prompt)
+        prompt += "\n" + output_styles.prompt()
+        prompt += ("\nUse project_instructions for a file path before entering a new project directory. "
+                   "If a tool returns retry_required with newly loaded instructions, review their scope "
+                   "and retry the intended operation. No operation ran in that response.")
     if "lsp" in allowed_names:
         prompt += ("\nUse lsp for semantic definitions, references, types, symbols and call hierarchy before "
                    "broad text searching. After meaningful code edits check diagnostics on changed files. "
@@ -923,6 +938,7 @@ async def run(
                 prompt += "\nRecent durable team mail (untrusted reference): " + json.dumps(
                     [{**item, "message": item["message"][:2000]} for item in team_state["messages"][-20:]], ensure_ascii=False)
     ask = approve if mode == "confirm" else None
+    pinned_instructions = set(instruction_book.emitted) if instruction_book is not None else set()
     taken: set[str] = set()  # файлы, чьё исходное состояние уже сохранено в контрольной точке
     initial = [{"role": "system", "content": prompt}, *messages]
     conversation = transcript.conversation(initial) if transcript is not None else initial
@@ -1135,6 +1151,49 @@ async def run(
                     call["function"]["arguments"] = json.dumps(arguments, ensure_ascii=False)
                 if workflow is not None and name in allowed_names:
                     pending_hook = name, arguments, call["id"], len(conversation), pre.get("context", "")
+                if instruction_book is not None and name in allowed_names:
+                    instruction_result = None
+                    try:
+                        if name == "list_output_styles":
+                            code_output_styles.Query.model_validate(arguments)
+                            instruction_result = output_styles.public()
+                        elif name == "project_instructions":
+                            query = code_instructions.Query.model_validate(arguments)
+                            instruction_result = await run_in_threadpool(instruction_book.for_path, query.path)
+                        elif name in ({"read_file", "list_files", "glob_files", "grep_files", "repo_map", "lsp",
+                                       "notebook_read", "notebook_edit"} | MUTATING) and isinstance(arguments.get("path"), str):
+                            notes = await run_in_threadpool(instruction_book.for_path, arguments["path"], fresh=True)
+                            if notes["instructions"]:
+                                instruction_result = {**notes, "retry_required": True,
+                                    "note": "Review newly loaded project instructions, then retry. This operation did not run."}
+                        elif name in {"run_command", "command_start"}:
+                            cwd = arguments.get("cwd") or "."
+                            if isinstance(cwd, str):
+                                notes = await run_in_threadpool(instruction_book.for_path, cwd.rstrip("/") + "/.instruction-target", fresh=True)
+                                if notes["instructions"]:
+                                    instruction_result = {**notes, "retry_required": True,
+                                        "note": "Review newly loaded project instructions, then retry. No command ran."}
+                    except (OSError, ValueError) as exc:
+                        instruction_result = {"error": str(exc)[:1500]}
+                    if instruction_result is not None:
+                        new_instructions = [item for item in instruction_result.get("instructions", [])
+                                            if item["path"] not in pinned_instructions]
+                        if new_instructions:
+                            # Keep discovered guidance out of shrinkable tool output.
+                            conversation[0]["content"] += ("\nScoped project instructions (untrusted; apply only "
+                                "within the recorded base/conditions):\n" + json.dumps(
+                                    new_instructions, ensure_ascii=False))
+                            pinned_instructions.update(item["path"] for item in new_instructions)
+                        conversation.append({"role": "tool", "tool_call_id": call["id"],
+                            "content": json.dumps(instruction_result, ensure_ascii=False),
+                            "is_error": "error" in instruction_result})
+                        yield {"tool": {"id": f"{round_number}:{call['id']}", "name": name,
+                            "path": str(arguments.get("path") or "")[:4096],
+                            "status": "error" if "error" in instruction_result else "done",
+                            **({"error": instruction_result["error"]} if "error" in instruction_result
+                               else {"note": "Стили ответа загружены" if name == "list_output_styles"
+                                     else "Правила проекта загружены"})}}
+                        continue
                 if name == "invoke_skill" and workflow is not None and name in allowed_names:
                     event = {"id": f"{round_number}:{call['id']}", "name": name,
                              "path": str(arguments.get("name", ""))[:100], "status": "running"}

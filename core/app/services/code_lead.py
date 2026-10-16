@@ -4,8 +4,6 @@ from __future__ import annotations
 import asyncio
 from contextlib import aclosing
 
-from starlette.concurrency import run_in_threadpool
-
 from app.services import agent_git, code_hooks, code_lsp, code_runner, code_workers, code_workspace
 
 ACTIVE_CHATS: set[tuple[str, str]] = set()
@@ -47,8 +45,7 @@ async def run(provider, key, model, messages, root, permissions=None, *, runtime
                     mode=mode, approve=approve, caps=caps, runtime=runtime, workers=workers, git=current_git, mcp=mcp,
                     transcript=transcript, workspace=workspace, continuation=continuation, budget=budget,
                     tool_allowlist=scope,
-                    extra=("Current Code workspace: " + str(state) + "\n" +
-                           await run_in_threadpool(project_agent.project_rules, current_root)),
+                    extra="Current Code workspace: " + str(state),
                     runner=runner, lsp=code_lsp.Client(runtime.owner_id, cache_id, current_root),
                     workflow=code_hooks.Runtime(runner, permissions, mode=mode, session_id=runtime.chat_id))) as stream:
                     async for event in stream:

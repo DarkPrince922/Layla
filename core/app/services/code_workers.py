@@ -639,7 +639,7 @@ class Manager:
                     "Complete the assigned task with concrete tool calls. Never delegate, publish Git changes, "
                     "or claim that files in the main project changed. The lead imports your diff afterwards. "
                     "Do not ask the user to continue; finish your assignment and return a concise verified report. "
-                    "Role: " + role + ".\n" + project_agent.project_rules(worktree)
+                    "Role: " + role + ".\n"
                 )
                 if payload.get("require_plan"):
                     context += "\nPLAN FIRST: inspect only, then submit your concrete plan with team_request(kind='plan', to='lead', content=...). Finish this turn after submission. The lead must approve and resume you before implementation."

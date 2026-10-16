@@ -4364,7 +4364,7 @@
         "utils/claudemd.ts",
         "projectOnboardingState.ts"
       ],
-      "notes": "Root LAYLA.md only; nested instruction precedence and onboarding are not equivalent."
+      "notes": "Code-only per-run project instructions: root/nested CLAUDE.md, .claude/CLAUDE.md, CLAUDE.local.md and LAYLA.md; recursive .claude/.layla rules with path globs, bounded local @includes, snapshots and pre-action discovery in lead/worker worktrees. No host/home/managed memory, full Markdown/minimatch/import semantics, InstructionsLoaded hooks or onboarding equivalence."
     },
     {
       "id": "background_jobs",
@@ -4501,11 +4501,11 @@
     },
     {
       "id": "output_styles",
-      "status": "missing",
+      "status": "partial",
       "archive_paths": [
         "outputStyles/"
       ],
-      "notes": "Need configurable output styles and agent-controlled brief mode."
+      "notes": "Code-only project outputStyle settings, default/Explanatory/Learning presentation modes, .claude/.layla output-styles Markdown with metadata and read-only model catalog. Persona and coding constraints are retained. Missing user/global/plugin styles, style picker, full keep-coding-instructions replacement semantics and BriefTool transport."
     },
     {
       "id": "cost_tracking",
