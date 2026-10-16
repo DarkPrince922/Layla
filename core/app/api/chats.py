@@ -102,11 +102,12 @@ _TOOL_LABELS = {
 }
 
 
-async def _code_mcp(session: AsyncSession, owner_id: str, persona_id: str | None):
+async def _code_mcp(session: AsyncSession, owner_id: str, persona_id: str | None, *, maker=None, chat_id=None, project_id=None):
     rows = list(await session.scalars(select(McpServer).where(
         McpServer.owner_id == owner_id, McpServer.enabled.is_(True))))
     allowed = [row for row in rows if not row.personas or (persona_id and persona_id in row.personas)]
-    return await code_mcp.McpAgent.create(allowed) if allowed else None
+    return await code_mcp.McpAgent.create(allowed, maker=maker, owner_id=owner_id,
+                                         persona_id=persona_id, chat_id=chat_id, project_id=project_id) if allowed else None
 
 router = APIRouter(prefix="/chats", tags=["chats"])
 
@@ -645,7 +646,7 @@ async def send_message(
         if chat.project_id:
             project = await _owned_project(session, user, chat.project_id)
             root = _project_root(project)
-        mcp = await _code_mcp(session, user.id, chat.persona_id) if root and chat.domain == Domain.code else None
+        mcp = await _code_mcp(session, user.id, chat.persona_id, maker=maker, chat_id=chat_id, project_id=chat.project_id) if root and chat.domain == Domain.code else None
         model = body.model or chat.model
         if not model:
             raise HTTPException(status_code=400, detail="Не выбрана модель")
@@ -1148,7 +1149,7 @@ async def run_chat(
                 messages = await _compact_before_turn(h, maker, chat_id, prov, key, model, caps) or messages
             runner = code_runner.Runner(owner_id, project_id, root)
             git = await _git_agent(maker, owner_id, root)
-            mcp = await _code_mcp(h.session, owner_id, persona_id) if domain == "code" else None
+            mcp = await _code_mcp(h.session, owner_id, persona_id, maker=maker, chat_id=chat_id, project_id=project_id) if domain == "code" else None
             runtime = code_state.Runtime(maker, owner_id, chat_id, project_id) if domain == "code" else None
             workers = code_workers.Manager(runtime, root, permissions, provider_id=prov.id, model=model,
                                            mode=mode, caps=caps) if runtime is not None else None

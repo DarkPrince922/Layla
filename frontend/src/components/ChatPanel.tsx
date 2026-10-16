@@ -13,6 +13,7 @@ import { CodeWorkerPanel, type CodeWorker } from "@/components/CodeWorkerPanel";
 import { CodeTeamPanel } from "@/components/CodeTeamPanel";
 import { CodeLeadPanel } from "@/components/CodeLeadPanel";
 import { CodeSkillPicker } from "@/components/CodeSkillPicker";
+import { CodeSchedulePanel } from "@/components/CodeSchedulePanel";
 import { confirmAction } from "@/components/ConfirmDialog";
 
 const active = (job?: Job | null) => !!job && ["queued", "running"].includes(job.status);
@@ -411,6 +412,9 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
         {!!m.meta?.todos?.length && <Todos items={m.meta.todos} />}
         <>{m.role === "assistant" ? <MarkdownResponse content={m.content} /> : <div className="whitespace-pre-wrap break-words text-sm leading-7">{m.content}</div>}</>
         {m.meta?.tools?.map(tool => <div key={tool.id} className="mt-3">{tool.status === "pending" ? <Approval tool={tool} active={approval?.id === tool.id} busy={deciding} onDecide={decide} /> : tool.status === "rejected" ? <p className="rounded-lg border border-ink-700 p-3 text-xs text-neutral-400">Отклонено вами · <span className="break-all font-mono">{tool.command || tool.path}</span></p> : tool.name === "delegate_agent" ? <AgentCard tool={tool} /> : RUN_TOOLS.has(tool.name) || GIT_TOOLS.has(tool.name) || tool.name === "project_hook" ? <RunCard tool={tool} /> : tool.change && tool.status === "done" ? <FileDiff change={tool.change} onOpen={(tool.workspace_id || null) === (selectedWorkspace?.id || null) ? onOpenFile : undefined} /> : <div className={`rounded-lg border p-3 text-xs ${tool.status === "error" ? "border-red-500/30 text-red-300" : "border-ink-700 text-neutral-400"}`}><span>{tool.status === "running" ? "Выполняется" : tool.status === "done" ? "Готово" : "Ошибка"} · {tool.name}</span>{(tool.command || tool.path) && <p className="mt-1 break-all font-mono">{tool.command || tool.path}</p>}{tool.note && <p className="mt-1 text-neutral-500">{tool.note}</p>}{tool.error && <p>{tool.error}</p>}</div>}</div>)}
+        {m.meta?.tools?.flatMap(tool => Array.isArray(tool.attachments) ? tool.attachments : []).map(file =>
+          <a key={file.id} href={`/api/code/mcp/artifacts/${encodeURIComponent(file.id)}`} download
+            className="mt-2 block text-xs text-accent-300 underline">Скачать результат MCP · {file.mime_type} · {Math.ceil(file.size / 1024)} КБ</a>)}
         {m.meta?.error && <p role="alert" className="mt-3 text-sm text-red-300">{m.meta.error}</p>}
       </article>)}
     </div>
@@ -467,6 +471,7 @@ function CodeWorkState({ chatId, scope, running, canApply, onResume }: { chatId:
   const subjects = new Map(tasks.map(task => [task.id, task.subject]));
   return <div className="space-y-3">
     <CodeLeadPanel key={`${scope}:${chatId}`} chatId={chatId} scope={scope} running={running} canApply={canApply} />
+    <CodeSchedulePanel key={`schedules:${chatId}`} chatId={chatId} />
     <CodeTeamPanel key={`${scope}:${chatId}`} chatId={chatId} scope={scope} running={running} canApply={canApply} />
     <CodeWorkerPanel workers={workers} chatId={chatId} scope={scope} parentRunning={running} canApply={canApply} refresh={() => state.refetch()} onResume={onResume} />
     {questions.slice(-3).map(group => <CodeQuestionForm key={group.id} chatId={chatId} group={group} onSaved={() => state.refetch()} onResume={onResume} />)}

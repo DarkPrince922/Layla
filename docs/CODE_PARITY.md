@@ -39,6 +39,9 @@ python scripts/audit_code_parity.py /path/to/extracted/claude-code
 | Восстановление воркера | Append-only диалог с tool calls/results независимо от краткого вывода | Остановка → новый экземпляр → новое сообщение → resume без повторной записи; неизвестный результат после crash |
 | MCP discovery | `mcp_search_tools` | В контекст добавляются схемы найденных инструментов, а не весь набор серверов |
 | MCP ресурсы | `mcp_list_resources`, `mcp_resource_templates`, `mcp_read_resource` | Привязка к серверам владельца/персоны, пагинация |
+| MCP OAuth | PKCE, metadata discovery, CIMD/DCR/готовый client ID, зашифрованные credentials и refresh/revoke | Одноразовый state, issuer/resource binding, ротация, повторный вход, отзыв во время refresh |
+| MCP соединения и файлы | Пул между сообщениями, reconnect, notifications/list_changed, авторизованные binary downloads | Настоящий stdio-сервер сохраняет счётчик между ходами; отмена закрывает SDK task, ошибочный RPC не повторяется |
+| Расписания Code | Cron/дата, timezone, режим, pause/resume/delete в чате и агентские cron tools | Lease, идемпотентный Job, busy retry, missed-run coalescing, изоляция владельца/проекта/worktree и миграции |
 | MCP совместимость | Имена до 64 символов, различение коллизий, текст и JSON | Проверки длинных имён, серверов с одинаковыми именами и текстовых ответов |
 | Формат skills | `.layla/skills`, `.claude/skills`, `.agents/skills`; Markdown и `name/SKILL.md` | Порядок приоритета, no-follow файловые операции |
 | Активация skills | `invoke_skill`, `/имя аргументы`, YAML metadata и буквальная подстановка | Флаги user/model invocation, `allowed-tools` сужает инструменты, метаданные не дают прав персоны |
@@ -97,6 +100,10 @@ language server; отсутствие поддержки возвращаетс�
 миграции `0027_code_lead_session` / `0028_code_workspaces` описаны в
 [CODE_SESSIONS.md](CODE_SESSIONS.md).
 
+Контракт OAuth, пула MCP, бинарных файлов и расписаний, настройки развёртывания
+и миграции `0032`/`0033` — [CODE_MCP_SCHEDULER.md](CODE_MCP_SCHEDULER.md).
+Плагины отложены по решению пользователя для текущего этапа.
+
 ## Остаток до полного соответствия
 
 Это полный объём требования, а не необязательные предложения:
@@ -115,11 +122,13 @@ language server; отсутствие поддержки возвращаетс�
    динамические/встроенные/удалённые skills, полная совместимость правил проекта,
    пространства имён и встроенные slash-команды.
 5. Переходы Plan → execution и настройки агента.
-6. Планировщик, remote triggers, remote sessions, проактивный цикл.
+6. Архивные jitter/auto-expiry/session-only/teammate scheduling, remote triggers,
+   remote sessions и проактивный цикл. Durable Code-планировщик уже реализован.
 7. Полная память, консолидация, context/continuation/recovery semantics,
    output styles, usage/cost budgets и настройка политик.
-8. Полный MCP lifecycle: OAuth, постоянные сессии, уведомления,
-   переподключение и двоичные результаты.
+8. Остальной MCP lifecycle: sampling, elicitation, prompts UI, автоматическое
+   повышение scope, полная совместимость attachment/protocol lifecycle архива.
+   OAuth, пул между сообщениями, уведомления, reconnect и binary downloads реализованы.
 9. CLI/terminal/Vim, голос, browser bridge, companion, onboarding, sync
    и остальные пользовательские сценарии архива.
 10. Поведенческая классификация оставшихся вспомогательных модулей и

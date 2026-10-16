@@ -11,6 +11,7 @@ import {
 import { HttpKeyBanner } from "@/components/HttpKeyBanner";
 import { IntelligenceSettings } from "@/components/IntelligenceSettings";
 import { TelegramIntegration } from "@/components/TelegramIntegration";
+import { McpOAuthControls } from "@/components/McpOAuthControls";
 
 function McpRegistry() {
   const qc = useQueryClient();
@@ -162,6 +163,7 @@ function McpRegistry() {
                     )}
                   </div>
                 )}
+                {s.transport === "http" && <McpOAuthControls serverId={s.id} />}
               </li>
             );
           })}

@@ -1,58 +1,68 @@
 # Продолжение интеграции Claude Code в Layla
 
-## Обязательная область
+## Область и ветки
 
-Цель пользователя — закончить перенос функций предоставленного архива в Code.
-Работа ограничена Code; другие домены не исследовать и не менять. Успешный
-CI отдельного этапа не означает полного соответствия архиву.
+Работа ограничена Code. Другие домены не исследовать и не менять.
+Последнее решение пользователя: сначала MCP и планировщик; плагины отложены.
+Успешный CI отдельного этапа не означает полного соответствия архиву.
 
-## Текущая ветка
+- PR #39: `codex/code-workspace-shell-teams` — worktree editor/terminal/Git/LSP,
+  выбор ref, import/export/fork сессий, draft PR, протокол команды и PTY.
+- PR #40: `codex/code-integration-continuation`, commit
+  `64fd0def02ccede872b0b4ce8b86bc958ef71290` — проектные/вложенные инструкции,
+  rules/imports и output styles; контракт: [CODE_INSTRUCTIONS.md](CODE_INSTRUCTIONS.md).
+- Текущая ветка: `codex/code-mcp-scheduler`, основана на commit PR #40 выше.
+  Новый PR должен использовать `codex/code-integration-continuation` как base.
+  Не переносить эти изменения прямо с main без зависимых PR.
 
-- База: PR #39, `codex/code-workspace-shell-teams`,
-  commit `033af1552e0d0d98d6ded79120993641c390f6f1`.
-- Продолжение: `codex/code-integration-continuation`.
-- В PR #39 уже находятся worktree editor/terminal/Git/LSP, выбор ref,
-  import/export/fork сессий, draft PR, протокол планов/остановки команд и PTY.
-  Не дублировать этот перенос с основной ветки, где этих изменений ещё нет.
-- Новые изменения: проектные/вложенные инструкции и project output styles;
-  контракт и ограничения — [CODE_INSTRUCTIONS.md](CODE_INSTRUCTIONS.md).
-- `code-parity.json` пересоздан по ZIP, приложенному в текущем обсуждении.
-  Список 1907 файлов совпадал с прежним; digest содержимого отличался.
-  Текущий digest: `f74f54805f280d8535bb0e3767fe7712392e77745d7e91ac9fbedd18891d55eb`.
+## Реализовано сейчас
+
+Code MCP: явный браузерный OAuth PKCE, metadata discovery, CIMD/DCR/готовый
+client ID, зашифрованные persistent credentials и регистрация клиента,
+refresh с lease/revision и отзыв. Отдельный пул соединений между сообщениями,
+reconnect, notifications и обновление каталога, двоичные файлы с авторизованной
+загрузкой и лимитами. Другие домены не переведены на эти Code-механизмы.
+
+Code-планировщик: cron/разовая дата, timezone/DST, durable state, lease и
+идемпотентная постановка обычного Code Job, busy retry, объединение пропущенных
+повторений, pause/resume/delete, панель чата и cron tools. Привязка к владельцу,
+чату, проекту и активной рабочей копии; Confirm/Plan/Review сохраняют ограничения.
+Точный контракт и оставшиеся пробелы: [CODE_MCP_SCHEDULER.md](CODE_MCP_SCHEDULER.md).
+
+Для развёртывания нужны пересборка Core/frontend, `alembic upgrade head`
+(миграции `0032` и `0033`) и корректный внешний `LAYLA_PUBLIC_URL` для OAuth.
+Живое production-развёртывание в этом этапе не выполнялось.
 
 ## Проверки
 
-Из каталога `core`:
+Из `core`:
 
 ```bash
-pytest -q tests/test_code_*.py tests/test_project_agent.py tests/test_history.py
+pytest -q tests/test_code_*.py tests/test_project_agent.py tests/test_history.py tests/test_mcp.py
 ```
 
-171 тест прошёл локально. После финальной правки повторно прошли 62 теста
-инструкций, стилей, project-agent и hooks. Проверены Code tools/API, воркеры, сессии, hooks,
-worktrees и история. Ruff для изменённых Python-файлов прошёл. Изменений схемы
-БД, sandbox и frontend в этом продолжении нет. Для PR #39 frontend и sandbox
-прошли CI; общий CI Core нужно проверять отдельно по актуальному коммиту.
+205 тестов прошли локально. Есть настоящий stdio MCP fixture и запуск
+расписания через реальные API/БД/Jobs с тестовым provider stream. Проверены
+upgrade с `0031`, отсутствие ORM drift и downgrade с сохранением пользователя.
+Ruff изменённых Python-файлов и TypeScript проходят; ESLint изменённых TSX
+без ошибок (существующее предупреждение ChatPanel dependency остаётся).
+Локальная production-сборка Next блокируется отсутствием `/proc` в среде
+(`uv_resident_set_memory`); итоговую сборку следует проверить по CI PR.
+Внешний OAuth-провайдер в production локальные тесты не заменяют.
 
-Новые тесты проверяют порядок инструкций, условные области, циклы и пределы
-импортов, снимки на запрос, ссылки, сохранение инструкций при сжатии контекста,
-выдачу новых правил до записи, стили и приоритет настроек, Code-only доступ.
+## Реестр и остаток
 
-## Остаток
+[CODE_PARITY.md](CODE_PARITY.md) и [code-parity.json](code-parity.json)
+содержат полный инвентарь 1907 файлов, 40 инструментов и 33 подсистем.
+`full_parity` остаётся `false`; MCP и scheduler отмечены `partial` с конкретными
+пробелами. Digest приложенного ZIP:
+`f74f54805f280d8535bb0e3767fe7712392e77745d7e91ac9fbedd18891d55eb`.
 
-Полный список и статусы — [CODE_PARITY.md](CODE_PARITY.md) и
-[code-parity.json](code-parity.json). `full_parity` остаётся `false`.
-Следующие независимые контракты, требующие реализации и приёмки:
+Остаются Plan → execution с решением пользователя, оставшиеся hooks/rules/skills,
+MCP sampling/elicitation/prompts и полный lifecycle, архивные scheduler jitter/
+auto-expiry/session-only/teammate routes, remote triggers/sessions, проактивный
+цикл, память/context recovery и budgets, прочие shell/IDE/CLI/browser/voice/sync
+контракты. Плагины отложены; не начинать их без смены текущего приоритета.
 
-1. Переход ведущего Plan → execution с пользовательским решением и настройки
-   агента; протокол планов участников команды уже реализован в PR #39.
-2. Plugin manifest/install/update/enable lifecycle и регистрация skills/tools/hooks.
-3. Остальные типы/события hooks, полноценные rules/imports и динамические skills.
-4. MCP OAuth, постоянные сессии, reconnect/notifications и бинарные результаты.
-5. Durable scheduler, remote triggers/sessions и проактивный цикл.
-6. Консолидация памяти, полнота transcript/context recovery, usage/cost budgets.
-7. Оставшиеся shell/IDE/browser/CLI/voice/companion/sync контракты из реестра.
-
-Не исправлять сообщение о максимальной длине обсуждения как доказанный дефект
-Layla: приложенный скриншот показывает интерфейс ChatGPT; причины лимита в
-живом развёртывании Layla не подтверждены. Продолжать перенос по коду и тестам.
+Сообщение о максимальной длине обсуждения на приложенном скриншоте относится
+к интерфейсу ChatGPT. Дефект лимита в живом Layla этим не подтверждён.
