@@ -3,8 +3,8 @@
 ## Область и ветки
 
 Работа ограничена Code. Другие домены не исследовать и не менять.
-Текущий запрос пользователя: взять WebSearch/WebFetch именно из архива;
-плагины отложены.
+Текущий запрос пользователя: поиск Code через Tavily, ключ из существующего
+раздела «Интеграции → Tavily», без отдельного ключа Code. Плагины отложены.
 Успешный CI отдельного этапа не означает полного соответствия архиву.
 
 - PR #39: `codex/code-workspace-shell-teams` — worktree editor/terminal/Git/LSP,
@@ -19,20 +19,27 @@
   `175484730fa9dea43c5964f38741887c7bb8e94c`, основан на PR #42.
 - PR #44: `codex/code-bundled-skills`, commit
   `b11007671a7d283410dfd579e69567de0ad2c2bc`, основан на PR #43.
-- Текущая ветка: `codex/code-archive-web-tools`, основана на PR #44.
-  Новый PR должен использовать `codex/code-bundled-skills` как base.
+- PR #45: `codex/code-archive-web-tools`, commit
+  `8f83b521235ce5e4161fabf38452ad2e06a54b1b`, основан на PR #44.
+- Текущая ветка: `codex/code-tavily-search`, основана на PR #45.
+  Новый PR должен использовать `codex/code-archive-web-tools` как base.
   Не переносить эти изменения прямо с main без зависимых PR.
 
 ## Реализовано сейчас
 
 Ведущий Code и Code-воркеры используют адаптацию архивных WebSearch/WebFetch.
-Поиск вызывает серверный Anthropic `web_search_20250305`, до восьми поисков,
+Поиск теперь вызывает Tavily Basic, до восьми результатов с выдержками и URL,
 с фильтрами доменов и отдельным учётом поисковых сборов в общем бюджете.
-Совместимый native Messages provider обязателен; Bing fallback не используется.
+Ключ читается из `intel_keys` владельца, через общую карточку интеграций;
+смена/удаление видны при следующем поиске. Совместимость Anthropic не требуется,
+LLM-провайдер может быть OpenAI-совместимым. Нет автоматической подмены backend.
+Запрос не резервирует токены LLM; тариф Basic задаётся отдельно в бюджете Code.
+Для PostgreSQL нужна additive миграция `0035_code_tavily` с enum-меткой;
+существующие ключи не заменяются. При downgrade метка и ключи сохраняются.
 WebFetch требует url+prompt: preflight, HTTPS/redirect policy, HTML→Markdown,
 отдельная модель, 15-минутный кеш владельца и собственные binary attachments.
 Контракт и пробелы: [CODE_WEB_TOOLS.md](CODE_WEB_TOOLS.md).
-Новая зависимость — markdownify; пересобрать Core/frontend, новой миграции нет.
+Зависимость архивного WebFetch — markdownify; пересобрать Core/frontend.
 
 Три встроенных Code skills поставляются с Core и доступны без файлов проекта:
 `/simplify` (до трёх read-only ревьюеров или самостоятельная проверка),
@@ -90,9 +97,12 @@ pytest -q tests/test_code_*.py tests/test_project_agent.py tests/test_history.py
 ```
 
 В PR #42 прошли 260 Code/shared-provider тестов, в PR #43 — 294.
-В текущем этапе все 329 Code/shared-provider тестов проходят локально,
-включая 21 новую проверку архивных WebSearch/WebFetch. Ruff, TypeScript,
-ESLint и загрузка 89 web-правил из собранного wheel проходят.
+В PR #45 прошли 329 Code/shared-provider тестов, включая 21 проверку
+архивных WebSearch/WebFetch. В текущем этапе проходят 385 тестов:
+340 Code/shared-provider и 45 общих контрактов ключей/API/MCP;
+11 новых сценариев Tavily включают реальный HTTP-парсер, API/БД,
+замену/удаление ключа, изоляцию владельца, OpenAI-модель, Confirm,
+тариф/бюджет, ошибки, отмену и неизвестный расход. Ruff, TypeScript и ESLint проходят.
 В PR #44 добавлены 14 сценариев встроенных skills. Все 308 Code/shared-provider
 тестов того этапа прошли локально и в CI, включая реальные API/Jobs, read-only memory policy,
 создание skill с ограничением записи и три независимых review-воркера.

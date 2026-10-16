@@ -49,8 +49,9 @@ export const api = {
 
 // ---- OSINT / intelligence (M3) ----
 export type IntelProviderName = "shodan" | "virustotal" | "securitytrails" | "urlscan";
+export type IntelKeyProviderName = IntelProviderName | "tavily";
 export interface IntelProvider {
-  provider: IntelProviderName;
+  provider: IntelKeyProviderName;
   name: string;
   docs_url: string;
   tool_name: string;

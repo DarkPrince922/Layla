@@ -14,6 +14,7 @@ function ProviderKey({ provider, blocked }: { provider: IntelProvider; blocked: 
     onSuccess: () => {
       setKey(""); setSaved(true);
       qc.invalidateQueries({ queryKey: ["intelligence"] });
+      qc.invalidateQueries({ queryKey: ["integration-keys"] });
     },
   });
   const remove = useMutation({
@@ -21,6 +22,7 @@ function ProviderKey({ provider, blocked }: { provider: IntelProvider; blocked: 
     onSuccess: () => {
       setSaved(false);
       qc.invalidateQueries({ queryKey: ["intelligence"] });
+      qc.invalidateQueries({ queryKey: ["integration-keys"] });
     },
   });
   function submit(e: FormEvent) {
@@ -39,7 +41,7 @@ function ProviderKey({ provider, blocked }: { provider: IntelProvider; blocked: 
         </a>
       </div>
       <p className="text-xs text-neutral-400">
-        {provider.supports_ip ? "Домены и публичные IP" : "Домены"} · пассивный поиск
+        {provider.provider === "tavily" ? "Поиск в интернете для Code" : `${provider.supports_ip ? "Домены и публичные IP" : "Домены"} · пассивный поиск`}
       </p>
       <p className="text-xs text-neutral-500">
         {provider.configured ? `Ключ сохранён: ${provider.key_masked}` :
@@ -81,8 +83,8 @@ export function IntelligenceSettings() {
   const [ack, setAck] = useState(false);
   useEffect(() => { setHttps(window.location.protocol === "https:"); setReady(true); }, []);
   const providers = useQuery({
-    queryKey: ["intelligence"],
-    queryFn: () => api.get<IntelProvider[]>("/integrations/intelligence"),
+    queryKey: ["integration-keys"],
+    queryFn: () => api.get<IntelProvider[]>("/integrations/intelligence?include_code=true"),
   });
   const test = useMutation({
     mutationFn: () => api.post<McpTestResult>("/integrations/intelligence/test", {}),
@@ -99,6 +101,7 @@ export function IntelligenceSettings() {
       <p className="text-xs leading-relaxed text-neutral-500">
         Источники для OSINT-кейсов. Встроенный MCP ищет существующие записи в базах провайдеров.
         Ключи хранятся зашифрованными. Проверка MCP не расходует квоту источников.
+        Ключ Tavily используется поиском Code.
       </p>
       {ready && !https && (
         <label className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">

@@ -10,13 +10,15 @@ from app.db import get_session
 from app.models.enums import IntelProvider
 from app.models.mcp import IntelKey
 from app.models.user import User
-from app.schemas.intelligence import IntelKeyIn, IntelProviderName, IntelProviderOut
+from app.schemas.intelligence import IntelKeyIn, IntelKeyProviderName, IntelProviderOut
 from app.schemas.mcp import McpTestResult, McpToolInfo
 from app.security import crypto
 from app.services import audit, intel_api, intelligence, mcp_client
 from app.services.auth import get_current_user
 
 router = APIRouter(prefix="/integrations/intelligence", tags=["intelligence"])
+TAVILY = {"name": "Tavily", "docs_url": "https://docs.tavily.com/documentation/api-reference/endpoint/search",
+          "supports_ip": False, "key_required": True}
 
 
 async def _provider_out(session: AsyncSession, owner_id: str, provider: str) -> IntelProviderOut:
@@ -29,8 +31,8 @@ async def _provider_out(session: AsyncSession, owner_id: str, provider: str) -> 
             masked = "••••"
     return IntelProviderOut(
         provider=provider,
-        **intel_api.PROVIDERS[provider],
-        tool_name=f"{provider}_lookup",
+        **(TAVILY if provider == "tavily" else intel_api.PROVIDERS[provider]),
+        tool_name="web_search" if provider == "tavily" else f"{provider}_lookup",
         configured=row is not None,
         key_masked=masked,
     )
@@ -38,9 +40,11 @@ async def _provider_out(session: AsyncSession, owner_id: str, provider: str) -> 
 
 @router.get("", response_model=list[IntelProviderOut])
 async def providers(
+    include_code: bool = False,
     user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session)
 ) -> list[IntelProviderOut]:
-    return [await _provider_out(session, user.id, p) for p in intel_api.PROVIDERS]
+    names = [*intel_api.PROVIDERS, *(["tavily"] if include_code else [])]
+    return [await _provider_out(session, user.id, p) for p in names]
 
 
 @router.post("/test", response_model=McpTestResult)
@@ -64,7 +68,7 @@ async def test_mcp(
 
 @router.put("/{provider}", response_model=IntelProviderOut)
 async def set_key(
-    provider: IntelProviderName,
+    provider: IntelKeyProviderName,
     body: IntelKeyIn,
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
@@ -86,7 +90,7 @@ async def set_key(
 
 @router.delete("/{provider}", status_code=204)
 async def delete_key(
-    provider: IntelProviderName,
+    provider: IntelKeyProviderName,
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> None:

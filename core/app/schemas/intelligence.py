@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from app.services.intel_targets import normalize_target
 
 IntelProviderName = Literal["shodan", "virustotal", "securitytrails", "urlscan"]
+IntelKeyProviderName = Literal["shodan", "virustotal", "securitytrails", "urlscan", "tavily"]
 
 
 class IntelKeyIn(BaseModel):
@@ -25,7 +26,7 @@ class IntelKeyIn(BaseModel):
 
 
 class IntelProviderOut(BaseModel):
-    provider: IntelProviderName
+    provider: IntelKeyProviderName
     name: str
     docs_url: str
     tool_name: str
