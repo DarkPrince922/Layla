@@ -42,8 +42,9 @@ def repair(messages):
 
 
 class Transcript:
-    def __init__(self, manager, worker_id, team=None):
+    def __init__(self, manager, worker_id, team=None, *, model=None):
         self.manager, self.worker_id, self.team = manager, worker_id, team
+        self.model = model or manager.model
         self.sequence = 0
 
     async def load(self, task):
@@ -53,6 +54,8 @@ class Transcript:
                 CodeTranscript.worker_id == self.worker_id).order_by(CodeTranscript.sequence)))
             self.sequence = rows[-1].sequence + 1 if rows else 0
             messages = [row.message for row in rows]
+            if any(item.get("_code_model", self.model) != self.model for item in messages):
+                messages = [{key: value for key, value in item.items() if key not in ("_anthropic_thinking", "reasoning_content")} for item in messages]
         if not messages:
             messages = [{"role": "user", "content": task}]
             self.seed = messages
@@ -67,6 +70,20 @@ class Transcript:
                 "Do not repeat completed work. New team mail, if any, follows.")})
             messages = [*messages, *self.seed]
         return deepcopy(messages)
+
+    async def activate_skill(self, model, caps, scope, policies, hook):
+        async with self.manager.maker() as session:
+            row = await self.manager.owned(session, self.worker_id)
+            old = row.payload
+            hooks = old.get("skill_hooks", [])
+            if hook not in hooks:
+                hooks = [*hooks, hook]
+            row.payload = {**old, "model": model, "caps": dict(caps),
+                "tool_allowlist": sorted(scope) if scope is not None else None,
+                "tool_policies": policies, "skill_hooks": hooks,
+                "skill_revision": old.get("skill_revision", 0) + 1}
+            await session.commit()
+        self.model = model
 
     def conversation(self, messages):
         result = Conversation(messages)
@@ -200,6 +217,12 @@ class LeadTranscript:
             if incoming:
                 list.append(conversation, incoming)
         return bool(rows)
+
+    async def model_changed(self):
+        async with self.runtime.maker() as session:
+            await self.authorize(session)
+            await session.execute(update(CodeLeadTurn).where(CodeLeadTurn.id == self.turn_id).values(model=None))
+            await session.commit()
 
     async def finish(self, conversation, failed=False):
         if getattr(self, "transitioning", False) and not failed:

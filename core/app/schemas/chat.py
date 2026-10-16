@@ -47,6 +47,7 @@ class ChatDetail(ChatOut):
 class SendMessageRequest(BaseModel):
     content: str = Field(min_length=1, max_length=100_000)
     request_id: str | None = Field(default=None, min_length=1, max_length=64)
+    skill_path: str | None = Field(default=None, max_length=4096)
     approved_plan_id: str | None = Field(default=None, min_length=1, max_length=36)
     resume_message_id: str | None = Field(default=None, min_length=1, max_length=36)
     model: str | None = None  # выбранная модель; закрепляется за чатом

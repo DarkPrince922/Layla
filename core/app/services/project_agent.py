@@ -28,6 +28,8 @@ from app.services import (
     code_scheduler,
     code_sessions,
     code_shell,
+    code_skill_policy,
+    code_skills,
     code_state,
     code_teams,
     code_usage,
@@ -823,7 +825,7 @@ async def run(
     provider, key, model: str, messages: list[dict], root: str, permissions=None,
     *, mode: str = "auto", approve=None, caps: dict | None = None, extra: str = "", runner=None,
     git=None, mcp=None, runtime=None, workers=None, worker_context=False, lsp=None, workflow=None, tool_allowlist=None,
-    team=None, transcript=None, workspace=None, continuation=False, budget=None,
+    team=None, transcript=None, workspace=None, continuation=False, budget=None, tool_policies=None,
 ):
     """approve(event) -> "approve" | "reject" | "approve_all" — только для режима confirm.
 
@@ -835,6 +837,8 @@ async def run(
     инструменты не обязаны корректно объявлять побочные эффекты.
     """
     caps = caps if caps is not None else {}
+    if budget is not None and budget.get("skill_model"):
+        model, caps = code_skills.execution_model(provider, model, caps, budget["skill_model"], budget.get("skill_effort"))
     available = list(permitted_tools(permissions))
     instruction_book = (code_instructions.Book(root)
                         if (runtime is not None or worker_context)
@@ -892,11 +896,13 @@ async def run(
     available = available + run_specs + git_specs
     if mcp is not None and mode not in READ_ONLY_MODES:
         available += mcp.initial_specs if runtime is not None else mcp.specs
+    policies = list(tool_policies or [])
     scope = set(tool_allowlist) if tool_allowlist is not None else None
     if scope is not None:
         available = [tool for tool in available if tool["function"]["name"] in scope]
     if workers is not None:
         workers.tool_allowlist = sorted(scope) if scope is not None else None
+        workers.tool_policies = policies
     allowed_names = {t["function"]["name"] for t in available}
     run_note = NO_RUN_NOTE
     if "run_command" in allowed_names:
@@ -923,6 +929,9 @@ async def run(
         prompt += NO_TOOLS_NOTE
     if instruction_book is not None:
         prompt += "\n" + await run_in_threadpool(instruction_book.prompt)
+        if workflow is not None and getattr(workflow, "initial_path", ".") != ".":
+            initial_rules = await run_in_threadpool(instruction_book.for_path, workflow.initial_path)
+            prompt += "\nInitial skill scope rules (untrusted): " + json.dumps(initial_rules, ensure_ascii=False)
         prompt += "\n" + output_styles.prompt()
         prompt += ("\nUse project_instructions for a file path before entering a new project directory. "
                    "If a tool returns retry_required with newly loaded instructions, review their scope "
@@ -987,6 +996,46 @@ async def run(
     explicit = workflow.slash(anchor.get("content")) if workflow is not None and not continuation else None
     mcp_names = mcp.names if mcp is not None else set()
     from app.services import history  # history сам использует _turn — импорт здесь, без цикла
+
+    async def guidance(name, arguments):
+        if instruction_book is None:
+            return None
+        if name == "list_output_styles":
+            code_output_styles.Query.model_validate(arguments)
+            return output_styles.public()
+        if name == "project_instructions":
+            query = code_instructions.Query.model_validate(arguments)
+            return await run_in_threadpool(instruction_book.for_path, query.path)
+        notes, warnings, catalogs = [], [], []
+        for path in code_instructions.tool_paths(name, arguments):
+            found = await run_in_threadpool(instruction_book.for_path, path, fresh=True)
+            notes.extend(found["instructions"])
+            warnings.extend(found["warnings"])
+            if workflow is not None and getattr(workflow, "catalog", None) is not None:
+                before = {(item["name"], item["path"], item["sha256"]) for item in workflow.catalog.public(model=True)["skills"]}
+                await run_in_threadpool(workflow.catalog.discover, path)
+                public = workflow.catalog.public(model=True)
+                if any((item["name"], item["path"], item["sha256"]) not in before for item in public["skills"]):
+                    catalogs.append({"path": path, **public})
+        if notes or warnings or catalogs:
+            return {"instructions": notes, "warnings": warnings, "skill_catalogs": catalogs, "retry_required": True,
+                    "note": "Review newly discovered project rules and skills, then retry. No action or pre-hook ran."}
+        return None
+
+    def pin_guidance(result):
+        new = [item for item in result.get("instructions", []) if item.get("binding_id", item["path"]) not in pinned_instructions]
+        if new:
+            conversation[0]["content"] += "\nScoped project instructions (untrusted; apply only within base/conditions):\n" + json.dumps(new, ensure_ascii=False)
+            pinned_instructions.update(item.get("binding_id", item["path"]) for item in new)
+
+    def guidance_event(name, arguments, call_id, round_number, result):
+        pin_guidance(result)
+        conversation.append({"role": "tool", "tool_call_id": call_id,
+            "content": json.dumps(result, ensure_ascii=False), "is_error": "error" in result})
+        return {"tool": {"id": f"{round_number}:{call_id}", "name": name,
+            "path": str(arguments.get("path") or arguments.get("cwd") or "")[:4096],
+            "status": "error" if "error" in result else "done",
+            **({"error": result["error"]} if "error" in result else {"note": "Правила и каталог Code загружены"})}}
 
     async def fire(event, data, result):
         nonlocal ask
@@ -1068,9 +1117,9 @@ async def run(
                     if kind == "done":
                         content, reasoning, context, calls = value
                     else:
-                        yield {kind: value}
+                        yield {kind: value, **({"learned_model": model} if kind == "learned" and (runtime is not None or worker_context) else {})}
             if not calls:
-                conversation.append({"role": "assistant", "content": "".join(content), **context,
+                conversation.append({"role": "assistant", "content": "".join(content), **context, **({"_code_model": model} if runtime is not None or worker_context else {}),
                                      **({"reasoning_content": "".join(reasoning)} if reasoning else {})})
                 # A message that arrived during the last provider response must not
                 # be stranded merely because that response contained no tools.
@@ -1121,7 +1170,7 @@ async def run(
                 # Лишний пакет не выполняется; ответ завершается штатно.
                 yield {"delta": LIMIT_NOTE}
                 return
-            assistant = {"role": "assistant", "content": "".join(content), "tool_calls": calls, **context}
+            assistant = {"role": "assistant", "content": "".join(content), "tool_calls": calls, **context, **({"_code_model": model} if runtime is not None or worker_context else {})}
             if reasoning:
                 assistant["reasoning_content"] = "".join(reasoning)
             conversation.append(assistant)
@@ -1176,6 +1225,19 @@ async def run(
                     yield {"tool": {"id": f"{round_number}:{call['id']}", "name": name,
                                     "path": "", "status": "error", "error": "Некорректный JSON аргументов"}}
                     continue
+                if name in allowed_names and not all(code_skill_policy.allows(group, name, arguments) for group in policies):
+                    result = {"error": "Аргументы инструмента запрещены allowed-tools активного skill"}
+                    conversation.append({"role": "tool", "tool_call_id": call["id"], "content": json.dumps(result), "is_error": True})
+                    yield {"tool": {"id": f"{round_number}:{call['id']}", "name": name, "path": "", "status": "error", "error": result["error"]}}
+                    continue
+                if name in allowed_names:
+                    try:
+                        guidance_result = await guidance(name, arguments)
+                    except (OSError, ValueError) as exc:
+                        guidance_result = {"error": str(exc)[:1500]}
+                    if guidance_result is not None:
+                        yield guidance_event(name, arguments, call["id"], round_number, guidance_result)
+                        continue
                 pre = {}
                 if name in allowed_names:
                     async for update in fire("PreToolUse", {"tool_name": name, "tool_input": arguments,
@@ -1190,53 +1252,36 @@ async def run(
                 if pre.get("updated_input") is not None:
                     arguments = pre["updated_input"]
                     call["function"]["arguments"] = json.dumps(arguments, ensure_ascii=False)
+                    try:
+                        retarget = await guidance(name, arguments)
+                    except (OSError, ValueError) as exc:
+                        retarget = {"error": str(exc)[:1500]}
+                    if retarget is not None:
+                        yield guidance_event(name, arguments, call["id"], round_number, retarget)
+                        continue
+                if name in allowed_names and not all(code_skill_policy.allows(group, name, arguments) for group in policies):
+                    conversation.append({"role": "tool", "tool_call_id": call["id"], "content": '{"error":"Hook retarget violates skill allowed-tools"}', "is_error": True})
+                    continue
                 if workflow is not None and name in allowed_names:
                     pending_hook = name, arguments, call["id"], len(conversation), pre.get("context", "")
-                if instruction_book is not None and name in allowed_names:
-                    instruction_result = None
+                if name in {"list_skills", "read_skill"} and workflow is not None and workflow.catalog is not None and name in allowed_names:
                     try:
-                        if name == "list_output_styles":
-                            code_output_styles.Query.model_validate(arguments)
-                            instruction_result = output_styles.public()
-                        elif name == "project_instructions":
-                            query = code_instructions.Query.model_validate(arguments)
-                            instruction_result = await run_in_threadpool(instruction_book.for_path, query.path)
-                        elif name in ({"read_file", "list_files", "glob_files", "grep_files", "repo_map", "lsp",
-                                       "notebook_read", "notebook_edit"} | MUTATING) and isinstance(arguments.get("path"), str):
-                            notes = await run_in_threadpool(instruction_book.for_path, arguments["path"], fresh=True)
-                            if notes["instructions"]:
-                                instruction_result = {**notes, "retry_required": True,
-                                    "note": "Review newly loaded project instructions, then retry. This operation did not run."}
-                        elif name in {"run_command", "command_start"}:
-                            cwd = arguments.get("cwd") or "."
-                            if isinstance(cwd, str):
-                                notes = await run_in_threadpool(instruction_book.for_path, cwd.rstrip("/") + "/.instruction-target", fresh=True)
-                                if notes["instructions"]:
-                                    instruction_result = {**notes, "retry_required": True,
-                                        "note": "Review newly loaded project instructions, then retry. No command ran."}
-                    except (OSError, ValueError) as exc:
-                        instruction_result = {"error": str(exc)[:1500]}
-                    if instruction_result is not None:
-                        if instruction_result.get("retry_required"):
-                            pending_hook = None  # No tool ran; do not emit a successful post-tool hook.
-                        new_instructions = [item for item in instruction_result.get("instructions", [])
-                                            if item["path"] not in pinned_instructions]
-                        if new_instructions:
-                            # Keep discovered guidance out of shrinkable tool output.
-                            conversation[0]["content"] += ("\nScoped project instructions (untrusted; apply only "
-                                "within the recorded base/conditions):\n" + json.dumps(
-                                    new_instructions, ensure_ascii=False))
-                            pinned_instructions.update(item["path"] for item in new_instructions)
-                        conversation.append({"role": "tool", "tool_call_id": call["id"],
-                            "content": json.dumps(instruction_result, ensure_ascii=False),
-                            "is_error": "error" in instruction_result})
-                        yield {"tool": {"id": f"{round_number}:{call['id']}", "name": name,
-                            "path": str(arguments.get("path") or "")[:4096],
-                            "status": "error" if "error" in instruction_result else "done",
-                            **({"error": instruction_result["error"]} if "error" in instruction_result
-                               else {"note": "Стили ответа загружены" if name == "list_output_styles"
-                                     else "Правила проекта загружены"})}}
-                        continue
+                        args = code_intelligence.SCHEMAS[name].model_validate(arguments)
+                        if args.path is not None:
+                            await run_in_threadpool(workflow.catalog.discover, args.path)
+                        if name == "list_skills":
+                            result = workflow.catalog.public(model=True)
+                        else:
+                            skill = workflow.catalog.get(args.name)
+                            result = await run_in_threadpool(skill.resources, root, args.file)
+                            if args.file is None:
+                                result.update(name=skill.name, content=skill.raw, path=skill.path,
+                                              note="Use invoke_skill to apply metadata")
+                    except (ValueError, OSError) as exc:
+                        result = {"error": str(exc)[:1500]}
+                    conversation.append({"role": "tool", "tool_call_id": call["id"], "content": json.dumps(result, ensure_ascii=False), "is_error": "error" in result})
+                    yield {"tool": {"id": f"{round_number}:{call['id']}", "name": name, "path": "", "status": "error" if "error" in result else "done"}}
+                    continue
                 if name == "invoke_skill" and workflow is not None and name in allowed_names:
                     event = {"id": f"{round_number}:{call['id']}", "name": name,
                              "path": str(arguments.get("name", ""))[:100], "status": "running"}
@@ -1245,8 +1290,82 @@ async def run(
                     try:
                         args = code_hooks.Invoke.model_validate(arguments)
                         prepared = workflow.invoke(args, user=bool(round_number == 0 and explicit and args.name == explicit["name"]))
-                        activation = args.name, args.args
+                        activation = prepared["path"], args.args
                         limit = set(prepared["allowed_tools"]) if prepared["allowed_tools"] is not None else None
+                        target_model, target_caps = code_skills.execution_model(provider, model, caps, prepared["model"], prepared["effort"])
+                        if ask is not None and (target_model != model or prepared["effort"] is not None):
+                            yield {"tool": {**event, "status": "pending", "command": "Skill: модель " + target_model + ", effort=" + str(prepared["effort"] or "inherit")}}
+                            decision = await ask({**event, "status": "pending", "command": "Skill model: " + target_model})
+                            if decision == "approve_all":
+                                ask = None
+                            elif decision != "approve":
+                                raise ValueError("Пользователь отклонил настройки модели skill")
+                        proposed_policies = [*policies, *([prepared["tool_rules"]] if prepared["tool_rules"] is not None else [])]
+                        if prepared["dynamic"]:
+                            token = (prepared["path"], args.args)
+                            completed_commands = budget.setdefault("skill_commands_started", set()) if budget is not None else workflow.dynamic_started
+                            if token in completed_commands:
+                                raise ValueError("Эти динамические команды уже запускались; проверьте сохранённый результат перед повтором")
+                            if mode in READ_ONLY_MODES or runner is None or "run_command" not in allowed_names:
+                                raise ValueError("Динамические команды skill требуют разрешённый run_command вне Plan/Review")
+                            for dynamic in prepared["dynamic"]:
+                                if not all(code_skill_policy.allows(group, "run_command", {"command": dynamic["policy_command"]}) for group in proposed_policies):
+                                    raise ValueError("Динамическая команда запрещена allowed-tools skill")
+                            if used + len(prepared["dynamic"]) > MAX_CALLS:
+                                raise ValueError("Достигнут лимит вызовов инструментов")
+                            discovered = await guidance("run_command", {})
+                            if discovered:
+                                pin_guidance(discovered)
+                                raise ValueError("Обнаружены новые правила для команды; ознакомьтесь с ними перед повторным invoke_skill: " + json.dumps(discovered, ensure_ascii=False)[:6000])
+                            completed_commands.add(token)
+                            workflow.dynamic_started.add(token)
+                            outputs = []
+                            for index, dynamic in enumerate(prepared["dynamic"]):
+                                event_command = {"id": event["id"] + f":command:{index}", "name": "run_command", "path": prepared["path"],
+                                    "command": dynamic["command"], "note": "Динамический контекст skill", "status": "running"}
+                                command_args = {"command": dynamic["command"], "shell": dynamic["shell"], "timeout": 30}
+                                used += 1
+                                if budget is not None:
+                                    budget["calls"] = used
+                                command_pre = {}
+                                async for update in fire("PreToolUse", {"tool_name": "run_command", "tool_input": command_args,
+                                    "tool_use_id": event_command["id"]}, command_pre):
+                                    yield update
+                                if command_pre.get("blocked"):
+                                    raise ValueError("PreToolUse: " + command_pre["reason"])
+                                if command_pre.get("updated_input") is not None:
+                                    command_args = command_pre["updated_input"]
+                                    if not all(code_skill_policy.allows(group, "run_command", command_args) for group in proposed_policies):
+                                        raise ValueError("Hook retarget violates skill allowed-tools")
+                                    retarget = await guidance("run_command", command_args)
+                                    if retarget is not None:
+                                        pin_guidance(retarget)
+                                        raise ValueError("Hook изменил область правил; команда не выполнена: " + json.dumps(retarget, ensure_ascii=False)[:6000])
+                                    event_command["command"] = str(command_args.get("command", ""))
+                                validated, problem = code_runner.validate("run_command", command_args)
+                                if problem or validated.run_in_background or validated.interactive:
+                                    raise ValueError(problem or "Динамическая команда должна завершаться в переднем плане")
+                                result_command = None
+                                async for update in _run_code_tool(runner, "run_command", command_args, event_command, ask,
+                                    taken=taken, writable=permissions is None or "files.write" in permissions):
+                                    if "ask_off" in update:
+                                        ask = None
+                                    elif "outcome" in update:
+                                        result_command = update["outcome"]
+                                    else:
+                                        yield update
+                                failed = result_command is None or result_command.get("error") or result_command.get("exit_code") not in (None, 0) or result_command.get("timed_out") or result_command.get("signal")
+                                command_post = {}
+                                async for update in fire("PostToolUseFailure" if failed else "PostToolUse",
+                                    {"tool_name": "run_command", "tool_input": command_args, "tool_response": result_command,
+                                     "tool_use_id": event_command["id"]}, command_post):
+                                    yield update
+                                if failed or command_post.get("blocked"):
+                                    raise ValueError("Динамическая команда не завершилась успешно; её результат сохранён, автоматического повтора нет")
+                                outputs.append("[Untrusted skill command output]\n" + str(result_command.get("output", ""))[:8000]
+                                    + "\n" + command_pre.get("context", "") + "\n" + command_post.get("context", ""))
+                            prepared["instructions"] = prepared["skill"].render(args.args, workflow.session_id,
+                                user=bool(round_number == 0 and explicit), dynamic=outputs)
                         if prepared["fork"]:
                             if workers is None:
                                 raise ValueError("В этом контексте создание fork-воркера недоступно")
@@ -1262,17 +1381,36 @@ async def run(
                             inherited = scope & limit if scope is not None and limit is not None else scope if limit is None else limit
                             result = await workers.start_agent(code_workers.AgentStart(task=prepared["instructions"], role=role),
                                 tool_allowlist=sorted(inherited) if inherited is not None else None,
-                                skill_hooks=[{"hooks": prepared["hooks"], "source": prepared["path"], "directory": prepared["directory"]}])
+                                skill_hooks=[{"hooks": prepared["hooks"], "source": prepared["path"], "directory": prepared["directory"]}],
+                                tool_policies=proposed_policies, model_override=prepared["model"], effort=prepared["effort"])
                             result["skill"] = args.name
                         else:
+                            if target_model != model:
+                                for message in conversation:
+                                    message.pop("_anthropic_thinking", None)
+                                    message.pop("reasoning_content", None)
+                                if transcript is not None and hasattr(transcript, "model_changed"):
+                                    await transcript.model_changed()
+                            model, caps = target_model, target_caps
+                            if budget is not None:
+                                budget.update(skill_model=model, skill_effort=prepared["effort"])
+                            if workers is not None:
+                                workers.model, workers.caps = model, dict(caps)
                             workflow.register(prepared["hooks"], prepared["path"], prepared["directory"])
+                            policies = proposed_policies
+                            if workers is not None:
+                                workers.tool_policies = policies
                             if limit is not None:
                                 scope = scope & limit if scope is not None else limit
                                 available = [tool for tool in available if tool["function"]["name"] in scope]
                                 allowed_names = {tool["function"]["name"] for tool in available}
                                 if workers is not None:
                                     workers.tool_allowlist = sorted(scope)
+                            if transcript is not None and hasattr(transcript, "activate_skill"):
+                                await transcript.activate_skill(model, caps, scope, policies,
+                                    {"hooks": prepared["hooks"], "source": prepared["path"], "directory": prepared["directory"]})
                             result = {key: prepared[key] for key in ("name", "path", "instructions", "allowed_tools")}
+                            result.update(model=model, effort=prepared["effort"])
                         final = {**event, "status": "done", "note": "Skill активирован"}
                     except (ValueError, OSError) as exc:
                         if activation is not None:
@@ -1311,7 +1449,7 @@ async def run(
                             transcript.transitioning = True
                             await transcript.flush(conversation)
                         yield {"workspace_restart": list(conversation[1:]), "approve_all": ask is None,
-                               "tool_allowlist": sorted(scope) if scope is not None else None}
+                               "tool_allowlist": sorted(scope) if scope is not None else None, "tool_policies": policies}
                         return
                     continue
                 if team is not None and name in code_teams.SCHEMAS and name in allowed_names:
@@ -1411,7 +1549,7 @@ async def run(
                                 await transcript.flush(conversation)
                             # Rebuild the runtime prompt for Plan; retain current
                             # persona/summary messages but drop the old Auto prompt.
-                            yield {"mode_restart": {"mode": "plan", "messages": list(conversation[1:])}}
+                            yield {"mode_restart": {"mode": "plan", "messages": list(conversation[1:]), "tool_allowlist": sorted(scope) if scope is not None else None, "tool_policies": policies}}
                         else:
                             conversation.append({"role": "assistant", "content": args.plan})
                             yield {"delta": ("\n\n" if content else "") + args.plan}

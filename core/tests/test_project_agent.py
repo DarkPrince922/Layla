@@ -201,6 +201,7 @@ async def test_agent_creates_reads_edits_deletes_and_persists(
             len(project_agent.TOOLS) + len(agent_git.GIT_TOOLS)
                 + len(code_state.TOOLS) + len(code_notebooks.TOOLS) + len(code_workers.TOOLS) + len(code_teams.TOOLS) + len(code_workspace.TOOLS)
                 + len(code_instructions.TOOLS) + len(code_output_styles.TOOLS) + len(code_scheduler.TOOLS) + len(code_context.TOOLS)
+                + 1  # invoke_skill remains available to discover nested-only skills
         )
         history = results(body, native)
         if round_number == 0:

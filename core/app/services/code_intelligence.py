@@ -59,11 +59,14 @@ class RepoMap(BaseModel):
 
 class ListSkills(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    path: str | None = Field(default=None, max_length=4096)
 
 
 class ReadSkill(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    name: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
+    name: str = Field(min_length=1, max_length=647, pattern=r"^[A-Za-z0-9_.:-]+$")
+    path: str | None = Field(default=None, max_length=4096)
+    file: str | None = Field(default=None, max_length=4096)
 
 
 SCHEMAS = {
@@ -78,8 +81,8 @@ DESCRIPTIONS = {
     "glob_files": "Find project files by glob pattern. Results are sorted, bounded and pageable with offset.",
     "grep_files": "Search project text with a regular expression. Supports content, files_with_matches and count output, a file glob, context lines and pagination.",
     "repo_map": "Build a compact repository map: important files and top-level classes/functions. Use near the start of work on an unfamiliar or large project.",
-    "list_skills": "List optional project workflows stored in .layla/skills/*.md.",
-    "read_skill": "Read one project workflow from .layla/skills/<name>.md when it matches the task.",
+    "list_skills": "List available project skills in this run snapshot, including discovered nested and conditional skills. Optional path discovers that ancestor chain.",
+    "read_skill": "Read a snapshotted skill by name (including namespace:name). Optional path selects nested scope; file reads a supporting file relative to that skill directory. invoke_skill applies metadata.",
 }
 
 TOOLS = [
@@ -204,15 +207,18 @@ def repo_map(root: str, args: RepoMap) -> dict:
 def list_skills(root: str, _args: ListSkills) -> dict:
     from app.services.code_skills import Catalog
 
-    return {"skills": sorted(skill.name for skill in Catalog(root).skills.values()
-                             if skill.public()["model_invocable"])}
+    catalog = Catalog(root, _args.path or ".")
+    return {"skills": sorted(skill.name for skill in catalog.skills.values()
+                             if skill.active and skill.public()["model_invocable"])}
 
 
 def read_skill(root: str, args: ReadSkill) -> dict:
     from app.services.code_skills import Catalog
 
-    skill = Catalog(root).get(args.name)
-    return {"name": args.name, "content": skill.raw, "path": skill.path,
+    skill = Catalog(root, args.path or ".").get(args.name)
+    if args.file is not None:
+        return skill.resources(root, args.file)
+    return {"name": args.name, "content": skill.raw, "path": skill.path, **skill.resources(root),
             "note": "Use invoke_skill to activate frontmatter and substitute arguments"}
 
 

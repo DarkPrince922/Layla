@@ -39,10 +39,11 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 @router.get("/{project_id}/chats/{chat_id}/workspaces/{workspace_id}/skills")
 @router.get("/{project_id}/skills")
 async def project_skills(project_id: str, user: User = Depends(get_current_user),
-                          session: AsyncSession = Depends(get_session), workspace_id: str | None = None, chat_id: str | None = None) -> dict:
+                          session: AsyncSession = Depends(get_session), workspace_id: str | None = None, chat_id: str | None = None,
+                          path: str = Query(default=".", max_length=4096)) -> dict:
     project = await _bound_project(session, user, project_id, workspace_id, chat_id)
     try:
-        catalog = await run_in_threadpool(code_skills.Catalog, _project_root(project))
+        catalog = await run_in_threadpool(code_skills.Catalog, _project_root(project), path)
     except (ValueError, OSError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"skills": [skill.public() for skill in catalog.skills.values()], "errors": catalog.errors}

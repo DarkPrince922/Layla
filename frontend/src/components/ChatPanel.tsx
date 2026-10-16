@@ -59,6 +59,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
   const [chatId, setChatId] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
   const [input, setInput] = useState("");
+  const [skillPath, setSkillPath] = useState<string | null>(null);
   const [personaId, setPersonaId] = useState("");
   const [model, setModel] = useState("");
   const [providerId, setProviderId] = useState("");
@@ -115,6 +116,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
     setChatId(id); setError(null); setPersonaId("");
     remember(scope, id || "new");
     setInput(read(`${scope}:draft:${id || "new"}`) || "");
+    setSkillPath(read(`${scope}:skill-path:${id || "new"}`));
   }
   useEffect(() => {
     setReady(false); setChatId(null); generation.current++;
@@ -199,7 +201,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
       }
     }
     if (scroll.current && scroll.current.scrollHeight - scroll.current.scrollTop - scroll.current.clientHeight < 300) scroll.current.scrollTo({ top: scroll.current.scrollHeight });
-  }, [messages, onFileChange, projectId, qc]);
+  }, [messages, onFileChange, projectId, qc, selectedWorkspace?.id]);
 
   // Задача извне (правка по клику в превью): отправляется, когда нужный чат открыт и свободен.
   const queued = useRef<{ text: string; chat?: string } | null>(null);
@@ -242,12 +244,13 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
         id = chat.id;
         if (version === generation.current) { setChatId(id); remember(scope, id); }
       }
-      const signature = JSON.stringify([content, runMode, override?.planId, override?.resumeId]);
+      const signature = JSON.stringify([content, runMode, override?.planId, override?.resumeId, !override && content.startsWith("/") ? skillPath : null]);
       if (!request.current || request.current.content !== signature || request.current.chat !== id) request.current = { content: signature, chat: id, id: newRequestId() };
-      await api.post<Job>(`/chats/${id}/run`, { content, model, provider_id: selected?.provider_id, request_id: request.current.id, mode: runMode, approved_plan_id: override?.planId, resume_message_id: override?.resumeId });
+      await api.post<Job>(`/chats/${id}/run`, { content, model, provider_id: selected?.provider_id, request_id: request.current.id, mode: runMode, approved_plan_id: override?.planId, resume_message_id: override?.resumeId, skill_path: !override && content.startsWith("/") ? skillPath : undefined });
       if (!override) {
         remember(`${scope}:draft:${chatId || "new"}`, "");
-        if (version === generation.current) setInput("");
+        remember(`${scope}:skill-path:${chatId || "new"}`, "");
+        if (version === generation.current) { setSkillPath(null); setInput(""); }
       }
       request.current = null;
     } catch (e) {
@@ -449,8 +452,8 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
         {MODES.map(({ id, label, hint, icon: Icon }) => <button key={id} role="radio" aria-checked={mode === id} title={hint} onClick={() => pickMode(id)} className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 ${mode === id ? "bg-accent-500/20 text-accent-100" : "text-neutral-400 hover:bg-ink-900"}`}><Icon className="h-3.5 w-3.5" />{label}</button>)}
       </div>
       <div className="mb-3 flex flex-wrap gap-2 text-xs">
-        {domain === "code" && projectId && <CodeSkillPicker key={`${owner}:${projectId}`} projectId={projectId} disabled={running || sending}
-          onChoose={name => { const text = `/${name} ${input}`; setInput(text); remember(`${scope}:draft:${chatId || "new"}`, text); }} />}
+        {domain === "code" && projectId && <CodeSkillPicker key={`${owner}:${projectId}:${chatId || "new"}:${selectedWorkspace?.id || "source"}`} projectId={projectId} chatId={chatId} workspaceId={selectedWorkspace?.id} disabled={running || sending}
+          onChoose={(name, path) => { const text = `/${name} ${input}`; setInput(text); setSkillPath(path); remember(`${scope}:draft:${chatId || "new"}`, text); remember(`${scope}:skill-path:${chatId || "new"}`, path); }} />}
         <select aria-label="Персона" value={personaId} disabled={!!chatId || sending} onChange={e => pickPersona(e.target.value)} className="min-w-0 max-w-full rounded-lg bg-ink-900 px-3 py-2"><option value="">Без персоны</option>{personas.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
         <select aria-label="Модель" value={choice} disabled={running || sending} onChange={e => pickModel(e.target.value)} className="min-w-0 max-w-full rounded-lg bg-ink-900 px-3 py-2">{!models.length && <option value="">Нет активных моделей</option>}{models.map(m => <option key={`${m.provider_id}|${m.name}`} value={`${m.provider_id}|${m.name}`}>{m.name} · {m.provider}</option>)}</select>
       </div>

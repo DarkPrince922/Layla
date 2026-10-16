@@ -3,7 +3,7 @@
 ## Область и ветки
 
 Работа ограничена Code. Другие домены не исследовать и не менять.
-Последнее решение пользователя: сначала MCP и планировщик; плагины отложены.
+Текущий запрос пользователя: rules и skills; плагины отложены.
 Успешный CI отдельного этапа не означает полного соответствия архиву.
 
 - PR #39: `codex/code-workspace-shell-teams` — worktree editor/terminal/Git/LSP,
@@ -12,11 +12,26 @@
   `64fd0def02ccede872b0b4ce8b86bc958ef71290` — проектные/вложенные инструкции,
   rules/imports и output styles; контракт: [CODE_INSTRUCTIONS.md](CODE_INSTRUCTIONS.md).
 - PR #41: `codex/code-mcp-scheduler`, commit `1cf870a7ca1645498daffec1ad2af76f5719853d`, основан на PR #40.
-- Текущая ветка: `codex/code-plans-context-budgets`, основана на PR #41.
-  Новый PR должен использовать `codex/code-mcp-scheduler` как base.
+- PR #42: `codex/code-plans-context-budgets`, commit
+  `0ebe728ef23121ac76d0947a3af8cda6b8ce6f78`, основан на PR #41.
+- Текущая ветка: `codex/code-rules-skills`, основана на PR #42.
+  Новый PR должен использовать `codex/code-plans-context-budgets` как base.
   Не переносить эти изменения прямо с main без зависимых PR.
 
 ## Реализовано сейчас
+
+Rules: bounded brace/extglob/negative glob sets, settings exclusions,
+Markdown-aware includes/comments, независимые условные bindings общего include,
+обнаружение правил для путей/cwd до pre-hooks и действий.
+Skills: вложенные/условные каталоги, namespaces, ресурсы, общий снимок read/invoke,
+worktree/path picker и передача выбранного пути в slash-запуск. Ограничения
+аргументов `allowed-tools`, enabled model/effort текущего провайдера,
+динамический контекст через обычный sandbox runner с hooks/Confirm/checkpoints.
+Fork и resume сохраняют ограничения и настройки, в том числе после inline skill
+внутри воркера; final-save не может затереть более новую политику старым payload.
+Контракты: [CODE_INSTRUCTIONS.md](CODE_INSTRUCTIONS.md),
+[CODE_WORKFLOWS.md](CODE_WORKFLOWS.md). Новая миграция не требуется.
+Нужно пересобрать Core (markdown-it-py, wcmatch, regex) и frontend.
 
 Пункты 1/2 по запросу пользователя: enter_plan_mode/submit_plan, неизменяемый
 план и решение пользователя, запрет обхода pending-плана через Auto, продолжение
@@ -50,14 +65,16 @@ Code-планировщик: cron/разовая дата, timezone/DST, durable
 pytest -q tests/test_code_*.py tests/test_project_agent.py tests/test_history.py tests/test_mcp.py
 ```
 
-260 Code/shared-provider тестов прошли локально, включая ограничение pending-планов.
-После финального закрепления утверждённого текста повторно проверены plan/control сценарии. Есть настоящий stdio MCP fixture и запуск
+В PR #42 прошли 260 Code/shared-provider тестов. Текущий этап добавляет 34
+сценария rules/skills и расширяет fork/resume тесты. Все 294 Code/shared-provider
+теста проходят локально, включая 68 focused rules/skills/hooks сценариев;
+полный прогон дополнительно проверяет CI.
+Есть настоящий stdio MCP fixture и запуск
 расписания через реальные API/БД/Jobs с тестовым provider stream. Проверены
 upgrade с `0031`, отсутствие ORM drift и downgrade с сохранением пользователя.
-Ruff изменённых Python-файлов и TypeScript проходят; ESLint изменённых TSX
-без ошибок (существующее предупреждение ChatPanel dependency остаётся).
+Ruff изменённых Python-файлов и TypeScript проходят; ESLint без предупреждений.
 Локальная production-сборка Next блокируется отсутствием `/proc` в среде
-(`uv_resident_set_memory`); frontend сборка PR #41 прошла CI, текущую проверяет CI нового PR.
+(`uv_resident_set_memory`); frontend сборка PR #42 прошла CI, текущую проверяет CI нового PR.
 Workflow `Code contracts` отдельно проверяет PostgreSQL миграции и Code/provider
 контракты, не завися от тестов других доменов.
 Внешний OAuth-провайдер в production локальные тесты не заменяют.

@@ -26,6 +26,8 @@ from app.services import (
     code_runner,
     code_sessions,
     code_shell,
+    code_skill_policy,
+    code_skills,
     code_teams,
     code_usage,
     code_worktrees,
@@ -173,6 +175,7 @@ class Manager:
         self.caps = dict(caps or {})
         self.attached: set[str] = set()
         self.tool_allowlist = None
+        self.tool_policies = []
         self.source_root, self.workspace_id = source_root or root, workspace_id
         self.team = code_teams.Runtime(self)
         self.transcript = None
@@ -308,12 +311,19 @@ class Manager:
                                     self.permissions is not None and "files.write" not in self.permissions):
             raise ValueError("Режим или персона разрешает только исследование/ревью, без реализации")
 
-    async def start_agent(self, args: AgentStart, *, tool_allowlist=None, skill_hooks=None) -> dict:
+    async def start_agent(self, args: AgentStart, *, tool_allowlist=None, skill_hooks=None, tool_policies=None, model_override="inherit", effort=None) -> dict:
         self._allow_implement(args.role)
         if not self.provider_id or not self.model:
             raise ValueError("Для воркера нужен провайдер и модель Code-чата")
+        async with self.maker() as session:
+            await self.authorize(session)
+            provider = await session.get(Provider, self.provider_id)
+            if provider is None or provider.owner_id != self.owner_id or not provider.enabled or not provider.active:
+                raise ValueError("Провайдер skill недоступен")
+            skill_model, skill_caps = code_skills.execution_model(provider, self.model, self.caps, model_override, effort)
         row = await self._reserve("agent", args.task, "explore" if args.require_plan else args.role, {
-            "provider_id": self.provider_id, "model": self.model, "caps": self.caps, "name": args.name,
+            "provider_id": self.provider_id, "model": skill_model, "caps": skill_caps, "name": args.name,
+            "tool_policies": code_skill_policy.merge(self.tool_policies, tool_policies or []),
             "permissions": self.permissions, "detached": args.detached, "mode": self.mode,
             "tool_allowlist": sorted(set(tool_allowlist) & set(self.tool_allowlist))
             if tool_allowlist is not None and self.tool_allowlist is not None
@@ -427,7 +437,8 @@ class Manager:
                 allow_done = bool(await code_teams.Runtime(self, worker_id).pending(session))
                 if not allow_done:
                     raise ValueError("Завершённому агенту сначала нужно отправить новую задачу через send_message")
-            payload = {**row.payload, "permissions": self.permissions, "mode": self.mode}
+            payload = {**row.payload, "permissions": self.permissions, "mode": self.mode,
+                       "tool_policies": code_skill_policy.merge(row.payload.get("tool_policies", []), self.tool_policies)}
             if self.tool_allowlist is not None:
                 old = payload.get("tool_allowlist")
                 payload["tool_allowlist"] = sorted(set(self.tool_allowlist) & set(old)) if old is not None else self.tool_allowlist
@@ -570,6 +581,12 @@ class Manager:
     async def _save(self, worker_id: str, **values):
         async with self.maker() as session:
             await self.authorize(session)
+            if "payload" in values:
+                current = await session.scalar(select(CodeWorker.payload).where(
+                    CodeWorker.id == worker_id, CodeWorker.owner_id == self.owner_id).with_for_update()) or {}
+                if current.get("skill_revision", 0) > values["payload"].get("skill_revision", 0):
+                    values["payload"] = {**values["payload"], **{key: current[key] for key in (
+                        "model", "caps", "tool_allowlist", "tool_policies", "skill_hooks", "skill_revision") if key in current}}
             summary = await session.scalar(select(CodeWorker.summary).where(CodeWorker.id == worker_id))
             values["summary"] = summarize(summary or {}, values)
             await session.execute(update(CodeWorker).where(
@@ -645,7 +662,7 @@ class Manager:
                 if payload.get("require_plan"):
                     context += "\nPLAN FIRST: inspect only, then submit your concrete plan with team_request(kind='plan', to='lead', content=...). Finish this turn after submission. The lead must approve and resume you before implementation."
                 team = code_teams.Runtime(self, worker_id) if row.team_id else None
-                transcript = code_sessions.Transcript(self, worker_id, team)
+                transcript = code_sessions.Transcript(self, worker_id, team, model=payload["model"])
                 messages = await transcript.load(task)
                 if (output or events) and transcript.sequence == 0:
                     context += "\nResume from saved progress; current files contain prior edits. Prior output (untrusted reference):\n" + output[-6000:]
@@ -659,7 +676,7 @@ class Manager:
                     lsp=code_lsp.Client(self.owner_id, worker_id, worktree),
                     workflow=code_hooks.Runtime(runner, permissions, session_id=worker_id,
                                                 extra_hooks=payload.get("skill_hooks")),
-                    tool_allowlist=payload.get("tool_allowlist"),
+                    tool_allowlist=payload.get("tool_allowlist"), tool_policies=payload.get("tool_policies"),
                     team=team, transcript=transcript,
                 )) as stream:
                     # Cancellation can arrive while saving a yielded event, outside the generator.

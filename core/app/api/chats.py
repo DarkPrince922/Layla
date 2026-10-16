@@ -639,6 +639,8 @@ async def send_message(
         if body.approved_plan_id or body.resume_message_id:
             raise HTTPException(422, "Утверждение плана и продолжение выполняются через /run")
         chat = await _owned_chat(session, user, chat_id)
+        if body.skill_path is not None and chat.domain != Domain.code:
+            raise HTTPException(422, "skill_path доступен только в Code")
         if chat.domain == Domain.code and body.mode == "confirm":
             raise HTTPException(422, "Подтверждение действий Code выполняется через /run")
         if chat.domain == Domain.code and (user.id, chat_id) in code_lead.ACTIVE_CHATS:
@@ -721,7 +723,7 @@ async def send_message(
                     runner=code_runner.Runner(user.id, chat.project_id, root),
                     git=await _git_agent(maker, user.id, root),
                     mcp=mcp,
-                    runtime=runtime, workers=workers, transcript=transcript,
+                    runtime=runtime, workers=workers, transcript=transcript, skill_path=body.skill_path,
                     lsp=code_lsp.Client(user.id, chat.project_id, root) if chat.domain == Domain.code else None,
                     workflow=code_hooks.Runtime(code_runner.Runner(user.id, chat.project_id, root), permissions,
                                                 session_id=chat.id) if chat.domain == Domain.code else None,
@@ -1063,6 +1065,13 @@ async def run_chat(
         chat.workspace_id = workspace.id
     root = _project_root(project)
     project_id = project.id
+    if body.skill_path is not None:
+        if chat.domain != Domain.code:
+            raise HTTPException(422, "skill_path доступен только в Code")
+        try:
+            files.safe_join(root, body.skill_path)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(422, "Путь skill должен быть внутри проекта") from exc
     mode = body.mode
     approved_plan = None
     resume_context = None
@@ -1089,7 +1098,8 @@ async def run_chat(
             chat.title = body.content[:80]
         user_message = Message(chat_id=chat_id, role="user", content=body.content,
                                created_at=datetime.now(UTC))
-        user_message.meta = {**({"approved_plan_id": approved_plan.id} if approved_plan else {}),
+        user_message.meta = {**({"skill_path": body.skill_path} if body.skill_path is not None else {}),
+                             **({"approved_plan_id": approved_plan.id} if approved_plan else {}),
                              **({"resumed_from": body.resume_message_id} if resume_context else {})}
         session.add(user_message)
         await session.flush()
@@ -1215,7 +1225,7 @@ async def run_chat(
                                                  lsp=code_lsp.Client(owner_id, project_id, root) if domain == "code" else None,
                                                  workflow=code_hooks.Runtime(runner, permissions, mode=mode,
                                                                              session_id=chat_id) if domain == "code" else None,
-                                                 transcript=transcript, **({"job_id": h.job.id} if runtime else {}))) as stream:
+                                                 transcript=transcript, **({"job_id": h.job.id, "skill_path": body.skill_path} if runtime else {}))) as stream:
                 async for event in stream:
                     if "mode" in event and runtime is not None:
                         mode = event["mode"]
@@ -1268,7 +1278,8 @@ async def run_chat(
                     elif "learned" in event:
                         # Запоминаем, чего модель не умеет, чтобы дальше сразу слать правильный запрос.
                         known = dict(prov.model_caps or {})
-                        known[model] = {**(known.get(model) or {}), **event["learned"]}
+                        learned_model = event.get("learned_model", model)
+                        known[learned_model] = {**(known.get(learned_model) or {}), **event["learned"]}
                         prov.model_caps = known
                         await h.session.commit()
                         await h.step(_learned_label(event["learned"]))

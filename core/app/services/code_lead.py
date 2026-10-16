@@ -26,6 +26,7 @@ async def run(provider, key, model, messages, root, permissions=None, *, runtime
     workspace.job_id = _unused.get("job_id")
     caps = caps if caps is not None else {}
     scope = _unused.get("tool_allowlist")
+    policies = _unused.get("tool_policies") or []
     budget, continuation = {}, False
     binding = (runtime.owner_id, runtime.chat_id)
     acquired = False
@@ -57,14 +58,17 @@ async def run(provider, key, model, messages, root, permissions=None, *, runtime
                 async with aclosing(project_agent.run(provider, key, model, messages, current_root, permissions,
                     mode=mode, approve=approve, caps=caps, runtime=runtime, workers=workers, git=current_git, mcp=mcp,
                     transcript=transcript, workspace=workspace, continuation=continuation, budget=budget,
-                    tool_allowlist=scope,
+                    tool_allowlist=scope, tool_policies=policies,
                     extra="Current Code workspace: " + str(state),
                     runner=runner, lsp=code_lsp.Client(runtime.owner_id, cache_id, current_root),
-                    workflow=code_hooks.Runtime(runner, permissions, mode=mode, session_id=runtime.chat_id))) as stream:
+                    workflow=code_hooks.Runtime(runner, permissions, mode=mode, session_id=runtime.chat_id,
+                                                initial_path=_unused.get("skill_path") or "."))) as stream:
                     async for event in stream:
                         if "mode_restart" in event:
                             mode = event["mode_restart"]["mode"]
                             messages = event["mode_restart"]["messages"]
+                            scope = event["mode_restart"].get("tool_allowlist")
+                            policies = event["mode_restart"].get("tool_policies", policies)
                             workspace.mode = mode
                             continuation, restarted = True, True
                             yield {"mode": mode}
@@ -72,6 +76,7 @@ async def run(provider, key, model, messages, root, permissions=None, *, runtime
                         if "workspace_restart" in event:
                             messages = event["workspace_restart"]
                             scope = event.get("tool_allowlist")
+                            policies = event.get("tool_policies", policies)
                             if event.get("approve_all"):
                                 approve = None
                             continuation, restarted = True, True
