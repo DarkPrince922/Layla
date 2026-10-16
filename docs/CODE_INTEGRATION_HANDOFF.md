@@ -28,7 +28,8 @@ CI отдельного этапа не означает полного соот
 pytest -q tests/test_code_*.py tests/test_project_agent.py tests/test_history.py
 ```
 
-171 тест прошёл локально. Проверены Code tools/API, воркеры, сессии, hooks,
+171 тест прошёл локально. После финальной правки повторно прошли 62 теста
+инструкций, стилей, project-agent и hooks. Проверены Code tools/API, воркеры, сессии, hooks,
 worktrees и история. Ruff для изменённых Python-файлов прошёл. Изменений схемы
 БД, sandbox и frontend в этом продолжении нет. Для PR #39 frontend и sandbox
 прошли CI; общий CI Core нужно проверять отдельно по актуальному коммиту.

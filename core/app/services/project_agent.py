@@ -1176,6 +1176,8 @@ async def run(
                     except (OSError, ValueError) as exc:
                         instruction_result = {"error": str(exc)[:1500]}
                     if instruction_result is not None:
+                        if instruction_result.get("retry_required"):
+                            pending_hook = None  # No tool ran; do not emit a successful post-tool hook.
                         new_instructions = [item for item in instruction_result.get("instructions", [])
                                             if item["path"] not in pinned_instructions]
                         if new_instructions:

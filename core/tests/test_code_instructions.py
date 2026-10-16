@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -96,6 +97,17 @@ async def test_agent_reviews_nested_instructions_before_writing(tmp_path, monkey
     write(tmp_path, "CLAUDE.md", "ROOT_GUIDANCE")
     write(tmp_path, "src/CLAUDE.md", "NESTED_GUIDANCE")
     turns = 0
+    hook_events = []
+
+    async def prepare():
+        return ""
+
+    async def fire(event, data, _ask):
+        hook_events.append((event, data))
+        yield {"hook_result": {}}
+
+    workflow = SimpleNamespace(runner=SimpleNamespace(root=str(tmp_path)), prepare=prepare,
+                               fire=fire, slash=lambda _: None, tools=list)
 
     async def turn(_provider, _key, _model, conversation, available, *_args):
         nonlocal turns
@@ -116,9 +128,12 @@ async def test_agent_reviews_nested_instructions_before_writing(tmp_path, monkey
 
     monkeypatch.setattr(project_agent, "_turn", turn)
     events = [event async for event in project_agent.run(None, None, "mock",
-        [{"role": "user", "content": "Create src/new.txt"}], str(tmp_path), worker_context=True)]
+        [{"role": "user", "content": "Create src/new.txt"}], str(tmp_path), worker_context=True,
+        workflow=workflow)]
     assert (tmp_path / "src/new.txt").read_text() == "created"
     assert sum("checkpoint" in event for event in events) == 1
+    assert sum(event == "PostToolUse" and data["tool_name"] == "write_file"
+               for event, data in hook_events) == 1
 
 
 @pytest.mark.parametrize(("worker_context", "permissions"), [(False, None), (True, [])])
