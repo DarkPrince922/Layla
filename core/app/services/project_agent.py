@@ -1393,7 +1393,7 @@ async def run(
                                     await transcript.model_changed()
                             model, caps = target_model, target_caps
                             if budget is not None:
-                                budget.update(skill_model=model, skill_effort=prepared["effort"])
+                                budget.update(skill_model=model, skill_effort=caps.get("reasoning_effort"))
                             if workers is not None:
                                 workers.model, workers.caps = model, dict(caps)
                             workflow.register(prepared["hooks"], prepared["path"], prepared["directory"])

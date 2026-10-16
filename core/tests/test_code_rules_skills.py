@@ -139,7 +139,8 @@ async def test_nested_only_skill_remains_discoverable_and_activation_uses_snapsh
 
 
 async def test_inline_model_effort_and_same_batch_tool_policy(tmp_path, monkeypatch):
-    write(tmp_path, ".layla/skills/check.md", "---\nmodel: fast\neffort: high\nallowed-tools: [Read(src/**)]\n---\nInspect source")
+    write(tmp_path, ".layla/skills/check.md", "---\nmodel: fast\neffort: high\nallowed-tools: [Read(src/**), Skill]\n---\nInspect source")
+    write(tmp_path, ".layla/skills/inherit.md", "---\nallowed-tools: [Read(src/**)]\n---\nKeep inherited model and effort")
     write(tmp_path, "src/a.py", "ALLOWED_SOURCE")
     write(tmp_path, "private.txt", "PRIVATE")
     provider = SimpleNamespace(models=[{"name": "fast"}], default_model="normal", model_caps={"fast": {"context_window": 8000}})
@@ -151,16 +152,19 @@ async def test_inline_model_effort_and_same_batch_tool_policy(tmp_path, monkeypa
         assert model == "fast" and kwargs["caps"]["reasoning_effort"] == "high"
         if turns == 1:
             yield "tool_calls", [call("read_file", path="private.txt"), call("read_file", path="src/a.py")]
-        else:
+        elif turns == 2:
             assert "PRIVATE" not in json.dumps(conversation)
             assert "ALLOWED_SOURCE" in conversation[-1]["content"]
+            yield "tool_calls", [call("invoke_skill", name="inherit")]
+        else:
+            assert budget["skill_effort"] == "high"
             yield "content", "Checked"
 
     monkeypatch.setattr(project_agent.tool_chat, "stream_turn", stream)
     runner = code_runner.Runner("owner", "project", str(tmp_path))
     events = [item async for item in project_agent.run(provider, "key", "normal", [{"role": "user", "content": "/check"}],
         str(tmp_path), workflow=code_hooks.Runtime(runner), worker_context=True, budget=budget)]
-    assert budget["skill_model"] == "fast" and budget["skill_effort"] == "high" and turns == 2
+    assert budget["skill_model"] == "fast" and budget["skill_effort"] == "high" and turns == 3
     assert any(item.get("tool", {}).get("status") == "error" for item in events)
     with pytest.raises(ValueError, match="включённой"):
         code_skills.execution_model(provider, "normal", {}, "foreign")
