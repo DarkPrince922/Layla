@@ -100,7 +100,7 @@ def classify_rejection(status: int, body: str) -> CapabilityError | None:
         return CapabilityError("История не помещается в контекст модели", capability="context",
                                value=int(found.group(1)) if found else None, status=status)
     unsupported = any(w in text for w in _UNSUPPORTED_WORDS)
-    for name in (*TUNABLE_PARAMS, *_PARAM_ALIASES):
+    for name in (*TUNABLE_PARAMS, *_PARAM_ALIASES, "stream_options"):
         # Целым словом: «reasoning» не должен ловить «reasoning_content».
         if unsupported and re.search(rf"\b{re.escape(name)}\b", text):
             param = _PARAM_ALIASES.get(name, name)

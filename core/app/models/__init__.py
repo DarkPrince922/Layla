@@ -4,6 +4,14 @@ so Alembic autogeneration and metadata.create_all() see them all.
 from app.models.agent import AgentConfig, AgentRun, AgentStep, AgentWorker
 from app.models.audit import AuditLog
 from app.models.chat import Chat, Checkpoint, Message
+from app.models.code_control import (
+    CodeContextView,
+    CodeMemoryDigest,
+    CodePlan,
+    CodeRecovery,
+    CodeUsageCall,
+    CodeUsagePolicy,
+)
 from app.models.code_mcp import CodeMcpArtifact, CodeMcpAuth
 from app.models.code_schedule import CodeSchedule
 from app.models.code_session import CodeLeadEntry, CodeLeadTurn, CodeSessionArchive
@@ -46,10 +54,14 @@ __all__ = [
     "AuditLog",
     "Chat",
     "Checkpoint",
+    "CodeContextView",
     "CodeLeadEntry",
     "CodeLeadTurn",
     "CodeMcpArtifact",
     "CodeMcpAuth",
+    "CodeMemoryDigest",
+    "CodePlan",
+    "CodeRecovery",
     "CodeSchedule",
     "CodeSessionArchive",
     "CodeShellRun",
@@ -58,6 +70,8 @@ __all__ = [
     "CodeTeamMessage",
     "CodeTeamRequest",
     "CodeTranscript",
+    "CodeUsageCall",
+    "CodeUsagePolicy",
     "CodeWorker",
     "CodeWorkspace",
     "CodeWorkspaceCheckpoint",

@@ -4,7 +4,16 @@ from __future__ import annotations
 import asyncio
 from contextlib import aclosing
 
-from app.services import agent_git, code_hooks, code_lsp, code_runner, code_workers, code_workspace
+from app.services import (
+    agent_git,
+    code_hooks,
+    code_lsp,
+    code_plans,
+    code_runner,
+    code_usage,
+    code_workers,
+    code_workspace,
+)
 
 ACTIVE_CHATS: set[tuple[str, str]] = set()
 
@@ -20,11 +29,15 @@ async def run(provider, key, model, messages, root, permissions=None, *, runtime
     budget, continuation = {}, False
     binding = (runtime.owner_id, runtime.chat_id)
     acquired = False
+    usage_token = code_usage.activate(runtime, _unused.get("job_id")) if code_usage.ACTIVE.get() is None else None
     try:
         if binding in ACTIVE_CHATS:
             raise ValueError("В этом Code-чате уже работает ведущий агент")
         ACTIVE_CHATS.add(binding)
         acquired = True
+        if mode in ("auto", "confirm") and await code_plans.pending(runtime):
+            mode = workspace.mode = "plan"
+            yield {"mode": mode}
         async with asyncio.timeout(project_agent.MAX_SECONDS):
             for _transition in range(9):
                 current_root, current = await workspace.current()
@@ -49,6 +62,13 @@ async def run(provider, key, model, messages, root, permissions=None, *, runtime
                     runner=runner, lsp=code_lsp.Client(runtime.owner_id, cache_id, current_root),
                     workflow=code_hooks.Runtime(runner, permissions, mode=mode, session_id=runtime.chat_id))) as stream:
                     async for event in stream:
+                        if "mode_restart" in event:
+                            mode = event["mode_restart"]["mode"]
+                            messages = event["mode_restart"]["messages"]
+                            workspace.mode = mode
+                            continuation, restarted = True, True
+                            yield {"mode": mode}
+                            continue
                         if "workspace_restart" in event:
                             messages = event["workspace_restart"]
                             scope = event.get("tool_allowlist")
@@ -76,3 +96,5 @@ async def run(provider, key, model, messages, root, permissions=None, *, runtime
         finally:
             if acquired:
                 ACTIVE_CHATS.discard(binding)
+            if usage_token is not None:
+                code_usage.reset(usage_token)

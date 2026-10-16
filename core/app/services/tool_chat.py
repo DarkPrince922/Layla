@@ -119,6 +119,8 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
         async for item in grok_turn(provider, key, model, messages, tools, caps):
             yield item
         return
+    from app.services.code_usage import ACTIVE
+    code_accounting = ACTIVE.get() is not None
     native = _is_anthropic_native(provider)
     if native:
         system, conversation = anthropic_messages(messages)
@@ -151,6 +153,8 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
         }
         url = endpoint(provider, "chat/completions")
 
+    if code_accounting and not native and "stream_options" not in (caps.get("drop") or ()):
+        payload["stream_options"] = {"include_usage": True}
     if not tools:
         payload.pop("tools", None)
         payload.pop("tool_choice", None)
@@ -181,6 +185,7 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
         if "cache_control" not in drop and "claude" in model.lower():
             _mark_cache(payload["messages"])
 
+    usage = {}
     calls: dict[int, dict] = {}
     initial_inputs: dict[int, dict] = {}
     thinking: dict[int, dict] = {}
@@ -220,6 +225,19 @@ async def stream_turn(provider, key, model: str, messages: list[dict], tools: li
                     raise ProviderError(f"Провайдер прервал ответ ошибкой: {reason}" if reason
                                         else "Провайдер прервал ответ ошибкой",
                                         retryable=transient_payload(event.get("error") or event))
+                raw_usage = (event.get("message", {}).get("usage") or event.get("usage")) if native else event.get("usage")
+                if isinstance(raw_usage, dict) and code_accounting:
+                    if native:
+                        if "input_tokens" in raw_usage:
+                            usage["input_tokens"] = sum(raw_usage.get(k, 0) or 0 for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+                        if "output_tokens" in raw_usage:
+                            usage["output_tokens"] = raw_usage["output_tokens"]
+                    else:
+                        if "prompt_tokens" in raw_usage:
+                            usage["input_tokens"] = raw_usage["prompt_tokens"]
+                        if "completion_tokens" in raw_usage:
+                            usage["output_tokens"] = raw_usage["completion_tokens"]
+                    yield "usage", dict(usage)
                 if native:
                     kind = event.get("type")
                     index = event.get("index", 0)

@@ -52,15 +52,18 @@ from app.schemas.job import JobOut
 from app.services import (
     agent_git,
     audit,
+    code_context,
     code_hooks,
     code_lead,
     code_lsp,
     code_mcp,
+    code_plans,
     code_runner,
     code_session_transfer,
     code_sessions,
     code_state,
     code_teams,
+    code_usage,
     code_worker_cleanup,
     code_workers,
     code_workspace,
@@ -633,7 +636,11 @@ async def send_message(
     """
     # Подготовка вне стрима: проверка прав, модель, провайдер, ключ.
     async with maker() as session:
+        if body.approved_plan_id or body.resume_message_id:
+            raise HTTPException(422, "Утверждение плана и продолжение выполняются через /run")
         chat = await _owned_chat(session, user, chat_id)
+        if chat.domain == Domain.code and body.mode == "confirm":
+            raise HTTPException(422, "Подтверждение действий Code выполняется через /run")
         if chat.domain == Domain.code and (user.id, chat_id) in code_lead.ACTIVE_CHATS:
             raise HTTPException(status_code=409, detail="В этом Code-чате уже выполняется задача")
         root = None
@@ -709,6 +716,7 @@ async def send_message(
                 engine = code_lead.run if runtime is not None else project_agent.run
                 async with aclosing(engine(
                     provider, key, model, messages, root, permissions,
+                    mode=body.mode if runtime is not None else "auto",
                     extra=await run_in_threadpool(project_agent.project_rules, root),
                     runner=code_runner.Runner(user.id, chat.project_id, root),
                     git=await _git_agent(maker, user.id, root),
@@ -1056,12 +1064,33 @@ async def run_chat(
     root = _project_root(project)
     project_id = project.id
     mode = body.mode
+    approved_plan = None
+    resume_context = None
+    continued_plan = None
+    if body.approved_plan_id or body.resume_message_id:
+        if chat.domain != Domain.code or (body.approved_plan_id and body.resume_message_id):
+            raise HTTPException(422, "Решение плана/продолжение доступно только в Code")
+        control = code_state.Runtime(maker, owner_id, chat_id, project_id)
+        try:
+            if body.approved_plan_id:
+                approved_plan = await code_plans.approve(session, control, body.approved_plan_id, mode, None)
+            if body.resume_message_id:
+                resume_context = await code_context.validate_resume(session, control, body.resume_message_id)
+                if mode in ("auto", "confirm"):
+                    from app.models.code_control import CodePlan
+                    continued_plan = await session.scalar(select(CodePlan).where(CodePlan.execution_id == body.resume_message_id,
+                        CodePlan.owner_id == owner_id, CodePlan.chat_id == chat_id, CodePlan.project_id == project_id,
+                        CodePlan.status.in_(("interrupted", "executing"))).with_for_update())
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
     try:
         chat.model = model
         if not chat.title or chat.title == "Новый чат":
             chat.title = body.content[:80]
         user_message = Message(chat_id=chat_id, role="user", content=body.content,
                                created_at=datetime.now(UTC))
+        user_message.meta = {**({"approved_plan_id": approved_plan.id} if approved_plan else {}),
+                             **({"resumed_from": body.resume_message_id} if resume_context else {})}
         session.add(user_message)
         await session.flush()
         payload = await _build_messages(session, chat)
@@ -1070,6 +1099,15 @@ async def run_chat(
         session.add(assistant)
         await session.flush()
         msg_id = assistant.id
+        if approved_plan is not None:
+            approved_plan.status, approved_plan.execution_id, approved_plan.mode = "executing", msg_id, mode
+        if continued_plan is not None:
+            continued_plan.status, continued_plan.execution_id, continued_plan.mode = "executing", msg_id, mode
+        execution_plan = approved_plan or continued_plan
+        if execution_plan is not None:
+            payload.insert(0, {"role": "system", "content": "The user explicitly approved this immutable Code plan. Execution mode and persona permissions still apply. Other proposed/rejected plans are reference only. Inspect current files before acting. Plan ID: " + execution_plan.id + "\n" + execution_plan.content})
+        if resume_context:
+            payload.insert(0, {"role": "system", "content": "User requested continuation of the interrupted Code turn. Verify unknown effects before retrying. Saved reference:\n" + json.dumps(resume_context, ensure_ascii=False)})
         job = Job(owner_id=owner_id, domain=domain, kind="project.agent", title=body.content[:80],
                   chat_id=chat_id, request_id=body.request_id, status="queued",
                   created_at=datetime.now(UTC),
@@ -1092,6 +1130,9 @@ async def run_chat(
         raise
 
     async def worker(h: jobs.JobHandle) -> None:
+        nonlocal mode
+        runtime = code_state.Runtime(maker, owner_id, chat_id, project_id) if domain == "code" else None
+        usage_token = code_usage.activate(runtime, h.job.id) if runtime else None
         full: list[str] = []
         reasoning: list[str] = []
         tools: dict[str, dict] = {}
@@ -1109,6 +1150,8 @@ async def run_chat(
                 msg.content = "".join(full)
                 msg.meta = {"reasoning": "".join(reasoning), "tools": list(tools.values()), "error": error,
                             "mode": mode, "checkpoint": checkpointed, "todos": todos}
+                if runtime is not None:
+                    await code_context.save_recovery(output_session, runtime, msg, body.content)
                 if change:
                     await audit.record(output_session, actor=owner_id,
                                        action="project.agent." + change["operation"],
@@ -1143,6 +1186,15 @@ async def run_chat(
             rules = await run_in_threadpool(project_agent.project_rules, root)
             extra = "\n\n".join(part for part in (extra, rules) if part)
             messages = payload
+            if runtime is not None:
+                notes = (await runtime.read()).get("memory", {})
+                if len(notes) >= 20 or sum(len(note["content"]) for note in notes.values()) > 12000:
+                    try:
+                        await code_context.consolidate(runtime, prov, key, model, caps)
+                    except code_usage.BudgetExceeded:
+                        raise
+                    except ValueError:
+                        pass  # Concurrent note edits retain the original memory.
             if history.needed(messages, caps):
                 # История не влезает в бюджет контекста — старое сворачивается в сводку,
                 # а не отбрасывается. Не вышло — ниже просто уйдут последние сообщения.
@@ -1150,7 +1202,6 @@ async def run_chat(
             runner = code_runner.Runner(owner_id, project_id, root)
             git = await _git_agent(maker, owner_id, root)
             mcp = await _code_mcp(h.session, owner_id, persona_id, maker=maker, chat_id=chat_id, project_id=project_id) if domain == "code" else None
-            runtime = code_state.Runtime(maker, owner_id, chat_id, project_id) if domain == "code" else None
             workers = code_workers.Manager(runtime, root, permissions, provider_id=prov.id, model=model,
                                            mode=mode, caps=caps) if runtime is not None else None
             transcript = code_sessions.LeadTranscript(runtime, msg_id, user_message.id, workers.team,
@@ -1166,6 +1217,14 @@ async def run_chat(
                                                                              session_id=chat_id) if domain == "code" else None,
                                                  transcript=transcript, **({"job_id": h.job.id} if runtime else {}))) as stream:
                 async for event in stream:
+                    if "mode" in event and runtime is not None:
+                        mode = event["mode"]
+                        await h.set_result({"mode": mode})
+                        await persist()
+                        continue
+                    if "plan" in event and runtime is not None:
+                        await h.set_result({"plan": event["plan"]})
+                        continue
                     if "workspace" in event:
                         # A control notification must not consume the first
                         # partial-answer flush; the provider may pause next.
@@ -1173,6 +1232,8 @@ async def run_chat(
                         continue
                     if "delta" in event:
                         full.append(event["delta"])
+                        if runtime is not None and event["delta"] == project_agent.LIMIT_NOTE:
+                            error = "Достигнут лимит хода; выполненные действия сохранены. Можно продолжить."
                     elif "retract" in event:
                         # Ход повторяется — уже показанный кусок ответа убираем, чтобы не задвоился.
                         full[:] = [_drop_tail("".join(full), event["retract"])]
@@ -1238,6 +1299,16 @@ async def run_chat(
                                 await _audit_run(maker, owner_id, project_id, tool)
                     if time.monotonic() - last_persist >= 0.7:
                         await persist()
+            await persist()
+            if runtime is not None and mode == "plan" and not error and "".join(full).strip():
+                if len("".join(full)) > 30000:
+                    raise RuntimeError("План слишком длинный для утверждения; сократите его до 30000 символов")
+                async with maker() as plan_session:
+                    await plan_session.scalar(select(Chat).where(Chat.id == chat_id).with_for_update())
+                    plan = await code_plans.submit(plan_session, runtime, msg_id, body.content[:200], "".join(full))
+                    result = code_plans.public(plan)
+                    await plan_session.commit()
+                await h.set_result({"plan": result})
             await h.step("Ответ сохранён", progress=1.0)
         except asyncio.CancelledError:
             error = "Задача остановлена. Выполненные изменения сохранены."
@@ -1251,7 +1322,13 @@ async def run_chat(
                     # change у pending — это лишь превью, оно не было применено.
                     cleaned = {k: v for k, v in tool.items() if k != "change"}
                     tools[tool_id] = {**cleaned, "status": "error", "error": error or "Вызов прерван"}
-            await persist()
+            try:
+                await persist()
+                if runtime is not None:
+                    await code_plans.finish(runtime, msg_id, bool(error))
+            finally:
+                if usage_token is not None:
+                    code_usage.reset(usage_token)
 
     jobs.launch(maker, job.id, worker)
     return job

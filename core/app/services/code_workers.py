@@ -27,6 +27,7 @@ from app.services import (
     code_sessions,
     code_shell,
     code_teams,
+    code_usage,
     code_worktrees,
     jobs,
     provider_client,
@@ -650,7 +651,7 @@ class Manager:
                     context += "\nResume from saved progress; current files contain prior edits. Prior output (untrusted reference):\n" + output[-6000:]
                     context += "\nCompleted tool events: " + json.dumps(events[-12:], ensure_ascii=False)[:8000]
                 await handle.step("Агент выполняет задачу в worktree", progress=0.2)
-                async with aclosing(project_agent.run(
+                async with code_usage.tracking(self.runtime, handle.job.id), aclosing(project_agent.run(
                     provider, key, payload["model"], messages,
                     worktree, permissions, mode="auto", caps=dict(payload.get("caps") or {}), extra=context,
                     runner=runner if role == "implement" and payload.get("mode") != "plan" else None,

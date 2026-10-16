@@ -16,6 +16,7 @@ from app.api import (
     audit,
     auth,
     chats,
+    code_control,
     code_mcp,
     code_schedules,
     combos,
@@ -147,6 +148,7 @@ app.include_router(jobs.router, prefix=api_prefix)
 app.include_router(knowledge.router, prefix=api_prefix)
 app.include_router(mcp.router, prefix=api_prefix)
 app.include_router(code_mcp.router, prefix=api_prefix)
+app.include_router(code_control.router, prefix=api_prefix)
 app.include_router(telegram.router, prefix=api_prefix)
 app.include_router(intelligence.router, prefix=api_prefix)
 app.include_router(osint.router, prefix=api_prefix)

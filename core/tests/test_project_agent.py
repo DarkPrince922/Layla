@@ -11,6 +11,7 @@ import pytest
 from app.config import get_settings
 from app.services import (
     agent_git,
+    code_context,
     code_instructions,
     code_notebooks,
     code_output_styles,
@@ -199,7 +200,7 @@ async def test_agent_creates_reads_edits_deletes_and_persists(
         assert len(body["tools"]) == (
             len(project_agent.TOOLS) + len(agent_git.GIT_TOOLS)
                 + len(code_state.TOOLS) + len(code_notebooks.TOOLS) + len(code_workers.TOOLS) + len(code_teams.TOOLS) + len(code_workspace.TOOLS)
-                + len(code_instructions.TOOLS) + len(code_output_styles.TOOLS) + len(code_scheduler.TOOLS) - 1
+                + len(code_instructions.TOOLS) + len(code_output_styles.TOOLS) + len(code_scheduler.TOOLS) + len(code_context.TOOLS)
         )
         history = results(body, native)
         if round_number == 0:
