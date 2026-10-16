@@ -7,7 +7,7 @@ import { api } from "@/lib/api";
 type Run = { text: string; mode: "auto" | "confirm" | "plan" | "review"; planId?: string; resumeId?: string };
 type Plan = { id: string; title: string; content: string; status: string; feedback: string };
 type Usage = { max_tokens: number | null; max_usd: string | null; tokens_used: number; estimated_usd: string;
-  prices: { input?: string; output?: string }; calls: Record<string, number>; model: string | null; note: string };
+  prices: { input?: string; output?: string; web_search?: string }; calls: Record<string, number>; model: string | null; note: string };
 type Control = { plans: Plan[]; recovery: { message_id: string; interrupted: boolean; error?: string; goal: string } | null; usage: Usage };
 
 export function CodeControlPanel({ chatId, running, onRun }: { chatId: string; running: boolean; onRun: (args: Run) => Promise<void> }) {
@@ -20,18 +20,21 @@ export function CodeControlPanel({ chatId, running, onRun }: { chatId: string; r
   const [usd, setUsd] = useState("");
   const [inputPrice, setInputPrice] = useState("");
   const [outputPrice, setOutputPrice] = useState("");
+  const [searchPrice, setSearchPrice] = useState("10");
   const [dirty, setDirty] = useState(false);
   const usage = state.data?.usage;
   useEffect(() => {
     if (!usage || dirty) return;
     setTokens(usage.max_tokens?.toString() || ""); setUsd(usage.max_usd || "");
     setInputPrice(usage.prices.input || ""); setOutputPrice(usage.prices.output || "");
+    setSearchPrice(usage.prices.web_search || "10");
   }, [usage, dirty]);
   const reject = useMutation({ mutationFn: (id: string) => api.post(`${endpoint}/plans/${id}/reject`, { feedback }),
     onSuccess: () => { setFeedback(""); qc.invalidateQueries({ queryKey: ["code-control", chatId] }); } });
   const save = useMutation({ mutationFn: () => api.patch(`${endpoint}/usage`, {
     max_tokens: tokens ? Number(tokens) : null, max_usd: usd || null,
     input_usd_per_million: inputPrice || null, output_usd_per_million: outputPrice || null,
+    web_search_usd_per_thousand: searchPrice || "10",
   }), onSuccess: () => { setDirty(false); qc.invalidateQueries({ queryKey: ["code-control", chatId] }); } });
   const [starting, setStarting] = useState(false);
   async function run(args: Run) {
@@ -71,6 +74,7 @@ export function CodeControlPanel({ chatId, running, onRun }: { chatId: string; r
           <p className="text-neutral-500">Цены для модели {usage?.model || "чата"}, USD за 1 млн токенов. Их нужно задать вручную; это оценка по указанным ценам, а не счёт провайдера.</p>
           <label className="block">Вход<input type="number" min={0} step="any" value={inputPrice} onChange={e => { setDirty(true); setInputPrice(e.target.value); }} className="ml-2 rounded bg-ink-900 p-2" /></label>
           <label className="block">Выход<input type="number" min={0} step="any" value={outputPrice} onChange={e => { setDirty(true); setOutputPrice(e.target.value); }} className="ml-2 rounded bg-ink-900 p-2" /></label>
+          <label className="block">WebSearch, USD за 1000 поисков<input type="number" min={0} step="any" value={searchPrice} onChange={e => { setDirty(true); setSearchPrice(e.target.value); }} className="ml-2 rounded bg-ink-900 p-2" /></label>
           <p className="text-neutral-500">{usage?.note}</p>
           <button disabled={save.isPending} className="secondary-button !py-1.5 text-xs">Сохранить бюджет</button>
         </form>

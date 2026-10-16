@@ -53,8 +53,8 @@ TOOL_PARITY = {
     "TeamDeleteTool": ("partial", "team_delete", "Refuse cleanup while members run, serialize close/member reservation, retain mail/reports/transcripts/worktrees in archive and cascade on chat deletion. Structured graceful shutdown responses are available; archive team backend compatibility remains."),
     "TodoWriteTool": ("equivalent", "update_todos", "Checklist with progress and persisted message metadata."),
     "ToolSearchTool": ("partial", "mcp_search_tools", "Deferred MCP discovery; no unified deferred registry for every built-in/plugin tool."),
-    "WebFetchTool": ("partial", "web_fetch", "Public HTTPS text/HTML/JSON/XML with SSRF protections; no authenticated browser or PDF extraction."),
-    "WebSearchTool": ("equivalent", "web_search", "Public web research with references; search provider differs."),
+    "WebFetchTool": ("partial", "web_fetch", "Archive url+prompt contract, domain preflight, 89 preapproved URL rules, HTTPS/redirect policy, Markdown/model extraction, owner-scoped 15-minute cache and owned binary attachments. No PDF extraction or full managed permissions; Python Markdown converter differs."),
+    "WebSearchTool": ("partial", "web_search", "Archive native web_search_20250305 server tool, max_uses 8, domain filters, structured results, pause continuation and token/search-fee budget. Requires compatible native Messages provider; streamed subquery progress and Vertex/Foundry transports remain."),
 }
 
 SUBSYSTEMS = [

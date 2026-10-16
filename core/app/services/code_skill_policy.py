@@ -53,14 +53,19 @@ def parse(value):
             raise ValueError("allowed-tools: правило — строка до 500 символов")
         name, argument = parts(rule)
         if argument is not None:
-            if name not in {"Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep", "Bash", "Agent", "Task"}:
-                raise ValueError("Аргументы allowed-tools поддерживаются для файлов, Bash и Agent/Task")
+            if name not in {"Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep", "Bash", "Agent", "Task", "WebFetch"}:
+                raise ValueError("Аргументы allowed-tools поддерживаются для файлов, Bash, Agent/Task и WebFetch")
             if not argument.strip():
                 raise ValueError("allowed-tools: пустое ограничение аргументов")
             if name in {"Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep"}:
                 code_patterns.split_patterns(argument)
             if name == "Bash":
                 command_tokens(argument.removesuffix(":*"))
+            if name == "WebFetch":
+                from app.services.code_web_http import url
+                if not argument.startswith("domain:") or any(c in argument[7:] for c in "/?#"):
+                    raise ValueError("WebFetch: ожидается domain:имя.домена")
+                url("https://" + argument[7:])
     return value
 
 
@@ -103,6 +108,15 @@ def allows(group, name, arguments):
             aliases = {"Explore": "explore", "Plan": "explore", "general-purpose": "implement"}
             if role == aliases.get(argument, argument):
                 return True
+        elif tool == "WebFetch":
+            from urllib.parse import urlsplit
+
+            from app.services.code_web_http import url
+            try:
+                if urlsplit(url(arguments.get("url", ""))).hostname == urlsplit(url("https://" + argument[7:])).hostname:
+                    return True
+            except ValueError:
+                pass
         else:
             paths = arguments.get("paths") or [arguments.get("path", ".")]
             if isinstance(paths, list) and paths and all(isinstance(path, str) and code_patterns.matches(

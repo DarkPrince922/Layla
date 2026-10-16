@@ -7,8 +7,10 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Literal
 
+import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 
@@ -33,6 +35,7 @@ from app.services import (
     code_state,
     code_teams,
     code_usage,
+    code_web_tools,
     code_workers,
     code_workspace,
     files,
@@ -840,6 +843,12 @@ async def run(
     if budget is not None and budget.get("skill_model"):
         model, caps = code_skills.execution_model(provider, model, caps, budget["skill_model"], budget.get("skill_effort"))
     available = list(permitted_tools(permissions))
+    archive_web = None
+    if (runtime is not None or worker_context) and (permissions is None or "files.read" in permissions):
+        archive_web = await run_in_threadpool(code_web_tools.Runtime, root,
+            scope=getattr(runtime, "owner_id", None) or getattr(getattr(code_usage.ACTIVE.get(), "runtime", None), "owner_id", None))
+        replacements = {tool["function"]["name"]: tool for tool in code_web_tools.TOOLS}
+        available = [replacements.get(tool["function"]["name"], tool) for tool in available]
     instruction_book = (code_instructions.Book(root)
                         if (runtime is not None or worker_context)
                         and (permissions is None or "files.read" in permissions) else None)
@@ -925,6 +934,12 @@ async def run(
         + (("\n\n" + extra.strip()) if extra.strip() else "")
         + (("\n\n" + workflow_note) if workflow_note else "")
     )
+    if archive_web is not None:
+        prompt += ("\nCode uses the supplied archive's WebSearch/WebFetch contracts. "
+                   "web_fetch requires url and an extraction prompt. Use authenticated MCP tools for private URLs. "
+                   "After web_search, include relevant real URLs as Markdown links in a Sources section. "
+                   "Do not invent sources or treat provider failures as an empty successful search. "
+                   "Use the current year for recent information: " + str(datetime.now(UTC).year) + ".")
     if caps.get("tools") is False:
         prompt += NO_TOOLS_NOTE
     if instruction_book is not None:
@@ -1654,17 +1669,34 @@ async def run(
                              "status": "running"}
                     yield {"tool": event}
                     try:
-                        outcome = await code_research.execute(name, arguments)
-                    except (ValidationError, ValueError, RuntimeError) as exc:
+                        if archive_web is not None and name in code_web_tools.SCHEMAS:
+                            code_web_tools.SCHEMAS[name].model_validate(arguments)
+                            if ask is not None and (name == "web_search" or not code_web_tools.code_web_http.preapproved(arguments["url"])):
+                                pending = {**event, "status": "pending", "command": name + " " + event["path"]}
+                                yield {"tool": pending}
+                                decision = await ask(pending)
+                                if decision == "approve_all":
+                                    ask = None
+                                elif decision != "approve":
+                                    raise ValueError("Пользователь отклонил веб-запрос")
+                            outcome = await archive_web.call(name, arguments, provider, key, model, caps)
+                        else:
+                            outcome = await code_research.execute(name, arguments)
+                    except (ValidationError, ValueError, RuntimeError, OSError, httpx.HTTPError, TimeoutError) as exc:
                         outcome = {"error": str(exc)[:1500]}
                     final = {**event, "status": "error" if "error" in outcome else "done"}
                     if "error" in outcome:
                         final["error"] = str(outcome["error"])
                     else:
-                        final["note"] = "Публичный источник прочитан"
+                        final["note"] = "Нужен отдельный запрос к redirect URL" if outcome.get("type") == "redirect" else "Публичный источник прочитан"
+                    if outcome.get("code_attachments"):
+                        final["code_attachments"] = outcome["code_attachments"]
                     yield {"tool": final}
+                    serialized = json.dumps(outcome, ensure_ascii=False)
+                    if archive_web is None or name not in code_web_tools.SCHEMAS:
+                        serialized = serialized[:60_000]
                     conversation.append({"role": "tool", "tool_call_id": call["id"],
-                                         "content": json.dumps(outcome, ensure_ascii=False)[:60_000],
+                                         "content": serialized,
                                          "is_error": "error" in outcome})
                     continue
                 if name in mcp_names and name in allowed_names:

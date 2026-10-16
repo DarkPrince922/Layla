@@ -3,8 +3,8 @@
 ## Область и ветки
 
 Работа ограничена Code. Другие домены не исследовать и не менять.
-Текущий запрос пользователя: добавить рекомендованные встроенные
-`/simplify`, `/skillify`, `/remember`; плагины отложены.
+Текущий запрос пользователя: взять WebSearch/WebFetch именно из архива;
+плагины отложены.
 Успешный CI отдельного этапа не означает полного соответствия архиву.
 
 - PR #39: `codex/code-workspace-shell-teams` — worktree editor/terminal/Git/LSP,
@@ -17,11 +17,22 @@
   `0ebe728ef23121ac76d0947a3af8cda6b8ce6f78`, основан на PR #41.
 - PR #43: `codex/code-rules-skills`, commit
   `175484730fa9dea43c5964f38741887c7bb8e94c`, основан на PR #42.
-- Текущая ветка: `codex/code-bundled-skills`, основана на PR #43.
-  Новый PR должен использовать `codex/code-rules-skills` как base.
+- PR #44: `codex/code-bundled-skills`, commit
+  `b11007671a7d283410dfd579e69567de0ad2c2bc`, основан на PR #43.
+- Текущая ветка: `codex/code-archive-web-tools`, основана на PR #44.
+  Новый PR должен использовать `codex/code-bundled-skills` как base.
   Не переносить эти изменения прямо с main без зависимых PR.
 
 ## Реализовано сейчас
+
+Ведущий Code и Code-воркеры используют адаптацию архивных WebSearch/WebFetch.
+Поиск вызывает серверный Anthropic `web_search_20250305`, до восьми поисков,
+с фильтрами доменов и отдельным учётом поисковых сборов в общем бюджете.
+Совместимый native Messages provider обязателен; Bing fallback не используется.
+WebFetch требует url+prompt: preflight, HTTPS/redirect policy, HTML→Markdown,
+отдельная модель, 15-минутный кеш владельца и собственные binary attachments.
+Контракт и пробелы: [CODE_WEB_TOOLS.md](CODE_WEB_TOOLS.md).
+Новая зависимость — markdownify; пересобрать Core/frontend, новой миграции нет.
 
 Три встроенных Code skills поставляются с Core и доступны без файлов проекта:
 `/simplify` (до трёх read-only ревьюеров или самостоятельная проверка),
@@ -79,8 +90,11 @@ pytest -q tests/test_code_*.py tests/test_project_agent.py tests/test_history.py
 ```
 
 В PR #42 прошли 260 Code/shared-provider тестов, в PR #43 — 294.
-Текущий этап добавляет 14 сценариев встроенных skills. Все 308 Code/shared-provider
-тестов проходят локально, включая реальные API/Jobs, read-only memory policy,
+В текущем этапе все 329 Code/shared-provider тестов проходят локально,
+включая 21 новую проверку архивных WebSearch/WebFetch. Ruff, TypeScript,
+ESLint и загрузка 89 web-правил из собранного wheel проходят.
+В PR #44 добавлены 14 сценариев встроенных skills. Все 308 Code/shared-provider
+тестов того этапа прошли локально и в CI, включая реальные API/Jobs, read-only memory policy,
 создание skill с ограничением записи и три независимых review-воркера.
 Ruff, TypeScript, ESLint и чтение трёх skills/шаблона из собранного wheel проходят;
 полный прогон, упаковку, PostgreSQL и frontend дополнительно проверяет CI.
