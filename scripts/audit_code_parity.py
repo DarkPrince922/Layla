@@ -54,7 +54,7 @@ TOOL_PARITY = {
     "TodoWriteTool": ("equivalent", "update_todos", "Checklist with progress and persisted message metadata."),
     "ToolSearchTool": ("partial", "mcp_search_tools", "Deferred MCP discovery; no unified deferred registry for every built-in/plugin tool."),
     "WebFetchTool": ("partial", "web_fetch", "Archive url+prompt contract, domain preflight, 89 preapproved URL rules, HTTPS/redirect policy, Markdown/model extraction, owner-scoped 15-minute cache and owned binary attachments. No PDF extraction or full managed permissions; Python Markdown converter differs."),
-    "WebSearchTool": ("partial", "web_search", "Archive native web_search_20250305 server tool, max_uses 8, domain filters, structured results, pause continuation and token/search-fee budget. Requires compatible native Messages provider; streamed subquery progress and Vertex/Foundry transports remain."),
+    "WebSearchTool": ("partial", "web_search", "User-selected Tavily Basic backend using the existing encrypted integration key, up to 8 excerpts/URLs, exclusive domain filters, Confirm and shared fee-only budget. Archive native helper is retained but not dispatched. Native streaming progress and Vertex/Foundry transports remain; Tavily is an intentional backend substitution."),
 }
 
 SUBSYSTEMS = [

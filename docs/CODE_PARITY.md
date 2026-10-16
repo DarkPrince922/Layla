@@ -46,7 +46,7 @@ python scripts/audit_code_parity.py /path/to/extracted/claude-code
 | Формат skills | `.layla/skills`, `.claude/skills`, `.agents/skills`; nested Markdown/SKILL.md и legacy commands | Namespaces, conditional paths, приоритет предков, снимки и worktree-aware picker |
 | Активация skills | `invoke_skill`, `/имя аргументы`, YAML metadata, literal args, dynamic shell context | Флаги invocation, ограничения аргументов tools, enabled model/effort, fork/resume; sandbox/Confirm/checkpoints |
 | Встроенные skills | `/simplify`, `/skillify`, `/remember`, поставляются вместе с Core | До трёх read-only ревьюеров, создание только в `.layla/skills/**`, обзор памяти без записи, проектный override и wheel-проверка |
-| Архивный WebSearch | `web_search_20250305`, до 8 поисков, allowed/blocked domains, ссылки и общий бюджет с поисковыми сборами | Только совместимый Messages provider; потоковый progress и Vertex/Foundry остаются |
+| WebSearch | По запросу пользователя: Tavily Basic, до 8 результатов, allowed/blocked domains, ссылки и общий бюджет с поисковыми сборами | Общий ключ интеграций владельца; независимо от LLM. Это явная замена архивного поискового backend; [контракт](CODE_WEB_TOOLS.md) |
 | Архивный WebFetch | URL + prompt, preflight, Markdown/модель, 15-минутный кеш, redirects и вложения | [CODE_WEB_TOOLS.md](CODE_WEB_TOOLS.md); PDF extraction и managed permissions остаются |
 | Fork skill | `context: fork` через обычные worktree-воркеры | Сквозной API-тест, сбор результата главным агентом и сохранение scope после resume |
 | Command hooks | Начало запроса, pre/post tool, ошибка, Stop, завершение | Реальные fixture-скрипты в отдельной копии, deny/update/context, Confirm и отсутствие команд в Plan/Review |

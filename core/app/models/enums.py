@@ -41,6 +41,7 @@ class McpTransport(str, enum.Enum):
 
 
 class IntelProvider(str, enum.Enum):
+    tavily = "tavily"
     shodan = "shodan"
     virustotal = "virustotal"
     securitytrails = "securitytrails"

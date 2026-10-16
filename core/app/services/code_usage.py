@@ -32,6 +32,7 @@ class Policy(BaseModel):
     input_usd_per_million: Decimal | None = Field(default=None, ge=0, le=10**5, decimal_places=6)
     output_usd_per_million: Decimal | None = Field(default=None, ge=0, le=10**5, decimal_places=6)
     web_search_usd_per_thousand: Decimal = Field(default=Decimal(10), ge=0, le=10**5, decimal_places=6)
+    tavily_usd_per_thousand: Decimal | None = Field(default=None, ge=0, le=10**5, decimal_places=6)
 
 
 def cost(prices, inputs, outputs):
@@ -63,6 +64,8 @@ async def configure(runtime, args, provider_id, model):
             await runtime._authorize(session)
             row = await session.get(CodeUsagePolicy, runtime.chat_id)
             prices = dict(row.prices or {})
+            if args.tavily_usd_per_thousand is not None:
+                prices["tavily|basic"] = {"input": "0", "output": "0", "web_search": str(args.tavily_usd_per_thousand)}
             if (args.input_usd_per_million is None) != (args.output_usd_per_million is None):
                 raise ValueError("Укажите обе цены или оставьте обе пустыми")
             if args.input_usd_per_million is not None:
@@ -98,27 +101,34 @@ async def snapshot(runtime, provider_id=None, model=None):
                 "tokens_used": policy.tokens_used if policy else 0,
                 "estimated_usd": str(Decimal(policy.cost_used) / 10**6) if policy else "0",
                 "prices": prices, "calls": dict(calls), "model": model, "provider_id": provider_id,
-                "note": "USD — оценка по заданным ценам; WebSearch по умолчанию 10 USD за 1000 поисков плюс токены. Без usage сохраняется полный резерв. Цена токенов отсутствующих моделей не включена в стоимость."}
+                "tavily_usd_per_thousand": (policy.prices or {}).get("tavily|basic", {}).get("web_search", "8") if policy else "8",
+                "note": "USD — оценка по заданным ценам. Tavily Basic: по умолчанию 8 USD за 1000 запросов, цена настраивается отдельно. Без usage сохраняется резерв. Цена токенов отсутствующих моделей не включена в стоимость."}
 
 
 class Account:
     def __init__(self, runtime, job_id=None):
         self.runtime, self.job_id = runtime, job_id
 
-    async def reserve(self, provider_id, model, messages, tools, caps, *, server_searches=0):
+    async def reserve(self, provider_id, model, messages, tools, caps, *, server_searches=0, external_search=False):
+        if external_search and (provider_id, model, server_searches) != ("tavily", "basic", 1):
+            raise ValueError("Некорректный резерв внешнего поиска")
         await ensure(self.runtime)
         # UTF-8 bytes plus protocol overhead deliberately overestimate common
         # tokenizers. Actual reported usage reconciles the reservation later.
         inputs = len(json.dumps({"messages": messages, "tools": tools}, ensure_ascii=False).encode()) + 128 * (len(messages) + 1)
-        if server_searches:
+        if server_searches and not external_search:
             inputs = max(inputs, caps.get("context") or 200000)
         outputs = caps.get("max_output") or 8192
         outputs = max(outputs, caps.get("reasoning_budget") or 0)
+        if external_search:
+            inputs = outputs = 0
         for _ in range(12):
             async with self.runtime.maker() as session:
                 await self.runtime._authorize(session)
                 row = await session.get(CodeUsagePolicy, self.runtime.chat_id)
                 prices = dict((row.prices or {}).get(f"{provider_id}|{model}", {}))
+                if external_search:
+                    prices = {"input": "0", "output": "0", "web_search": "8", **prices}
                 has_prices = bool(prices)
                 if server_searches:
                     prices.update(searches=server_searches, reserved_searches=server_searches,

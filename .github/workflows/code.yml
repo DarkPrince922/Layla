@@ -67,4 +67,4 @@ jobs:
           DATABASE_URL: postgresql+asyncpg://layla:ci-only-password@localhost:5432/code_test
           LAYLA_SECRET_KEY: ci-only-encryption-key
       - name: Verify Code and shared provider contracts
-        run: pytest -q tests/test_code_*.py tests/test_project_agent.py tests/test_history.py tests/test_mcp.py tests/test_provider_resilience.py tests/test_provider_keys.py
+        run: pytest -q tests/test_code_*.py tests/test_project_agent.py tests/test_history.py tests/test_mcp.py tests/test_provider_resilience.py tests/test_provider_keys.py tests/test_intel_api.py tests/test_intel_mcp.py
