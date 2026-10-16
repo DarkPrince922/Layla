@@ -8,7 +8,7 @@ from pathlib import PurePosixPath
 
 import yaml
 
-from app.services import code_markdown, code_patterns, code_skill_policy, files
+from app.services import code_bundled_skills, code_markdown, code_patterns, code_skill_policy, files
 
 DIRECTORIES = (".layla/skills", ".claude/skills", ".agents/skills", ".layla/commands", ".claude/commands")
 SEGMENT = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}"
@@ -78,10 +78,11 @@ def tool_names(value) -> set[str] | None:
 
 
 class Skill:
-    def __init__(self, name: str, path: str, document: dict, *, base="", source="project"):
+    def __init__(self, name: str, path: str, document: dict, *, base="", source="project", bundled_files=None):
         self.name, self.path, self.sha256, self.raw = name, path, document["sha256"], document["content"]
         self.meta, self.body = frontmatter(self.raw)
         self.base, self.source = base, source
+        self.bundled_files = bundled_files
         self.paths = code_patterns.split_patterns(self.meta.get("paths"))
         if "name" in self.meta and (not isinstance(self.meta["name"], str) or len(self.meta["name"]) > 200):
             raise ValueError("name: нужна строка до 200 символов")
@@ -166,6 +167,14 @@ class Skill:
         return expanded
 
     def resources(self, root, file=None):
+        if self.bundled_files is not None:
+            prefix = self.path.removesuffix("SKILL.md")
+            if file is None:
+                return {"files": [prefix + name for name in self.bundled_files], "truncated": False}
+            name = "/".join(files._parts(file))
+            if name not in self.bundled_files:
+                raise ValueError("Встроенный ресурс skill не найден: " + name)
+            return {"path": prefix + name, **code_bundled_skills.document(self.bundled_files[name])}
         directory = str(PurePosixPath(self.path).parent)
         if file is not None:
             parts = files._parts(file)
@@ -225,12 +234,18 @@ class Skill:
 
 class Catalog:
     """Snapshot each ancestor on first access; never reread through read_skill."""
-    def __init__(self, root: str, path="."):
+    def __init__(self, root: str, path=".", *, bundled=False):
         self.root, self.path = root, path
         self.skills: dict[str, Skill] = {}
         self.errors: dict[str, str] = {}
         self.variants, self.scanned, self.observed = {}, set(), set()
         self.bytes, self.visits = 0, 0
+        self.bundled = {}
+        if bundled:
+            for name, resources in code_bundled_skills.documents():
+                documents = dict(resources)
+                self.bundled[name] = Skill(name, "bundled://layla/" + name + "/SKILL.md",
+                    code_bundled_skills.document(documents["SKILL.md"]), source="bundled", bundled_files=documents)
         self.discover(path)
 
     def _base(self, base):
@@ -316,6 +331,9 @@ class Catalog:
                     p[len(value.base) + 1:] if value.base else p, value.paths)
                     for p in self.observed if not value.base or p.startswith(value.base + "/"))
                 self.skills[name] = value
+        for name, skill in self.bundled.items():
+            if name not in chosen:
+                self.skills[name] = skill
         return self.public()
 
     def public(self, *, model=False):

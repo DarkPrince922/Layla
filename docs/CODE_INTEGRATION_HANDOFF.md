@@ -3,7 +3,8 @@
 ## Область и ветки
 
 Работа ограничена Code. Другие домены не исследовать и не менять.
-Текущий запрос пользователя: rules и skills; плагины отложены.
+Текущий запрос пользователя: добавить рекомендованные встроенные
+`/simplify`, `/skillify`, `/remember`; плагины отложены.
 Успешный CI отдельного этапа не означает полного соответствия архиву.
 
 - PR #39: `codex/code-workspace-shell-teams` — worktree editor/terminal/Git/LSP,
@@ -14,11 +15,23 @@
 - PR #41: `codex/code-mcp-scheduler`, commit `1cf870a7ca1645498daffec1ad2af76f5719853d`, основан на PR #40.
 - PR #42: `codex/code-plans-context-budgets`, commit
   `0ebe728ef23121ac76d0947a3af8cda6b8ce6f78`, основан на PR #41.
-- Текущая ветка: `codex/code-rules-skills`, основана на PR #42.
-  Новый PR должен использовать `codex/code-plans-context-budgets` как base.
+- PR #43: `codex/code-rules-skills`, commit
+  `175484730fa9dea43c5964f38741887c7bb8e94c`, основан на PR #42.
+- Текущая ветка: `codex/code-bundled-skills`, основана на PR #43.
+  Новый PR должен использовать `codex/code-rules-skills` как base.
   Не переносить эти изменения прямо с main без зависимых PR.
 
 ## Реализовано сейчас
+
+Три встроенных Code skills поставляются с Core и доступны без файлов проекта:
+`/simplify` (до трёх read-only ревьюеров или самостоятельная проверка),
+`/skillify` (создание проектного skill только внутри `.layla/skills/**`, шаблон
+в ресурсах), `/remember` (обзор памяти и правил, без изменения/удаления).
+Последние два требуют явного slash-вызова. Проектная версия имеет приоритет
+в своей области, ошибочная версия не заменяется молча встроенной. Ресурсы
+читаются только из manifest пакета; CI проверяет их из собранного wheel.
+UI помечает встроенные skills. Новых зависимостей, миграции БД или версии
+sandbox нет; для установки нужна пересборка Core/frontend.
 
 Rules: bounded brace/extglob/negative glob sets, settings exclusions,
 Markdown-aware includes/comments, независимые условные bindings общего include,
@@ -65,10 +78,12 @@ Code-планировщик: cron/разовая дата, timezone/DST, durable
 pytest -q tests/test_code_*.py tests/test_project_agent.py tests/test_history.py tests/test_mcp.py
 ```
 
-В PR #42 прошли 260 Code/shared-provider тестов. Текущий этап добавляет 34
-сценария rules/skills и расширяет fork/resume тесты. Все 294 Code/shared-provider
-теста проходят локально, включая 68 focused rules/skills/hooks сценариев;
-полный прогон дополнительно проверяет CI.
+В PR #42 прошли 260 Code/shared-provider тестов, в PR #43 — 294.
+Текущий этап добавляет 14 сценариев встроенных skills. Все 308 Code/shared-provider
+тестов проходят локально, включая реальные API/Jobs, read-only memory policy,
+создание skill с ограничением записи и три независимых review-воркера.
+Ruff, TypeScript, ESLint и чтение трёх skills/шаблона из собранного wheel проходят;
+полный прогон, упаковку, PostgreSQL и frontend дополнительно проверяет CI.
 Есть настоящий stdio MCP fixture и запуск
 расписания через реальные API/БД/Jobs с тестовым provider stream. Проверены
 upgrade с `0031`, отсутствие ORM drift и downgrade с сохранением пользователя.

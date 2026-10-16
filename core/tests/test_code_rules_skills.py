@@ -296,7 +296,7 @@ async def test_catalog_api_path_and_slash_path_follow_nested_project(client, db_
     async with db_sessionmaker() as session:
         root = Path((await session.get(Project, project["id"])).path)
     write(root, "src/.layla/skills/check.md", "NESTED_SELECTED")
-    assert not (await client.get(f"/api/projects/{project['id']}/skills")).json()["skills"]
+    assert not [skill for skill in (await client.get(f"/api/projects/{project['id']}/skills")).json()["skills"] if skill["source"] == "project"]
     result = await client.get(f"/api/projects/{project['id']}/skills", params={"path": "src"})
     assert result.status_code == 200 and result.json()["skills"][0]["base"] == "src"
     assert (await client.get(f"/api/projects/{project['id']}/skills", params={"path": "../outside"})).status_code == 422

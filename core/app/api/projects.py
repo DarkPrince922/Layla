@@ -43,7 +43,7 @@ async def project_skills(project_id: str, user: User = Depends(get_current_user)
                           path: str = Query(default=".", max_length=4096)) -> dict:
     project = await _bound_project(session, user, project_id, workspace_id, chat_id)
     try:
-        catalog = await run_in_threadpool(code_skills.Catalog, _project_root(project), path)
+        catalog = await run_in_threadpool(code_skills.Catalog, _project_root(project), path, bundled=True)
     except (ValueError, OSError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"skills": [skill.public() for skill in catalog.skills.values()], "errors": catalog.errors}

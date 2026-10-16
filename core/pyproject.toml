@@ -52,4 +52,4 @@ extend-immutable-calls = ["fastapi.Depends", "fastapi.Query"]
 include = ["app*"]
 
 [tool.setuptools.package-data]
-"app.services" = ["prompts/*.md"]
+"app.services" = ["prompts/*.md", "prompts/skills/*.md"]
