@@ -43,8 +43,9 @@ class Group(BaseModel):
 
 class Invoke(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    name: str = Field(pattern="^" + code_skills.NAME + "$")
+    name: str = Field(max_length=647, pattern="^" + code_skills.NAME + "$")
     args: str = Field(default="", max_length=12000)
+    path: str | None = Field(default=None, max_length=4096)
 
 
 TOOL = {"type": "function", "function": {"name": "invoke_skill", "parameters": Invoke.model_json_schema(),
@@ -73,8 +74,8 @@ def validate_hooks(value, source: str, directory=".") -> list[dict]:
     return records
 
 
-def load(root):
-    catalog = code_skills.Catalog(root)
+def load(root, path="."):
+    catalog = code_skills.Catalog(root, path)
     merged = {}
     disabled = False
     settings = []
@@ -155,10 +156,12 @@ def decision(event, output, exit_code, *, truncated=False):
 
 
 class Runtime:
-    def __init__(self, runner, permissions=None, *, mode="auto", session_id="", extra_hooks=None):
+    def __init__(self, runner, permissions=None, *, mode="auto", session_id="", extra_hooks=None, initial_path="."):
         self.runner, self.permissions, self.mode = runner, permissions, mode
         self.session_id = session_id or runner.project_id
         self.catalog = None
+        self.initial_path = initial_path
+        self.dynamic_started = set()
         self.hooks = []
         self.extra_hooks = extra_hooks or []
         self.load_error = None
@@ -172,7 +175,7 @@ class Runtime:
         if self.permissions is not None and "files.read" not in self.permissions:
             return ""
         try:
-            self.catalog, self.hooks, self.disabled = await run_in_threadpool(load, self.runner.root)
+            self.catalog, self.hooks, self.disabled = await run_in_threadpool(load, self.runner.root, self.initial_path)
             for extra in self.extra_hooks:
                 self.register(extra["hooks"], extra["source"], extra["directory"])
         except (ValueError, OSError) as exc:
@@ -184,7 +187,7 @@ class Runtime:
         )
 
     def tools(self):
-        return [TOOL] if self.catalog is not None and self.catalog.skills else []
+        return [TOOL] if self.catalog is not None else []
 
     def register(self, hooks, source, directory):
         records = validate_hooks(hooks, source, directory)
@@ -207,11 +210,15 @@ class Runtime:
             raise ValueError("Каталог skills недоступен")
         if len(self.activations) >= 20:
             raise ValueError("Не больше 20 активаций skills за запуск")
-        token = args.name, args.args
+        if args.path is not None:
+            self.catalog.discover(args.path)
+        skill = self.catalog.get(args.name, user=user)
+        token = skill.path, args.args
         if token in self.activations:
             raise ValueError("Этот skill с этими аргументами уже активирован в текущем запуске")
-        skill = self.catalog.get(args.name)
-        text = skill.render(args.args, self.session_id, user=user)
+        skill.render(args.args, self.session_id, user=user, dynamic=[""] * len(code_skills.code_markdown.commands(skill.body)))
+        dynamic = skill.dynamic(args.args, self.session_id)
+        text = skill.render(args.args, self.session_id, user=user, dynamic=[""] * len(dynamic) if dynamic else None)
         hooks = skill.meta.get("hooks", {})
         directory = str(PurePosixPath(skill.path).parent)
         validate_hooks(hooks, skill.path, directory)
@@ -224,7 +231,9 @@ class Runtime:
         return {"name": skill.name, "path": skill.path, "instructions": text,
                 "allowed_tools": sorted(skill.allowed) if skill.allowed is not None else None,
                 "fork": skill.meta.get("context") == "fork", "role": roles[role],
-                "hooks": hooks, "directory": directory}
+                "hooks": hooks, "directory": directory, "tool_rules": skill.rules,
+                "dynamic": dynamic, "skill": skill, "model": skill.meta.get("model", "inherit"),
+                "effort": skill.meta.get("effort")}
 
     async def fire(self, event: str, data: dict, ask=None):
         outcome = {"blocked": False, "reason": "", "context": "", "updated_input": None}

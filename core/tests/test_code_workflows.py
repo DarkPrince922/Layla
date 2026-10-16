@@ -33,8 +33,8 @@ def hooks(root, event, command, **extra):
     write(root, ".layla/hooks.json", json.dumps({"hooks": {event: [{"matcher": "*", "hooks": [{"type": "command", "command": command, **extra}]}]}}))
 
 
-def call(name, **arguments):
-    return {"id": name, "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}
+def call(tool_name, **arguments):
+    return {"id": tool_name, "type": "function", "function": {"name": tool_name, "arguments": json.dumps(arguments)}}
 
 
 def copied_sandbox(monkeypatch, tmp_path):
@@ -252,10 +252,14 @@ async def test_fork_skill_uses_real_worker_and_preserves_tool_scope_on_resume(cl
     project = (await client.post("/api/projects", json={"name": "Fork skill"})).json()
     provider = (await client.post("/api/providers", json={"name": "Mock", "kind": "openai_compatible",
         "base_url": "http://mock/v1", "default_model": "m", "active": True})).json()
+    configured = await client.put(f"/api/providers/{provider['id']}/models", json={"models": [
+        {"name": "m", "enabled": True}, {"name": "fast", "enabled": True}]})
+    assert configured.status_code == 200
     chat = (await client.post("/api/chats", json={"domain": "code", "project_id": project["id"], "model": "m"})).json()
     async with db_sessionmaker() as session:
         root = Path((await session.get(Project, project["id"])).path)
-    write(root, ".layla/skills/inspect.md", "---\ncontext: fork\nagent: " + role + "\nallowed-tools: [Read]\nhooks:\n  Stop:\n    - hooks:\n        - type: command\n          command: \"printf 'verified-child'\"\n---\nRead the target file and report: $ARGUMENTS")
+    write(root, ".layla/skills/inspect.md", "---\ncontext: fork\nmodel: fast\neffort: high\nagent: " + role + "\nallowed-tools: [Read(target.txt), Skill]\nhooks:\n  Stop:\n    - hooks:\n        - type: command\n          command: \"printf 'verified-child'\"\n---\nRead the target file and report: $ARGUMENTS")
+    write(root, ".layla/skills/tighten.md", "---\nallowed-tools: [Read(target.txt)]\n---\nRead only the target file")
     write(root, "target.txt", "independent input")
     requests, _ = copied_sandbox(monkeypatch, tmp_path)
     turns = {"lead": 0, "child": 0}
@@ -265,8 +269,11 @@ async def test_fork_skill_uses_real_worker_and_preserves_tool_scope_on_resume(cl
         role = "lead" if "agent_start" in names else "child"
         turns[role] += 1
         if role == "child":
-            assert names == {"read_file"}
-            if turns[role] == 1:
+            assert _m == "fast" and _kwargs["caps"]["reasoning_effort"] == "high"
+            assert names in ({"read_file", "invoke_skill"}, {"read_file"})
+            if "invoke_skill" in names:
+                yield "tool_calls", [call("invoke_skill", name="tighten")]
+            elif turns[role] <= 2 and "independent input" not in conversation[-1]["content"]:
                 yield "tool_calls", [call("read_file", path="target.txt")]
             else:
                 assert "independent input" in conversation[-1]["content"]
@@ -292,12 +299,14 @@ async def test_fork_skill_uses_real_worker_and_preserves_tool_scope_on_resume(cl
     manager = code_workers.Manager(runtime, str(root), provider_id=provider["id"], model="m")
     workers = await manager.list()
     assert len(workers) == 1 and workers[0]["role"] == ("explore" if role == "Explore" else role) and workers[0]["status"] == "done"
-    assert turns == {"lead": 2, "child": 2}
+    assert turns == {"lead": 2, "child": 3}
     from app.models.code_worker import CodeWorker
 
     async with db_sessionmaker() as session:
         row = await session.get(CodeWorker, workers[0]["id"])
         assert row.payload["tool_allowlist"] == ["read_file"]
+        assert row.payload["model"] == "fast" and row.payload["caps"]["reasoning_effort"] == "high"
+        assert row.payload["tool_policies"] == [["Read(target.txt)", "Skill"], ["Read(target.txt)"]]
         row.status = "interrupted"
         await session.commit()
     turns["child"] = 0

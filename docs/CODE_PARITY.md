@@ -43,8 +43,8 @@ python scripts/audit_code_parity.py /path/to/extracted/claude-code
 | MCP соединения и файлы | Пул между сообщениями, reconnect, notifications/list_changed, авторизованные binary downloads | Настоящий stdio-сервер сохраняет счётчик между ходами; отмена закрывает SDK task, ошибочный RPC не повторяется |
 | Расписания Code | Cron/дата, timezone, режим, pause/resume/delete в чате и агентские cron tools | Lease, идемпотентный Job, busy retry, missed-run coalescing, изоляция владельца/проекта/worktree и миграции |
 | MCP совместимость | Имена до 64 символов, различение коллизий, текст и JSON | Проверки длинных имён, серверов с одинаковыми именами и текстовых ответов |
-| Формат skills | `.layla/skills`, `.claude/skills`, `.agents/skills`; Markdown и `name/SKILL.md` | Порядок приоритета, no-follow файловые операции |
-| Активация skills | `invoke_skill`, `/имя аргументы`, YAML metadata и буквальная подстановка | Флаги user/model invocation, `allowed-tools` сужает инструменты, метаданные не дают прав персоны |
+| Формат skills | `.layla/skills`, `.claude/skills`, `.agents/skills`; nested Markdown/SKILL.md и legacy commands | Namespaces, conditional paths, приоритет предков, снимки и worktree-aware picker |
+| Активация skills | `invoke_skill`, `/имя аргументы`, YAML metadata, literal args, dynamic shell context | Флаги invocation, ограничения аргументов tools, enabled model/effort, fork/resume; sandbox/Confirm/checkpoints |
 | Fork skill | `context: fork` через обычные worktree-воркеры | Сквозной API-тест, сбор результата главным агентом и сохранение scope после resume |
 | Command hooks | Начало запроса, pre/post tool, ошибка, Stop, завершение | Реальные fixture-скрипты в отдельной копии, deny/update/context, Confirm и отсутствие команд в Plan/Review |
 | Ограничения hooks | Snapshot, `once`, `disableAllHooks`, бюджеты, остановка | Повреждённый/смешанный JSON блокирует pre-hook; Stop не зацикливает модель |
@@ -125,9 +125,10 @@ language server; отсутствие поддержки возвращаетс�
    остановка, stdin REPL и условный PowerShell уже реализованы.
 3. LSP-конфигурация через плагины, произвольные языковые пакеты, автоматическая
    доставка диагностики между ходами и внешний IDE bridge.
-4. Остальные события и типы hooks, жизненный цикл плагинов, model overrides,
-   динамические/встроенные/удалённые skills, полная совместимость правил проекта,
-   пространства имён и встроенные slash-команды.
+4. Остальные события и типы hooks, жизненный цикл плагинов, встроенные/удалённые
+   skills, полная архивная семантика разрешений, глобальные/managed источники
+   правил и встроенные slash-команды. Nested/conditional discovery, namespaces,
+   ограниченные model/effort overrides и динамический контекст реализованы.
 5. Полная совместимость plan-file/permission-proposal схемы и настройки агента.
    Сохранённый план, утверждение/отклонение и переход к выполнению реализованы.
 6. Архивные jitter/auto-expiry/session-only/teammate scheduling, remote triggers,
