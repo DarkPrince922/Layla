@@ -269,6 +269,7 @@ export interface FileChange {
 }
 
 export interface ToolEvent {
+  attachments?: { id: string; mime_type: string; size: number; url: string }[];
   id: string;
   name: string;
   workspace_id?: string | null;

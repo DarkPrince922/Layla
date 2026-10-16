@@ -4119,13 +4119,13 @@
       "archive_tool": "MCPTool",
       "status": "partial",
       "layla": "mcp__*",
-      "notes": "Dynamic discovery, owner/persona binding and text/JSON results; no full persistent session and notifications lifecycle."
+      "notes": "Dynamic discovery, owner/persona binding, pooled cross-turn sessions, notifications/catalog refresh, explicit reconnect, text/JSON and owned binary files. No automatic mutating replay, sampling or elicitation."
     },
     {
       "archive_tool": "McpAuthTool",
-      "status": "missing",
-      "layla": "",
-      "notes": "Need interactive MCP OAuth and credential lifecycle."
+      "status": "partial",
+      "layla": "mcp_auth, Code OAuth settings",
+      "notes": "Explicit browser OAuth PKCE, discovery, CIMD/DCR/pre-registered clients, encrypted credentials, persisted registration, serialized refresh and revocation. No automatic scope step-up or complete archive auth compatibility."
     },
     {
       "archive_tool": "NotebookEditTool",
@@ -4149,7 +4149,7 @@
       "archive_tool": "ReadMcpResourceTool",
       "status": "partial",
       "layla": "mcp_read_resource",
-      "notes": "Text resource reads with bounded output; binary resources are described without content."
+      "notes": "Bounded text resource reads and owned binary artifact downloads; no multimodal inline model input or full archive attachment rendering."
     },
     {
       "archive_tool": "RemoteTriggerTool",
@@ -4159,9 +4159,9 @@
     },
     {
       "archive_tool": "ScheduleCronTool",
-      "status": "missing",
-      "layla": "",
-      "notes": "Need durable scheduled jobs and scheduler UI."
+      "status": "partial",
+      "layla": "cron_create/list/update/delete, Code schedule panel",
+      "notes": "Durable cron/one-shot prompts, IANA timezone/DST, leases, idempotent normal Job admission, busy retry, missed-run coalescing, pause/delete and owner/chat/project/worktree binding. Missing archive jitter, auto-expiry, session-only tasks and teammate routing."
     },
     {
       "archive_tool": "SendMessageTool",
@@ -4339,7 +4339,7 @@
         "plugins/",
         "services/plugins/"
       ],
-      "notes": "Need plugin manifest/install/update/enable lifecycle and skill/tool/hook registration."
+      "notes": "Deferred by user for this stage. Need plugin manifest/install/update/enable lifecycle and skill/tool/hook registration."
     },
     {
       "id": "lsp",
@@ -4401,18 +4401,18 @@
       "archive_paths": [
         "services/mcp/"
       ],
-      "notes": "Dynamic Code tools and resources; auth, templates, notifications, reconnect and long-lived sessions remain."
+      "notes": "Code-only OAuth PKCE/discovery/CIMD/DCR/manual clients, encrypted durable registration/tokens, leased refresh/revocation; pooled cross-turn SDK sessions, templates, notifications/catalog refresh, reconnect and owned binary files. Missing sampling, elicitation, prompts UI, automatic scope step-up and archive/protocol lifecycle equivalence."
     },
     {
       "id": "scheduled_tasks",
-      "status": "missing",
+      "status": "partial",
       "archive_paths": [
         "utils/cron.ts",
         "utils/cronScheduler.ts",
         "utils/cronTasks.ts",
         "utils/cronTasksLock.ts"
       ],
-      "notes": "Need scheduler, leases, missed-run behavior, cancellation and persistence."
+      "notes": "Durable Code cron/one-shot prompts, timezone/DST, leased idempotent normal Job admission, busy retries, coalesced missed runs, pause/delete UI and owner/chat/project/worktree binding. Missing jitter, recurring-task auto-expiry, session-only tasks, teammate routing and remote wake service."
     },
     {
       "id": "browser_integration",

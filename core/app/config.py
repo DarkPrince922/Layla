@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     # --- General ---
     env: str = Field(default="dev", alias="LAYLA_ENV")
     public_host: str = Field(default="localhost", alias="LAYLA_PUBLIC_HOST")
+    public_url: str = Field(default="", alias="LAYLA_PUBLIC_URL")
     # E-mail админа, создаваемого при первой установке (если пользователей ещё нет).
     # Домен .app — валидный (в отличие от .local), почта туда не шлётся: это лишь
     # логин. Замените на свой реальный e-mail через LAYLA_ADMIN_EMAIL.

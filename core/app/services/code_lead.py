@@ -70,5 +70,9 @@ async def run(provider, key, model, messages, root, permissions=None, *, runtime
             await transcript.finish(messages, failed=True)
         raise
     finally:
-        if acquired:
-            ACTIVE_CHATS.discard(binding)
+        try:
+            if mcp is not None and hasattr(mcp, "aclose"):
+                await mcp.aclose()
+        finally:
+            if acquired:
+                ACTIVE_CHATS.discard(binding)

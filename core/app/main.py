@@ -16,6 +16,8 @@ from app.api import (
     audit,
     auth,
     chats,
+    code_mcp,
+    code_schedules,
     combos,
     designs,
     engagements,
@@ -74,12 +76,18 @@ async def lifespan(_app: FastAPI):
     purger = asyncio.create_task(purge_forever(SessionLocal), name="layla-trash-purge")
     from app.services.telegram_runtime import run_forever
     telegram_task = asyncio.create_task(run_forever(SessionLocal), name="layla-telegram-supervisor")
+    from app.services.code_scheduler import run_forever as schedule_forever
+    scheduler_task = asyncio.create_task(schedule_forever(SessionLocal), name="layla-code-scheduler")
     try:
         yield
     finally:
+        scheduler_task.cancel()
+        await asyncio.gather(scheduler_task, return_exceptions=True)
         purger.cancel()
         from app.services.jobs import shutdown
         await shutdown()
+        from app.services.code_mcp import close_all as close_mcp
+        await close_mcp()
         telegram_task.cancel()
         await asyncio.gather(telegram_task, return_exceptions=True)
 
@@ -130,6 +138,7 @@ app.include_router(providers.router, prefix=api_prefix)
 app.include_router(personas.router, prefix=api_prefix)
 app.include_router(models.router, prefix=api_prefix)
 app.include_router(chats.router, prefix=api_prefix)
+app.include_router(code_schedules.router, prefix=api_prefix)
 app.include_router(projects.router, prefix=api_prefix)
 app.include_router(sandbox.router, prefix=api_prefix)
 app.include_router(git.router, prefix=api_prefix)
@@ -137,6 +146,7 @@ app.include_router(designs.router, prefix=api_prefix)
 app.include_router(jobs.router, prefix=api_prefix)
 app.include_router(knowledge.router, prefix=api_prefix)
 app.include_router(mcp.router, prefix=api_prefix)
+app.include_router(code_mcp.router, prefix=api_prefix)
 app.include_router(telegram.router, prefix=api_prefix)
 app.include_router(intelligence.router, prefix=api_prefix)
 app.include_router(osint.router, prefix=api_prefix)
