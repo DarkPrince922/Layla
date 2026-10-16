@@ -33,7 +33,7 @@ export function CodeSkillPicker({ projectId, chatId, workspaceId, disabled, onCh
       {skills.map(skill => <button key={skill.name} disabled={disabled} onClick={() => { onChoose(skill.name, scope); setOpen(false); }} className="block w-full rounded-lg p-2 text-left hover:bg-ink-700/50">
         <span className="text-neutral-200">/{skill.name} <span className="text-neutral-500">{skill.argument_hint}</span></span>
         {skill.description && <span className="mt-1 block text-neutral-500">{skill.description}</span>}
-        <span className="mt-1 block text-neutral-500">{skill.base || "."}{skill.paths?.length ? ` · ${skill.paths.join(", ")}` : ""}</span>
+        <span className="mt-1 block text-neutral-500">{skill.source === "bundled" ? "Встроенный" : skill.base || "."}{skill.paths?.length ? ` · ${skill.paths.join(", ")}` : ""}</span>
         {skill.context === "fork" && <span className="mt-1 block text-accent-300">Отдельный воркер</span>}
       </button>)}
       {data.data && Object.entries(data.data.errors).map(([name, error]) => <p key={name} className="p-2 text-amber-300">{name}: {error}</p>)}

@@ -39,6 +39,24 @@ jobs:
           cache: pip
           cache-dependency-path: core/pyproject.toml
       - run: pip install -e ".[dev]"
+      - name: Verify packaged Code skills
+        run: |
+          pip wheel --no-deps --wheel-dir "$RUNNER_TEMP/code-skill-wheel" .
+          cd "$RUNNER_TEMP"
+          python - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+          wheel = next((Path(os.environ['RUNNER_TEMP']) / 'code-skill-wheel').glob('layla_core-*.whl'))
+          sys.path.insert(0, str(wheel))
+          from app.services import code_bundled_skills
+          assert code_bundled_skills.__file__.startswith(str(wheel))
+          skills = {name: dict(resources) for name, resources in code_bundled_skills.documents()}
+          assert set(skills) == {'simplify', 'skillify', 'remember'}
+          assert all('SKILL.md' in resources for resources in skills.values())
+          assert 'templates/SKILL.md' in skills['skillify']
+          print('Bundled Code skills and template load from the wheel')
+          PY
       - name: Migrate PostgreSQL and check ORM drift
         run: alembic upgrade head && alembic check
         env:

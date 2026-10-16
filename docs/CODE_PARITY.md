@@ -45,6 +45,7 @@ python scripts/audit_code_parity.py /path/to/extracted/claude-code
 | MCP совместимость | Имена до 64 символов, различение коллизий, текст и JSON | Проверки длинных имён, серверов с одинаковыми именами и текстовых ответов |
 | Формат skills | `.layla/skills`, `.claude/skills`, `.agents/skills`; nested Markdown/SKILL.md и legacy commands | Namespaces, conditional paths, приоритет предков, снимки и worktree-aware picker |
 | Активация skills | `invoke_skill`, `/имя аргументы`, YAML metadata, literal args, dynamic shell context | Флаги invocation, ограничения аргументов tools, enabled model/effort, fork/resume; sandbox/Confirm/checkpoints |
+| Встроенные skills | `/simplify`, `/skillify`, `/remember`, поставляются вместе с Core | До трёх read-only ревьюеров, создание только в `.layla/skills/**`, обзор памяти без записи, проектный override и wheel-проверка |
 | Fork skill | `context: fork` через обычные worktree-воркеры | Сквозной API-тест, сбор результата главным агентом и сохранение scope после resume |
 | Command hooks | Начало запроса, pre/post tool, ошибка, Stop, завершение | Реальные fixture-скрипты в отдельной копии, deny/update/context, Confirm и отсутствие команд в Plan/Review |
 | Ограничения hooks | Snapshot, `once`, `disableAllHooks`, бюджеты, остановка | Повреждённый/смешанный JSON блокирует pre-hook; Stop не зацикливает модель |
@@ -125,7 +126,7 @@ language server; отсутствие поддержки возвращаетс�
    остановка, stdin REPL и условный PowerShell уже реализованы.
 3. LSP-конфигурация через плагины, произвольные языковые пакеты, автоматическая
    доставка диагностики между ходами и внешний IDE bridge.
-4. Остальные события и типы hooks, жизненный цикл плагинов, встроенные/удалённые
+4. Остальные события и типы hooks, жизненный цикл плагинов, остальные встроенные/удалённые
    skills, полная архивная семантика разрешений, глобальные/managed источники
    правил и встроенные slash-команды. Nested/conditional discovery, namespaces,
    ограниченные model/effort overrides и динамический контекст реализованы.

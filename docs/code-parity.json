@@ -4173,7 +4173,7 @@
       "archive_tool": "SkillTool",
       "status": "partial",
       "layla": "list_skills, read_skill, invoke_skill, /namespace:name",
-      "notes": "Nested ancestor-scoped snapshots, conditional paths, namespaces and supporting files; user/model flags, literal args, argument-aware narrowing tool policies persisted across fork/resume, run-scoped hooks, enabled current-provider model/effort selection and sandbox dynamic command context with Confirm/checkpoints. Missing global/managed/plugin/bundled/remote skills and full archive permission-grant semantics."
+      "notes": "Nested ancestor-scoped snapshots, conditional paths, namespaces and supporting files; user/model flags, literal args, argument-aware narrowing tool policies persisted across fork/resume, run-scoped hooks, enabled current-provider model/effort selection and sandbox dynamic command context with Confirm/checkpoints. Core ships adapted simplify/skillify/remember and a template, with project precedence, read-only memory review and skill-only writes. Missing global/managed/plugin/remote sources, remaining bundled skills and full archive permission-grant semantics."
     },
     {
       "archive_tool": "SleepTool",
@@ -4355,7 +4355,7 @@
       "archive_paths": [
         "skills/"
       ],
-      "notes": "Nested project SKILL.md/Markdown and legacy commands, conditional path activation, namespaces, resources, shared read/invoke snapshots and worktree/path picker. Literal args, constrained tools, scoped enabled model/effort, sandbox dynamic context, run hooks and fork/resume persistence. Global/managed/plugin/remote/bundled sources and full archive permissions remain."
+      "notes": "Nested project SKILL.md/Markdown and legacy commands, conditional path activation, namespaces, resources, shared read/invoke snapshots and worktree/path picker. Literal args, constrained tools, scoped enabled model/effort, sandbox dynamic context, run hooks and fork/resume persistence. Packaged simplify/skillify/remember prompts and template, project override without silent invalid fallback, manifest-only resource reads and wheel CI. Global/managed/plugin/remote sources, remaining archive bundled skills and full archive permissions remain."
     },
     {
       "id": "project_instructions",
@@ -4497,7 +4497,7 @@
         "entrypoints/",
         "replLauncher.tsx"
       ],
-      "notes": "Project /skill and /namespace:name commands, nested legacy .layla/.claude commands, user-invocable checks and worktree/path Code picker. Built-in command suite and CLI/remote entrypoints remain."
+      "notes": "Project /skill and /namespace:name commands, nested legacy .layla/.claude commands, user-invocable checks and worktree/path Code picker. Adapted bundled /simplify, /skillify and /remember are available without project files. Remaining built-in command suite and CLI/remote entrypoints remain."
     },
     {
       "id": "output_styles",

@@ -75,7 +75,7 @@ def validate_hooks(value, source: str, directory=".") -> list[dict]:
 
 
 def load(root, path="."):
-    catalog = code_skills.Catalog(root, path)
+    catalog = code_skills.Catalog(root, path, bundled=True)
     merged = {}
     disabled = False
     settings = []
