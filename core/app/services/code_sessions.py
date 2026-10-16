@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select, update
 
 from app.models.chat import Message
+from app.models.code_control import CodeContextView
 from app.models.code_session import CodeLeadEntry, CodeLeadTurn
 from app.models.code_team import CodeTranscript
 from app.services import code_teams
@@ -134,7 +135,11 @@ class LeadTranscript:
                     continue
                 entries = list(await session.scalars(select(CodeLeadEntry).where(
                     CodeLeadEntry.turn_id == turn.id).order_by(CodeLeadEntry.sequence)))
-                messages = [entry.message for entry in entries]
+                view = await session.get(CodeContextView, turn.id)
+                messages = ([*view.messages, *[entry.message for entry in entries if entry.sequence >= view.next_sequence]]
+                            if view else [entry.message for entry in entries])
+                if view:
+                    replay = []  # This compact view already covers previous turns.
                 if turn.provider_id != self.provider_id or turn.model != self.model:
                     messages = [{key: value for key, value in item.items() if key in
                         ("role", "content", "tool_calls", "tool_call_id", "is_error")} for item in messages]
@@ -181,7 +186,15 @@ class LeadTranscript:
                 session.add(CodeLeadEntry(turn_id=self.turn_id, sequence=self.sequence + index, message=message))
             for row in rows:
                 row.delivered = True
+            if getattr(self, "compacted", False):
+                view = await session.get(CodeContextView, self.turn_id)
+                if view is None:
+                    view = CodeContextView(turn_id=self.turn_id)
+                    session.add(view)
+                view.next_sequence = self.sequence + len(batch)
+                view.messages = [deepcopy(item) for item in conversation if item.get("role") != "system"]
             await session.commit()
+            self.compacted = False
             self.sequence += len(batch)
             del conversation.pending[:count]
             if incoming:
@@ -231,12 +244,17 @@ async def compact_items(session, rows):
 
 @asynccontextmanager
 async def recording(transcript, conversation):
+    from app.services.code_context import RECORDER
+    token = RECORDER.set(transcript)
     failed = True
     try:
         yield
         failed = False
     finally:
-        if transcript is not None:
-            await transcript.flush(conversation)
-            if hasattr(transcript, "finish"):
-                await transcript.finish(conversation, failed)
+        try:
+            if transcript is not None:
+                await transcript.flush(conversation)
+                if hasattr(transcript, "finish"):
+                    await transcript.finish(conversation, failed)
+        finally:
+            RECORDER.reset(token)

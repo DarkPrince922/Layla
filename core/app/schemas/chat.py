@@ -47,6 +47,8 @@ class ChatDetail(ChatOut):
 class SendMessageRequest(BaseModel):
     content: str = Field(min_length=1, max_length=100_000)
     request_id: str | None = Field(default=None, min_length=1, max_length=64)
+    approved_plan_id: str | None = Field(default=None, min_length=1, max_length=36)
+    resume_message_id: str | None = Field(default=None, min_length=1, max_length=36)
     model: str | None = None  # выбранная модель; закрепляется за чатом
     provider_id: str | None = None  # явный провайдер из пикера (имена моделей могут совпадать)
     # auto — агент сам применяет изменения; confirm — каждое изменение ждёт «Применить»;

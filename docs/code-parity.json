@@ -4051,9 +4051,9 @@
     },
     {
       "archive_tool": "EnterPlanModeTool",
-      "status": "partial",
-      "layla": "plan chat mode",
-      "notes": "The user can select Plan; the agent cannot change the mode itself."
+      "status": "equivalent",
+      "layla": "enter_plan_mode, Plan mode",
+      "notes": "The Code lead can switch to read-only Plan mid-turn. Remaining batch calls are not executed, the prompt/tools are rebuilt and call/round budgets remain. A pending plan prevents ordinary Auto messages from bypassing approval."
     },
     {
       "archive_tool": "EnterWorktreeTool",
@@ -4064,8 +4064,8 @@
     {
       "archive_tool": "ExitPlanModeTool",
       "status": "partial",
-      "layla": "plan chat mode",
-      "notes": "No structured submitted plan and acceptance transition."
+      "layla": "submit_plan, Code plan decision panel",
+      "notes": "Immutable durable plan, explicit user approve Auto/Confirm or reject with feedback, owner/chat/project/worktree and fresh-instruction checks, idempotent Job admission. Confirmation and persona permissions remain. Missing full archive permission-proposal schema and plan-file semantics."
     },
     {
       "archive_tool": "ExitWorktreeTool",
@@ -4279,7 +4279,7 @@
         "utils/conversationRecovery.ts",
         "utils/crossProjectResume.ts"
       ],
-      "notes": "Durable chats and append-only worker messages/tool results, independent of compaction; resume repairs unknown tool outcomes and preserves worktrees. Lead journal replay, fresh persona/provider adaptation, atomic mail acknowledgement, rollback invalidation, full-tool compaction and atomic protocol trimming are implemented. JSON/JSONL selected-branch import, isolated fork and export are implemented; full attribution and compact/hook state remain."
+      "notes": "Durable chats and append-only worker messages/tool results, independent of compaction; resume repairs unknown tool outcomes and preserves worktrees. Lead journal replay, fresh persona/provider adaptation, atomic mail acknowledgement, rollback invalidation, full-tool compaction and atomic protocol trimming are implemented. JSON/JSONL selected-branch import, isolated fork and export are implemented; validated recovery checkpoints, explicit continuation, compact replay views and journal recall are implemented; full attribution and archive hook/attachment state remain."
     },
     {
       "id": "context_compaction",
@@ -4289,7 +4289,7 @@
         "context/",
         "context.ts"
       ],
-      "notes": "History summaries and tool-result shrinking; no archive compaction/overflow policy equivalence."
+      "notes": "History summaries, tool-result shrinking, Code in-run protocol-group compaction, durable compact replay views and raw journal context_search. Current request/instructions and recent rounds remain; fail with saved progress if still too large. Missing full archive overflow/continuation and attachment semantics."
     },
     {
       "id": "file_checkpoints",
@@ -4308,7 +4308,7 @@
         "services/extractMemories/",
         "services/autoDream/"
       ],
-      "notes": "Project LAYLA.md and durable Code-chat notes; missing extraction, consolidation, team memory and dream loop."
+      "notes": "Project instructions and durable Code-chat notes with non-destructive model consolidation, fingerprint invalidation, preserved source notes and automatic consolidation above a threshold. Missing cross-chat extraction, team/global/managed memory and dream loop."
     },
     {
       "id": "agent_orchestration",
@@ -4514,7 +4514,7 @@
         "cost-tracker.ts",
         "costHook.ts"
       ],
-      "notes": "Provider capability adaptation exists; archive usage/cost/budget tracking is not matched."
+      "notes": "Code per-chat shared token/USD admission budget, CAS reservations for lead/workers/retries/summaries, OpenAI/Anthropic usage reconciliation and conservative unknown charges. User-configured per-model prices, persistent ledger and UI; missing invoice parity, provider-specific cache tariffs and full archive account/billing policies."
     },
     {
       "id": "proactive_assistant",

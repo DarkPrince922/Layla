@@ -13,6 +13,7 @@ import { CodeWorkerPanel, type CodeWorker } from "@/components/CodeWorkerPanel";
 import { CodeTeamPanel } from "@/components/CodeTeamPanel";
 import { CodeLeadPanel } from "@/components/CodeLeadPanel";
 import { CodeSkillPicker } from "@/components/CodeSkillPicker";
+import { CodeControlPanel } from "@/components/CodeControlPanel";
 import { CodeSchedulePanel } from "@/components/CodeSchedulePanel";
 import { confirmAction } from "@/components/ConfirmDialog";
 
@@ -71,6 +72,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
   const generation = useRef(0);
   const request = useRef<{ content: string; chat: string; id: string } | null>(null);
   const applied = useRef(new Set<string>());
+  const notifiedModes = useRef(new Set<string>());
   const scroll = useRef<HTMLDivElement>(null);
   const { data: personas = [] } = useQuery({ queryKey: ["personas"], queryFn: () => api.get<Persona[]>("/personas") });
   const { data: models = [] } = useQuery({ queryKey: ["models"], queryFn: () => api.get<ModelInfo[]>("/models") });
@@ -171,6 +173,12 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
   }
   useEffect(() => { const saved = read(modeKey); if (isMode(saved)) setMode(saved); }, [modeKey]);
   function pickMode(next: Mode) { setMode(next); remember(modeKey, next); }
+  useEffect(() => {
+    if (domain === "code" && job?.result?.mode === "plan" && !notifiedModes.current.has(job.id)) {
+      notifiedModes.current.add(job.id);
+      setMode("plan"); remember(modeKey, "plan");
+    }
+  }, [domain, job?.id, job?.result?.mode, modeKey]);
   // Выбор роли подставляет её умолчания (режим и модель), если они заданы в настройках.
   function pickPersona(id: string) {
     setPersonaId(id);
@@ -220,7 +228,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queueTick, ready, chatId, loading, running, sending]);
 
-  async function send(override?: { text: string; mode: Mode }) {
+  async function send(override?: { text: string; mode: Mode; planId?: string; resumeId?: string }) {
     const content = (override?.text ?? input).trim();
     const runMode = override?.mode ?? mode;
     if (!content || running || loading || !ready || lock.current) return;
@@ -234,8 +242,9 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
         id = chat.id;
         if (version === generation.current) { setChatId(id); remember(scope, id); }
       }
-      if (!request.current || request.current.content !== content || request.current.chat !== id) request.current = { content, chat: id, id: newRequestId() };
-      await api.post<Job>(`/chats/${id}/run`, { content, model, provider_id: selected?.provider_id, request_id: request.current.id, mode: runMode });
+      const signature = JSON.stringify([content, runMode, override?.planId, override?.resumeId]);
+      if (!request.current || request.current.content !== signature || request.current.chat !== id) request.current = { content: signature, chat: id, id: newRequestId() };
+      await api.post<Job>(`/chats/${id}/run`, { content, model, provider_id: selected?.provider_id, request_id: request.current.id, mode: runMode, approved_plan_id: override?.planId, resume_message_id: override?.resumeId });
       if (!override) {
         remember(`${scope}:draft:${chatId || "new"}`, "");
         if (version === generation.current) setInput("");
@@ -349,7 +358,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
   const last = messages.at(-1);
   // Ход прерван (ошибка, остановка, лимит шагов или длины) — можно продолжить с того же места.
   const interrupted = !running && !sending && last?.role === "assistant" && (!!last.meta?.error || /«продолжай»/.test(last.content.slice(-200)));
-  const planReady = !running && !sending && last?.role === "assistant" && last.meta?.mode === "plan" && !last.meta?.error && !!last.content.trim();
+  const planReady = domain !== "code" && !running && !sending && last?.role === "assistant" && last.meta?.mode === "plan" && !last.meta?.error && !!last.content.trim();
   const reviewReady = !running && !sending && last?.role === "assistant" && last.meta?.mode === "review" && !last.meta?.error && !!last.content.trim();
   const [rulesOpen, setRulesOpen] = useState(false);
   return <div className="chat-panel flex h-full min-h-0 min-w-0 flex-col">
@@ -397,7 +406,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
       <button aria-label="Новый чат" onClick={() => select(null)} disabled={sending || !ready} className="icon-button"><Plus className="h-5 w-5" /></button>
     </div>
     <div ref={scroll} className="chat-scroll min-h-0 flex-1 space-y-5 overflow-y-auto p-5">
-      {domain === "code" && chatId && ready && <CodeWorkState key={`${scope}:${chatId}`} chatId={chatId} scope={scope} running={running} canApply={mode === "auto" || mode === "confirm"} onResume={text => send({ text, mode })} />}
+      {domain === "code" && chatId && ready && <CodeWorkState key={`${scope}:${chatId}`} chatId={chatId} scope={scope} running={running} canApply={mode === "auto" || mode === "confirm"} onResume={text => send({ text, mode })} onControlRun={args => { pickMode(args.mode); return send(args); }} />}
       {history.isError || detail.isError ? <p role="alert" className="text-red-300">Не удалось загрузить историю. <button onClick={() => { history.refetch(); detail.refetch(); }} className="underline">Повторить</button></p> : !ready || (chatId && detail.isPending) ? <p className="text-sm text-neutral-500">Загрузка истории…</p> : !messages.length && <div className="chat-welcome mx-auto my-12 max-w-sm text-center"><div className="empty-orb mx-auto mb-5"><Bot className="h-7 w-7" /></div><h2 className="text-xl font-semibold">Что сделаем сегодня?</h2><p className="mt-3 text-sm leading-relaxed text-neutral-400">Опишите задачу. Можно переключаться между разделами и создавать новые чаты — работа продолжится, история и файлы сохранятся.</p></div>}
       {messages.map(m => m.meta?.kind === "summary" ? <details key={m.id} className="rounded-xl border border-dashed border-ink-600 px-4 py-2 text-xs text-neutral-400">
         <summary className="flex cursor-pointer list-none items-center gap-2 [&::-webkit-details-marker]:hidden"><FoldVertical className="h-3.5 w-3.5 shrink-0 text-accent-300" /><span className="flex-1">Контекст сжат · {m.meta.count || "старые"} сообщений выше модель видит как сводку</span><ChevronDown className="h-3.5 w-3.5" /></summary>
@@ -455,7 +464,7 @@ export function ChatPanel({ domain, projectId, onFileChange, onOpenFile, onProje
 type DurableTask = { id: string; subject: string; description: string; status: "pending" | "in_progress" | "completed"; blocked: boolean; blocked_by: string[]; owner?: string | null; result: string };
 type CodeQuestion = { id: string; status: "pending" | "answered"; questions: { header: string; question: string; options: { label: string; description: string }[]; multi_select: boolean }[]; answers: Record<string, string[]> };
 
-function CodeWorkState({ chatId, scope, running, canApply, onResume }: { chatId: string; scope: string; running: boolean; canApply: boolean; onResume: (text: string) => Promise<void> }) {
+function CodeWorkState({ chatId, scope, running, canApply, onResume, onControlRun }: { chatId: string; scope: string; running: boolean; canApply: boolean; onResume: (text: string) => Promise<void>; onControlRun: (args: { text: string; mode: Mode; planId?: string; resumeId?: string }) => Promise<void> }) {
   const state = useQuery({
     queryKey: ["code-state", scope, chatId, running],
     queryFn: () => api.get<{ tasks: DurableTask[]; memory: Record<string, { content: string }>; questions?: CodeQuestion[]; workers?: CodeWorker[] }>(`/chats/${chatId}/code-state`),
@@ -471,6 +480,7 @@ function CodeWorkState({ chatId, scope, running, canApply, onResume }: { chatId:
   const subjects = new Map(tasks.map(task => [task.id, task.subject]));
   return <div className="space-y-3">
     <CodeLeadPanel key={`${scope}:${chatId}`} chatId={chatId} scope={scope} running={running} canApply={canApply} />
+    <CodeControlPanel key={`control:${chatId}`} chatId={chatId} running={running} onRun={onControlRun} />
     <CodeSchedulePanel key={`schedules:${chatId}`} chatId={chatId} />
     <CodeTeamPanel key={`${scope}:${chatId}`} chatId={chatId} scope={scope} running={running} canApply={canApply} />
     <CodeWorkerPanel workers={workers} chatId={chatId} scope={scope} parentRunning={running} canApply={canApply} refresh={() => state.refetch()} onResume={onResume} />

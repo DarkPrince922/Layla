@@ -18,12 +18,12 @@ def test_scheduler_and_mcp_upgrade_downgrade_preserve_existing_data(tmp_path):
     migrate("upgrade", "head")
     with sqlite3.connect(path) as db:
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert {"code_schedules", "code_mcp_auth", "code_mcp_artifacts"} <= tables
+        assert {"code_schedules", "code_mcp_auth", "code_mcp_artifacts", "code_plans", "code_recovery", "code_memory_digests", "code_usage_policies", "code_usage_calls", "code_context_views"} <= tables
         assert db.execute("SELECT email FROM users WHERE id='existing-owner'").fetchone() == ("keep@example.com",)
         assert {row[2] for row in db.execute("PRAGMA foreign_key_list(code_schedules)")} >= {"users", "chats", "projects", "jobs"}
     migrate("check")
     migrate("downgrade", "0031_code_session_archive")
     with sqlite3.connect(path) as db:
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert not {"code_schedules", "code_mcp_auth", "code_mcp_artifacts"} & tables
+        assert not {"code_schedules", "code_mcp_auth", "code_mcp_artifacts", "code_plans", "code_recovery", "code_memory_digests", "code_usage_policies", "code_usage_calls", "code_context_views"} & tables
         assert db.execute("SELECT email FROM users WHERE id='existing-owner'").fetchone()
